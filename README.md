@@ -119,10 +119,11 @@ Transforms are **non-destructive**: a layer keeps its original pixels and `x/y/w
 ## Tests
 
 ```bash
-npm test              # all three
+npm test              # all four
 npm run test:shim     # browser shim covers every ag-psd import
 npm run test:read     # 21 fixtures parse; metadata matches an independent block scan
 npm run test:composite  # our composite vs Photoshop's, per file
+npm run test:edit     # edit model: undo, non-destructive resize, reorder, round-trip
 ```
 
 `test:shim` runs first because a missing shim export blanks the demo page while every Node test still passes.
@@ -146,8 +147,10 @@ src/
   icc.js          ICC profile parser
   iim.js          IPTC-NAA parser
   canvas.js       worker-safe pixel backend; keeps Canvas out of the decode path
-demo/             browser demo, no build step
-test/             three suites
+  edit.js         editable project model — commands, undo/redo, hit testing
+  render.js       renders an edited project; bilinear resampling, text raster
+demo/             inspector + editor, no build step
+test/             four suites
 scripts/          fixture downloader
 ```
 
