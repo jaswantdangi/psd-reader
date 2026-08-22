@@ -1,0 +1,14 @@
+node_modules/
+
+# Test corpus: ~13 MB of Photoshop files from ag-psd's test suite (MIT).
+# Not ours to redistribute, and too heavy to commit.
+#   node scripts/fetch-fixtures.mjs
+fixtures/
+
+# Throwaway probe code from the evaluation spike, kept locally for reference.
+# Several of these reference @webtoon/psd, which is no longer installed.
+spike/
+
+*.log
+.DS_Store
+Thumbs.db

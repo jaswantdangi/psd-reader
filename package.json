@@ -1,0 +1,21 @@
+{
+  "name": "psd-reader",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node test/shim.mjs && node test/run.mjs && node test/composite.mjs",
+    "serve": "node serve.mjs",
+    "test:shim": "node test/shim.mjs",
+    "test:read": "node test/run.mjs",
+    "test:composite": "node test/composite.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "ag-psd": "^31.0.2",
+    "exifr": "^7.1.3"
+  }
+}
