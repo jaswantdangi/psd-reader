@@ -112,7 +112,7 @@ export const createBuffer = (width, height) => ({
  * Source-over compositing with a blend function, straight (unassociated) alpha.
  * Iterates only the source rectangle, so cost scales with layer size, not canvas.
  */
-function blendInto(dest, src, rect, opacity, mode, clipAlpha) {
+export function blendInto(dest, src, rect, opacity, mode, clipAlpha) {
   const fn = SEPARABLE[mode];
   const nonSep = NON_SEPARABLE.has(mode);
   const blend = fn || SEPARABLE.normal;

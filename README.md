@@ -94,6 +94,28 @@ Drop in a PSD. Shows the layer tree with positions, recovered metadata, and thre
 
 No bundler — the demo uses an import map and a small shim, since `ag-psd` ships UMD for browsers.
 
+## Editor
+
+```bash
+npm run serve      # http://localhost:5173/demo/editor.html
+```
+
+A simple editor over the same pipeline:
+
+- **Move and resize** any layer — drag on canvas, drag the handles, or type exact numbers. Shift constrains the aspect ratio; arrow keys nudge.
+- **Text** — retype the content, change size, colour, font, alignment, bold/italic.
+- **Layers** — reorder by dragging the list, toggle visibility, set blend mode and opacity.
+- **Undo/redo** — Ctrl/Cmd+Z and Shift+Ctrl/Cmd+Z. A drag is a single undo step, not four hundred.
+- **Export** — PNG of the flattened result, or a project JSON that replays your edits onto the same source PSD.
+
+Transforms are **non-destructive**: a layer keeps its original pixels and `x/y/w/h` are applied at render time, so scaling down and back up loses nothing.
+
+### Editor limits
+
+- **Retyped text will not match Photoshop.** The PSD names its font as a placeholder (`AdobeInvisFont`) and does not embed the font file, so re-drawn text uses the browser's renderer and a system font. Affected layers are badged `re-drawn` in the layer list and flagged in the inspector. Moving, recolouring and resizing text without changing the string keeps Photoshop's own pixels and stays pixel-accurate.
+- **Groups are flattened** so every layer stays individually editable. Lossless for pass-through groups at full opacity; anything else changes the render, and the editor says so on open.
+- **No saving back to .psd** — see the read-only note above. Project JSON plus the original file is the round-trip path.
+
 ## Tests
 
 ```bash

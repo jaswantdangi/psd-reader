@@ -4,3 +4,8 @@ export { parseIccProfile } from './icc.js';
 export { parseIptc } from './iim.js';
 export { installPlainPixelBackend } from './canvas.js';
 export { compositeDocument, compareBuffers, differenceBuffer, createBuffer, flattenOnto } from './composite.js';
+export {
+  createProject, findLayer, commit, setLayer, reorderLayer, undo, redo,
+  hitTest, toProjectJson, applyProjectJson, BLEND_MODES, FONT_STACKS,
+} from './edit.js';
+export { renderProject, resample, rasteriseText, measureText } from './render.js';
