@@ -130,8 +130,8 @@ test('memory budget scales with device memory but never exceeds the hard cap', (
 
 test('memory budget falls back to a conservative default when unknown', () => {
   // navigator.deviceMemory is absent on many Android WebViews.
-  assert.equal(memoryBudgetBytes(undefined), memoryBudgetBytes(2));
-  assert.equal(memoryBudgetBytes(0), memoryBudgetBytes(2));
+  assert.equal(memoryBudgetBytes(undefined), memoryBudgetBytes(1));
+  assert.equal(memoryBudgetBytes(0), memoryBudgetBytes(1));
 });
 
 test('guard accepts a file inside the budget', () => {
@@ -145,6 +145,13 @@ test('guard refuses an oversized file and names both numbers', () => {
   assert.equal(result.ok, false);
   assert.match(result.message, /500/, 'message must state the file size');
   assert.match(result.message, /150/, 'message must state the limit');
+});
+
+test('the unknown-device fallback is genuinely conservative, not merely defined', () => {
+  // The clamp point is ~1.83 GB, so any assumed value at or above it silently
+  // yields the maximum budget. An unknown device must get less than the cap.
+  assert.ok(memoryBudgetBytes(undefined) < HARD_FILE_CAP_BYTES,
+    'an unknown device must not receive the maximum budget');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

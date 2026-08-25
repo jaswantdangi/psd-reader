@@ -16,7 +16,7 @@ const MB = 1024 * 1024;
 export const HARD_FILE_CAP_BYTES = 150 * MB;
 
 /** Used when navigator.deviceMemory is unavailable, as on many Android WebViews. */
-const ASSUMED_DEVICE_MEMORY_GB = 2;
+const ASSUMED_DEVICE_MEMORY_GB = 1;
 
 /**
  * Share of total device memory we are willing to spend on one document.
