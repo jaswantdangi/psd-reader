@@ -83,4 +83,16 @@ test('layer geometry stays in document space, not proxy space', () => {
   assert.equal(layer.h, 50, 'h must be the document-space height');
 });
 
+test('sourceW/H are full-resolution document bounds, not the proxy buffer', () => {
+  const layer = createProject(streamedDoc(), 'streamed.psd').layers[0];
+  assert.equal(layer.sourceW, 100, 'sourceW must survive proxying at full resolution');
+  assert.equal(layer.sourceH, 50, 'sourceH must survive proxying at full resolution');
+});
+
+test('proxyW/H report the actual buffer dimensions', () => {
+  const layer = createProject(streamedDoc(), 'streamed.psd').layers[0];
+  assert.equal(layer.proxyW, 10);
+  assert.equal(layer.proxyH, 5);
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

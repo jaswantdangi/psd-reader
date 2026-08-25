@@ -45,6 +45,7 @@ function toLayer(source) {
   const y = source.top ?? 0;
   const w = (source.right ?? 0) - x;
   const h = (source.bottom ?? 0) - y;
+  const pixelSource = source.proxyData || source.imageData;
 
   const layer = {
     id: nextId++,
@@ -57,9 +58,15 @@ function toLayer(source) {
     // Original decoded pixels — never mutated. A streamed load supplies a
     // downscaled proxy here instead; geometry below stays in document space
     // either way, so the renderer's `scale` handles the difference.
-    pixels: source.proxyData || source.imageData || null,
-    sourceW: source.imageData?.width ?? w,
-    sourceH: source.imageData?.height ?? h,
+    pixels: pixelSource || null,
+    // Full-resolution dimensions, always in document space. Under a proxy load
+    // the buffer is smaller than this — export re-reads the file at full
+    // resolution and needs the true size, so it must not be taken from `pixels`.
+    sourceW: w,
+    sourceH: h,
+    /** Actual dimensions of whatever is in `pixels` — equal to sourceW/H on a full load. */
+    proxyW: pixelSource?.width ?? w,
+    proxyH: pixelSource?.height ?? h,
     /** Set when we have re-drawn the layer ourselves instead of using Photoshop's pixels. */
     rerendered: false,
     /** Cache of our own render, invalidated whenever `text` changes. */
