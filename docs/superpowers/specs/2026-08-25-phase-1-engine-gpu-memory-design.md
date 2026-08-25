@@ -190,10 +190,18 @@ In `src/edit.js`:
 
 - `flatten()` skip condition → `node.proxyData || node.imageData`
 - `toLayer()` pixels → `source.proxyData || source.imageData`
-- **`sourceW/sourceH` must be derived from layer bounds, not `imageData`.**
-  They currently read `source.imageData?.width`; with a proxy that silently
-  records proxy dimensions and export would size every layer wrong. Add
-  separate `proxyW/proxyH` for the buffer dimensions.
+- **`sourceW/sourceH` should be derived from layer bounds, not `imageData`.**
+  They currently read `source.imageData?.width ?? w`.
+
+  > **Corrected 2026-08-25, during Task 3.** An earlier draft of this spec
+  > claimed a proxy load would make these silently record *proxy* dimensions.
+  > That is wrong: the reader nulls `imageData` before `createProject` runs, so
+  > the `?? w` fallback already yielded document bounds. The change is still
+  > worth making — it makes the value unconditionally correct rather than
+  > accidentally correct — but it is a robustness fix, not a live defect.
+
+  `proxyW/proxyH` for the buffer dimensions are genuinely new and are required
+  by export.
 - Project gains `proxyScale` and `source: { uri, name, size }`.
 
 `hitTest` needs **no change** — it maps by ratio and works on proxy buffers
