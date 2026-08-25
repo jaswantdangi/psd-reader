@@ -589,8 +589,12 @@ const ASSUMED_DEVICE_MEMORY_GB = 2;
  * Share of total device memory we are willing to spend on one document.
  * Deliberately small: the WebView, the page and the OS all want their share,
  * and being killed is far worse than refusing.
+ *
+ * Peak is roughly 1.4x the file size, so 0.08 of RAM as a file budget costs
+ * about 0.11 of RAM at peak. Anything above ~0.14 makes every device clamp to
+ * HARD_FILE_CAP_BYTES, which would silently stop the budget scaling at all.
  */
-const BUDGET_FRACTION = 0.15;
+const BUDGET_FRACTION = 0.08;
 
 export function memoryBudgetBytes(deviceMemoryGB) {
   const gb = typeof deviceMemoryGB === 'number' && deviceMemoryGB > 0
@@ -1041,7 +1045,7 @@ Deliberately ugly. This is not Phase 0's UI; it exists to prove the definition o
 - [ ] **Step 1: Create the page**
 
 ```ts
-import { Component, inject, signal } from '@angular/core';
+import { Component, ElementRef, inject, signal, viewChild } from '@angular/core';
 import { PsdLoaderService } from '../services/psd-loader.service';
 import { renderProject } from '@engine/render.js';
 
@@ -1065,6 +1069,9 @@ import { renderProject } from '@engine/render.js';
 })
 export class HarnessPage {
   private loader = inject(PsdLoaderService);
+
+  /** Bound to the #cv template ref — never reach for document.querySelector here. */
+  private cv = viewChild.required<ElementRef<HTMLCanvasElement>>('cv');
 
   status = signal('');
   error = signal('');
@@ -1096,7 +1103,7 @@ export class HarnessPage {
     // Render at proxy scale: geometry is in document space, so this is what
     // draws the proxy pixels at their natural size.
     const buffer = renderProject(project, { scale: project.proxyScale });
-    const canvas = document.querySelector('canvas')!;
+    const canvas = this.cv().nativeElement;
     canvas.width = buffer.width;
     canvas.height = buffer.height;
     canvas.getContext('2d')!.putImageData(

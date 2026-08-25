@@ -12,3 +12,6 @@ spike/
 *.log
 .DS_Store
 Thumbs.db
+
+# Subagent-driven development scratch (ledger, briefs, review packages).
+.superpowers/
