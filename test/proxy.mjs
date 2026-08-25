@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE, createProject } from '../src/index.js';
+import { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE, createProject, estimatePeakBytes, memoryBudgetBytes, guardFileSize, HARD_FILE_CAP_BYTES } from '../src/index.js';
 
 let passed = 0;
 const test = (name, fn) => {
@@ -109,6 +109,42 @@ test('createProject defaults to full scale and no source', () => {
   const project = createProject(streamedDoc(), 'streamed.psd');
   assert.equal(project.proxyScale, 1, 'a full load is scale 1');
   assert.equal(project.source, null);
+});
+
+test('peak estimate follows the measured formula', () => {
+  // Measured on a 4961x3508 6-layer document: 303.4 + 66.4 + 17 = 386.8 MB,
+  // against 387.8 MB actually observed.
+  const MB = 1024 * 1024;
+  const peak = estimatePeakBytes({
+    fileBytes: 303.4 * MB,
+    largestLayerBytes: 66.4 * MB,
+    proxyTotalBytes: 17 * MB,
+  });
+  assert.ok(Math.abs(peak / MB - 386.8) < 0.1, `expected ~386.8 MB, got ${peak / MB}`);
+});
+
+test('memory budget scales with device memory but never exceeds the hard cap', () => {
+  assert.ok(memoryBudgetBytes(1) < memoryBudgetBytes(4));
+  assert.ok(memoryBudgetBytes(64) <= HARD_FILE_CAP_BYTES);
+});
+
+test('memory budget falls back to a conservative default when unknown', () => {
+  // navigator.deviceMemory is absent on many Android WebViews.
+  assert.equal(memoryBudgetBytes(undefined), memoryBudgetBytes(2));
+  assert.equal(memoryBudgetBytes(0), memoryBudgetBytes(2));
+});
+
+test('guard accepts a file inside the budget', () => {
+  const result = guardFileSize(10 * 1024 * 1024, 100 * 1024 * 1024);
+  assert.equal(result.ok, true);
+  assert.equal(result.message, null);
+});
+
+test('guard refuses an oversized file and names both numbers', () => {
+  const result = guardFileSize(500 * 1024 * 1024, 150 * 1024 * 1024);
+  assert.equal(result.ok, false);
+  assert.match(result.message, /500/, 'message must state the file size');
+  assert.match(result.message, /150/, 'message must state the limit');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

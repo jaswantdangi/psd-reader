@@ -10,3 +10,4 @@ export {
 } from './edit.js';
 export { renderProject, resample, rasteriseTextAt, measureText } from './render.js';
 export { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE } from './proxy.js';
+export { memoryBudgetBytes, estimatePeakBytes, guardFileSize, HARD_FILE_CAP_BYTES } from './budget.js';
