@@ -16,6 +16,7 @@
   "author": "",
   "license": "ISC",
   "type": "module",
+  "workspaces": ["app"],
   "dependencies": {
     "ag-psd": "^31.0.2",
     "exifr": "^7.1.3"
