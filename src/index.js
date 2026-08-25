@@ -9,3 +9,4 @@ export {
   hitTest, toProjectJson, applyProjectJson, BLEND_MODES, FONT_STACKS,
 } from './edit.js';
 export { renderProject, resample, rasteriseTextAt, measureText } from './render.js';
+export { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE } from './proxy.js';
