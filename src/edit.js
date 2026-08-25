@@ -128,9 +128,13 @@ function flatten(children, out, warnings) {
 }
 
 /**
- * @param {object} doc  Result of `readDocument(bytes, { pixels: 'eager' })`
+ * @param {object} doc  Result of `readDocument()` — either `pixels: 'eager'`,
+ *   or `pixels: 'stream'` with proxies stashed on each node as `proxyData`.
+ * @param {string} fileName
+ * @param {{proxyScale?: number, source?: {uri: string, name: string, size: number} | null}} [options]
  */
-export function createProject(doc, fileName = 'untitled.psd') {
+export function createProject(doc, fileName = 'untitled.psd', options = {}) {
+  const { proxyScale = 1, source = null } = options;
   const warnings = new Set();
   const layers = flatten(doc.children, [], warnings);
 
@@ -138,6 +142,10 @@ export function createProject(doc, fileName = 'untitled.psd') {
     fileName,
     width: doc.width,
     height: doc.height,
+    /** Scale of every layer's `pixels` relative to document space. 1 = full resolution. */
+    proxyScale,
+    /** Where the file came from, so a full-resolution export can re-read it. */
+    source,
     layers,                       // index 0 = bottom, matching the file
     warnings: [...warnings],
     history: [],

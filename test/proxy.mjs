@@ -95,4 +95,20 @@ test('proxyW/H report the actual buffer dimensions', () => {
   assert.equal(layer.proxyH, 5);
 });
 
+test('createProject records the proxy scale and the source handle', () => {
+  const project = createProject(streamedDoc(), 'streamed.psd', {
+    proxyScale: 0.1,
+    source: { uri: 'file:///storage/streamed.psd', name: 'streamed.psd', size: 12345 },
+  });
+  assert.equal(project.proxyScale, 0.1);
+  assert.equal(project.source.uri, 'file:///storage/streamed.psd');
+  assert.equal(project.source.size, 12345);
+});
+
+test('createProject defaults to full scale and no source', () => {
+  const project = createProject(streamedDoc(), 'streamed.psd');
+  assert.equal(project.proxyScale, 1, 'a full load is scale 1');
+  assert.equal(project.source, null);
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
