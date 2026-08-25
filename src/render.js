@@ -70,48 +70,49 @@ export function measureText(text) {
 }
 
 /**
- * Rasterise a text layer with the browser's own renderer.
+ * Rasterise a text layer directly at its final pixel size.
  *
- * This is the one place we generate pixels through Canvas, and it is a
- * deliberate compromise: the PSD names its font as a placeholder
- * (`AdobeInvisFont`) and does not embed the font file, so matching Photoshop's
- * output is not achievable. Callers must mark such layers in the UI.
+ * Text is vector, so drawing it once at its natural size and then resampling
+ * the bitmap up is exactly how you get pixelated text. Scaling the canvas
+ * transform instead re-shapes the glyphs at the target size, which stays sharp
+ * at any scale — including a non-uniform one, since sx and sy are independent.
  */
-export function rasteriseText(layer, scale = 1) {
+export function rasteriseTextAt(layer, width, height) {
   if (typeof document === 'undefined') return null;
 
-  const metrics = measureText(layer.text);
-  if (!metrics) return null;
+  const natural = measureText(layer.text);
+  if (!natural || !natural.width || !natural.height) return null;
 
-  const width = Math.max(1, Math.ceil(metrics.width * scale));
-  const height = Math.max(1, Math.ceil(metrics.height * scale));
+  const w = Math.max(1, Math.round(width));
+  const h = Math.max(1, Math.round(height));
 
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = w;
+  canvas.height = h;
 
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx.font = fontSpec(layer.text, scale);
+  ctx.setTransform(w / natural.width, 0, 0, h / natural.height, 0, 0);
+  ctx.font = fontSpec(layer.text, 1);
   ctx.fillStyle = layer.text.color;
   ctx.textBaseline = 'top';
   ctx.textAlign = layer.text.align;
 
-  const originX = layer.text.align === 'center' ? width / 2 : layer.text.align === 'right' ? width : 0;
-  metrics.lines.forEach((line, i) => {
-    ctx.fillText(line, originX, i * metrics.lineHeight * scale);
-  });
+  const originX = layer.text.align === 'center' ? natural.width / 2
+    : layer.text.align === 'right' ? natural.width : 0;
+  natural.lines.forEach((line, i) => ctx.fillText(line, originX, i * natural.lineHeight));
 
-  const image = ctx.getImageData(0, 0, width, height);
-  return { width, height, data: image.data };
+  return { width: w, height: h, data: ctx.getImageData(0, 0, w, h).data };
 }
 
-/** Pixels for a layer at its natural size — Photoshop's, or ours if it was retyped. */
-function pixelsFor(layer) {
-  if (layer.kind === 'text' && layer.rerendered) {
-    if (!layer.rendered) layer.rendered = rasteriseText(layer, 1);
-    return layer.rendered;
+/** Cached by target size — a resize drag re-rasterises, a static frame does not. */
+function textPixelsAt(layer, width, height) {
+  const key = `${width}x${height}|${layer.text.fontSize}|${layer.text.fontFamily}|${layer.text.color}` +
+    `|${layer.text.align}|${layer.text.bold}|${layer.text.italic}|${layer.text.content}`;
+  if (layer.renderedKey !== key) {
+    layer.rendered = rasteriseTextAt(layer, width, height);
+    layer.renderedKey = key;
   }
-  return layer.pixels;
+  return layer.rendered;
 }
 
 /**
@@ -129,9 +130,6 @@ export function renderProject(project, options = {}) {
   for (const layer of project.layers) { // bottom to top
     if (!layer.visible || layer.opacity <= 0) continue;
 
-    const pixels = pixelsFor(layer);
-    if (!pixels || !pixels.width || !pixels.height) continue;
-
     const rect = {
       left: Math.round(layer.x * scale),
       top: Math.round(layer.y * scale),
@@ -141,8 +139,20 @@ export function renderProject(project, options = {}) {
     if (rect.left >= width || rect.top >= height) continue;
     if (rect.left + rect.width <= 0 || rect.top + rect.height <= 0) continue;
 
-    const scaled = resample(pixels, rect.width, rect.height);
-    blendInto(dest, scaled.data, rect, layer.opacity, layer.blendMode);
+    let pixels;
+    if (layer.kind === 'text' && layer.rerendered) {
+      // Draw the glyphs at their final size. Rasterising once and resampling
+      // the bitmap is what made scaled text look pixelated.
+      pixels = textPixelsAt(layer, rect.width, rect.height);
+    } else {
+      // Raster layers really are bitmaps — resampling is all there is.
+      const source = layer.pixels;
+      if (!source || !source.width || !source.height) continue;
+      pixels = resample(source, rect.width, rect.height);
+    }
+    if (!pixels) continue;
+
+    blendInto(dest, pixels.data, rect, layer.opacity, layer.blendMode);
   }
 
   return dest;

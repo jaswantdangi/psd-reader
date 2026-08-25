@@ -8,4 +8,4 @@ export {
   createProject, findLayer, commit, setLayer, reorderLayer, undo, redo,
   hitTest, toProjectJson, applyProjectJson, BLEND_MODES, FONT_STACKS,
 } from './edit.js';
-export { renderProject, resample, rasteriseText, measureText } from './render.js';
+export { renderProject, resample, rasteriseTextAt, measureText } from './render.js';

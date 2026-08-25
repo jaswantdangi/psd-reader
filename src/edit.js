@@ -145,8 +145,14 @@ function applyCommand(project, command) {
     const layer = findLayer(project, command.id);
     if (!layer) return;
     for (const [key, value] of Object.entries(command.to)) {
-      if (key === 'text') { Object.assign(layer.text, value); layer.rendered = null; layer.rerendered = true; }
-      else layer[key] = value;
+      if (key === 'text') {
+        Object.assign(layer.text, value);
+        // Drop the cache KEY, not just the pixels — clearing only `rendered`
+        // would let the next lookup hit a matching key and return null.
+        layer.renderedKey = null;
+        layer.rendered = null;
+        layer.rerendered = true;
+      } else layer[key] = value;
     }
   } else if (command.type === 'reorder') {
     const [moved] = project.layers.splice(command.from, 1);

@@ -177,10 +177,15 @@ overlay.addEventListener('pointermove', (e) => {
       const ratio = o.w / o.h;
       if (Math.abs(nw / o.w - 1) > Math.abs(nh / o.h - 1)) nh = nw / ratio; else nw = nh * ratio;
     }
-    setLayer(project, layer.id, {
+    const changes = {
       x: Math.round(nx), y: Math.round(ny),
       w: Math.max(1, Math.round(nw)), h: Math.max(1, Math.round(nh)),
-    }, 'drag-' + layer.id);
+    };
+    // Photoshop's text pixels are a bitmap — upscaling them can only blur.
+    // Scaling a text layer therefore hands it to the live renderer, which
+    // re-shapes the glyphs at the new size and stays sharp.
+    if (layer.kind === 'text') changes.rerendered = true;
+    setLayer(project, layer.id, changes, 'drag-' + layer.id);
   }
 
   refreshInspectorValues();
@@ -190,8 +195,11 @@ overlay.addEventListener('pointermove', (e) => {
 
 function endDrag(e) {
   if (!drag) return;
+  const wasResize = drag.mode === 'resize';
   drag = null;
   try { overlay.releasePointerCapture(e.pointerId); } catch {}
+  // A resize can flip a text layer to live rendering; show the badge and note.
+  if (wasResize) { renderLayerPanel(); renderInspector(); }
   scheduleRender(1);
 }
 overlay.addEventListener('pointerup', endDrag);
@@ -319,8 +327,11 @@ function renderInspector() {
         : key === 'blendMode' ? input.value
         : Math.round(Number(input.value) || 0);
       if (key === 'opacity') $('opacity-value').textContent = Math.round(value * 100) + '%';
-      setLayer(project, layer.id, { [key]: key === 'w' || key === 'h' ? Math.max(1, value) : value },
+      const changes = { [key]: key === 'w' || key === 'h' ? Math.max(1, value) : value };
+      if (layer.kind === 'text' && (key === 'w' || key === 'h')) changes.rerendered = true;
+      setLayer(project, layer.id, changes,
         input.type === 'range' ? 'slider-' + layer.id + '-' + key : undefined);
+      if (changes.rerendered) renderLayerPanel();
       updateHistoryButtons();
       scheduleRender(input.type === 'range' ? dragQuality : 1);
     });

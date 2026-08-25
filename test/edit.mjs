@@ -15,6 +15,9 @@ const bytes = new Uint8Array(fs.readFileSync('fixtures/effects.src.psd'));
 const doc = await readDocument(bytes, { pixels: 'eager', metadata: false });
 const project = createProject(doc, 'effects.src.psd');
 
+const textBytes = new Uint8Array(fs.readFileSync('fixtures/text.src.psd'));
+const textProject = createProject(await readDocument(textBytes, { pixels: 'eager', metadata: false }), 'text.src.psd');
+
 console.log('\nedit model\n');
 
 test('flattens the tree into an ordered layer list', () => {
@@ -147,4 +150,88 @@ test('rejects a project file from a different document', () => {
   assert.throws(() => applyProjectJson(project, json), /Layer count differs/);
 });
 
+
+// ---------------------------------------------------------------------------
+// Scaled text must be re-shaped at its final size, not bitmap-scaled.
+// Node has no canvas, so stub just enough of one to observe what we ask it to do.
+// ---------------------------------------------------------------------------
+console.log('\ntext scaling\n');
+
+const calls = [];
+globalThis.document = {
+  createElement() {
+    const el = { width: 0, height: 0 };
+    el.getContext = () => ({
+      set font(v) { calls.push(['font', v]); this._size = parseFloat(v) || 10; },
+      get font() { return ''; },
+      fillStyle: '', textBaseline: '', textAlign: '',
+      setTransform: (...a) => calls.push(['setTransform', ...a]),
+      fillText: (...a) => calls.push(['fillText', ...a]),
+      measureText: (s) => ({ width: s.length * 10 }),   // 10px per character
+      getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+    });
+    return el;
+  },
+};
+
+const { rasteriseTextAt, measureText: measure } = await import('../src/index.js');
+
+const textLayer = {
+  kind: 'text', rerendered: true,
+  text: { content: 'ABCD', fontFamily: 'Arial', fontSize: 20, color: '#ff0000',
+          align: 'left', bold: false, italic: false },
+};
+
+test('rasterises at the requested size, not the natural one', () => {
+  const natural = measure(textLayer.text);
+  assert.equal(natural.width, 40, 'stub should measure 4 chars at 10px');
+
+  const out = rasteriseTextAt(textLayer, 400, 125);
+  assert.equal(out.width, 400);
+  assert.equal(out.height, 125);
+  assert.equal(out.data.length, 400 * 125 * 4);
+});
+
+test('scales the canvas transform instead of resampling a bitmap', () => {
+  calls.length = 0;
+  const natural = measure(textLayer.text);
+  rasteriseTextAt(textLayer, natural.width * 10, natural.height * 4);
+
+  const transform = calls.find((c) => c[0] === 'setTransform');
+  assert.ok(transform, 'expected setTransform to be used');
+  assert.equal(Math.round(transform[1]), 10, 'horizontal scale should be 10x');
+  assert.equal(Math.round(transform[4]), 4, 'vertical scale should be 4x');
+});
+
+test('a 10x scale-up re-shapes glyphs rather than enlarging pixels', () => {
+  const natural = measure(textLayer.text);
+  const small = rasteriseTextAt(textLayer, natural.width, natural.height);
+  const large = rasteriseTextAt(textLayer, natural.width * 10, natural.height * 10);
+  // Bitmap upscaling would have produced exactly 100x the source samples from
+  // the same small render. Re-shaping produces its own buffer at full size.
+  assert.equal(large.data.length, small.data.length * 100);
+  assert.equal(large.width, natural.width * 10);
+});
+
+test('resizing a text layer switches it to live rendering', () => {
+  const tl = textProject.layers.find((l) => l.kind === 'text');
+  assert.ok(tl, 'text.src.psd must contain a text layer');
+  assert.equal(tl.rerendered, false, 'should start on Photoshop pixels');
+  setLayer(textProject, tl.id, { w: tl.w * 3, h: tl.h * 3, rerendered: true });
+  assert.equal(tl.rerendered, true);
+  undo(textProject);
+  assert.equal(tl.rerendered, false, 'undo should restore Photoshop pixels');
+});
+
+test('changing text clears the render cache key, not just the pixels', () => {
+  const tl = textProject.layers.find((l) => l.kind === 'text');
+  assert.ok(tl, 'text.src.psd must contain a text layer');
+  tl.rendered = { width: 1, height: 1, data: new Uint8ClampedArray(4) };
+  tl.renderedKey = 'stale';
+  setLayer(textProject, tl.id, { text: { content: 'changed' } });
+  assert.equal(tl.renderedKey, null, 'a stale key would return null pixels and hide the layer');
+  undo(textProject);
+});
+
+delete globalThis.document;
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
