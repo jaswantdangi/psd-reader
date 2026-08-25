@@ -54,8 +54,10 @@ function toLayer(source) {
     opacity: source.opacity ?? 1,
     blendMode: source.blendMode === 'pass through' ? 'normal' : (source.blendMode || 'normal'),
     x, y, w, h,
-    // Original decoded pixels — never mutated.
-    pixels: source.imageData || null,
+    // Original decoded pixels — never mutated. A streamed load supplies a
+    // downscaled proxy here instead; geometry below stays in document space
+    // either way, so the renderer's `scale` handles the difference.
+    pixels: source.proxyData || source.imageData || null,
     sourceW: source.imageData?.width ?? w,
     sourceH: source.imageData?.height ?? h,
     /** Set when we have re-drawn the layer ourselves instead of using Photoshop's pixels. */
@@ -112,7 +114,7 @@ function flatten(children, out, warnings) {
       if (node.hidden === true) for (let i = before; i < out.length; i++) out[i].visible = false;
       continue;
     }
-    if (!node.imageData && !node.text) continue; // nothing to draw or edit
+    if (!node.imageData && !node.proxyData && !node.text) continue; // nothing to draw or edit
     out.push(toLayer(node));
   }
   return out;

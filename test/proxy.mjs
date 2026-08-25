@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE } from '../src/index.js';
+import { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE, createProject } from '../src/index.js';
 
 let passed = 0;
 const test = (name, fn) => {
@@ -56,6 +56,31 @@ test('a fully transparent source stays transparent without NaN', () => {
   const out = downscaleImage(src, 0.5);
   assert.equal(out.data[3], 0);
   assert.ok(Number.isFinite(out.data[0]));
+});
+
+/** A document shaped like one that has been streamed: proxy pixels, no imageData. */
+const streamedDoc = () => ({
+  width: 100,
+  height: 50,
+  children: [{
+    name: 'streamed',
+    left: 0, top: 0, right: 100, bottom: 50,
+    proxyData: { width: 10, height: 5, data: new Uint8ClampedArray(10 * 5 * 4) },
+  }],
+});
+
+test('a layer with only proxy pixels still becomes an editable layer', () => {
+  const project = createProject(streamedDoc(), 'streamed.psd');
+  assert.equal(project.layers.length, 1, 'proxy-only layers must not be dropped');
+  assert.equal(project.layers[0].pixels.width, 10);
+  assert.equal(project.layers[0].pixels.height, 5);
+});
+
+test('layer geometry stays in document space, not proxy space', () => {
+  const project = createProject(streamedDoc(), 'streamed.psd');
+  const layer = project.layers[0];
+  assert.equal(layer.w, 100, 'w must be the document-space width');
+  assert.equal(layer.h, 50, 'h must be the document-space height');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
