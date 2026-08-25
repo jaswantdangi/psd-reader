@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE, createProject, estimatePeakBytes, memoryBudgetBytes, guardFileSize, HARD_FILE_CAP_BYTES } from '../src/index.js';
+import { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE, createProject, estimatePeakBytes, memoryBudgetBytes, guardFileSize, HARD_FILE_CAP_BYTES, loadProjectProxy } from '../src/index.js';
+import fs from 'fs';
+let progressCalls = 0;
 
 let passed = 0;
 const test = (name, fn) => {
@@ -152,6 +154,49 @@ test('the unknown-device fallback is genuinely conservative, not merely defined'
   // yields the maximum budget. An unknown device must get less than the cap.
   assert.ok(memoryBudgetBytes(undefined) < HARD_FILE_CAP_BYTES,
     'an unknown device must not receive the maximum budget');
+});
+
+// `vectors.src.psd` is 1080x1080 with 4 pixel-bearing layers, so a small proxy
+// edge forces real downscaling. Loaded at top level because `test` is sync.
+const proxyProject = await loadProjectProxy(
+  new Uint8Array(fs.readFileSync('fixtures/vectors.src.psd')),
+  {
+    fileName: 'vectors.src.psd',
+    proxyEdge: 256,
+    source: { uri: 'file:///vectors.src.psd', name: 'vectors.src.psd', size: 1 },
+    onProgress: () => { progressCalls++; },
+  },
+);
+
+test('a streamed proxy load keeps every pixel-bearing layer', () => {
+  assert.ok(proxyProject.layers.length >= 4, `expected >= 4 layers, got ${proxyProject.layers.length}`);
+  for (const layer of proxyProject.layers) {
+    assert.ok(layer.pixels || layer.text, `layer "${layer.name}" lost its pixels`);
+  }
+});
+
+test('proxy scale is derived from the document, not assumed', () => {
+  assert.ok(Math.abs(proxyProject.proxyScale - 256 / 1080) < 1e-9);
+});
+
+test('proxy pixels really are smaller than document space', () => {
+  const raster = proxyProject.layers.find((l) => l.kind === 'raster');
+  assert.ok(raster, 'fixture must contain a raster layer');
+  assert.ok(raster.proxyW < raster.sourceW, `${raster.proxyW} should be < ${raster.sourceW}`);
+  assert.equal(raster.pixels.width, raster.proxyW);
+});
+
+test('geometry remains full-resolution document space after proxying', () => {
+  const raster = proxyProject.layers.find((l) => l.kind === 'raster');
+  assert.equal(raster.w, raster.sourceW, 'w must not be shrunk to proxy space');
+});
+
+test('the source handle survives onto the project', () => {
+  assert.equal(proxyProject.source.name, 'vectors.src.psd');
+});
+
+test('progress is reported once per decoded layer', () => {
+  assert.ok(progressCalls > 0, 'onProgress was never called');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

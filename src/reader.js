@@ -79,10 +79,13 @@ async function readMetadata(bytes, warnings) {
  * @param {(layer: object, pixels: {width:number,height:number,data:Uint8ClampedArray}|undefined) => any} [options.onLayer]
  *   Required when `pixels: 'stream'`. Copy what you need before returning —
  *   the buffer is released immediately afterwards.
+ * @param {(size: {width: number, height: number}) => any} [options.onStart]
+ *   `pixels: 'stream'` only. Fires once, after the structure parse and before
+ *   any layer is decoded, so a caller can size proxies without a second parse.
  * @param {boolean} [options.metadata=true]
  */
 export async function readDocument(source, options = {}) {
-  const { pixels = 'none', onLayer, metadata: wantMetadata = true, embedded = false } = options;
+  const { pixels = 'none', onLayer, onStart, metadata: wantMetadata = true, embedded = false } = options;
 
   if (pixels === 'stream' && typeof onLayer !== 'function')
     throw new Error("pixels: 'stream' requires an onLayer callback");
@@ -114,6 +117,10 @@ export async function readDocument(source, options = {}) {
   const layers = flattenLayers(psd.children);
 
   if (pixels === 'stream') {
+    // Fires after the structure parse, before any layer is decoded, so a
+    // caller can size its proxies without parsing the file a second time.
+    if (typeof onStart === 'function') await onStart({ width: psd.width, height: psd.height });
+
     for (const layer of layers) {
       if (layer.children) continue; // groups carry no pixels of their own
       decodeLayerPixels(layer, true);
