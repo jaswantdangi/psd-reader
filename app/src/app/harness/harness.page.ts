@@ -10,6 +10,13 @@ import { renderProject } from '@engine/render.js';
       <input type="file" accept=".psd,.psb" (change)="onPick($event)" class="block" />
 
       @if (status()) { <p class="text-slate-600">{{ status() }}</p> }
+
+      <!-- Decode runs 12-20 s on mid-range mobile. A progress line is the
+           difference between "working" and "frozen", so it is not optional. -->
+      @if (busy()) {
+        <p class="text-slate-500">decoded {{ progress() }} layer(s)…</p>
+      }
+
       @if (error()) { <p class="text-red-600 font-bold">{{ error() }}</p> }
 
       @if (info()) {
@@ -29,18 +36,25 @@ export class HarnessPage {
   status = signal('');
   error = signal('');
   info = signal('');
+  busy = signal(false);
+
+  /** Layer count decoded so far, published by the worker during the load. */
+  progress = this.loader.progress;
 
   async onPick(event: Event) {
     const file = (event.target as HTMLInputElement).files?.[0];
     if (!file) return;
 
     this.error.set('');
+    this.info.set('');
+    this.busy.set(true);
     this.status.set(`reading ${file.name}…`);
 
     const bytes = new Uint8Array(await file.arrayBuffer());
     const t0 = performance.now();
     const result = await this.loader.load(bytes, file.name, `file://${file.name}`);
     const ms = Math.round(performance.now() - t0);
+    this.busy.set(false);
 
     if (!result.ok) { this.error.set(result.message); this.status.set(''); return; }
 

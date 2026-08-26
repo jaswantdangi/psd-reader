@@ -302,6 +302,10 @@ export function applyProjectJson(project, json) {
       x: saved.x, y: saved.y, w: saved.w, h: saved.h, rerendered: saved.rerendered,
     });
     if (saved.text && layer.text) Object.assign(layer.text, saved.text);
+    // Drop the cache KEY as well as the pixels. Clearing only `rendered` lets
+    // the next lookup hit a still-matching key, get null back, and the layer
+    // disappears — the same trap `setLayer` guards against above.
+    layer.renderedKey = null;
     layer.rendered = null;
   });
 

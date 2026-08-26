@@ -33,11 +33,24 @@ export class PsdLoaderService {
         resolve({ ok: false, message: e.message || 'Decode worker failed' });
       };
 
+      // A worker killed mid-decode — the exact failure this pipeline exists to
+      // avoid — often raises no `error` event at all. Without this the promise
+      // would never settle and the UI would hang on "reading…" forever, which
+      // is the same silent failure as a blank screen.
+      worker.onmessageerror = () => {
+        worker.terminate();
+        resolve({ ok: false, message: 'Decode failed: the worker stopped responding.' });
+      };
+
       const source = { uri, name: fileName, size: bytes.byteLength };
       // Transfer the file bytes into the worker; the main thread must not keep
       // them, they are 68-78% of peak memory.
+      //
+      // Pass the VIEW, not the raw buffer: a Uint8Array that is a partial view
+      // (a subarray, or a Capacitor Filesystem read) would otherwise lose its
+      // byteOffset/byteLength and hand the decoder the wrong byte range.
       worker.postMessage(
-        { bytes: bytes.buffer, fileName, source, proxyEdge: 1024 },
+        { bytes, fileName, source, proxyEdge: 1024 },
         [bytes.buffer],
       );
     });

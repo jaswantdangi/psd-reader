@@ -96,8 +96,17 @@ bundler and does not carry into the Ionic app. Cost is one line:
   layers vanish in a Web Worker.
 - **`resample()` early-returns when sizes match**, so untransformed layers cost
   nothing at export.
-- **`textPixelsAt` re-rasterises at final size**, so text exports sharp even
-  from a proxy project. Raster layers do not — they would upscale and blur.
+- **`textPixelsAt` re-rasterises at final size**, so *edited* text exports sharp
+  even from a proxy project. Raster layers do not — they would upscale and blur.
+
+  > **Corrected 2026-08-25, by the Phase 1A final review.** An earlier draft
+  > claimed this of *all* text. It is only true of text the user has retyped or
+  > resized. `src/render.js:143` gates the `textPixelsAt` path on
+  > `layer.rerendered`, which starts `false` (`src/edit.js:71`), so an untouched
+  > Photoshop text layer falls through to `resample()` like any raster. At proxy
+  > scale that is the identity early-return and harms nothing, but a
+  > full-resolution export would upscale its 1024-edge raster and blur it.
+  > **Plan 1C must not assume text is exempt from the full-res re-read.**
 
 ---
 

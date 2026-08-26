@@ -4,7 +4,9 @@ import { loadProjectProxy } from '@engine/load.js';
 addEventListener('message', async ({ data }) => {
   const { bytes, fileName, source, proxyEdge } = data;
   try {
-    const project = await loadProjectProxy(new Uint8Array(bytes), {
+    // `bytes` arrives as a Uint8Array view, already spanning the right range —
+    // do not re-wrap its buffer, that would discard byteOffset/byteLength.
+    const project = await loadProjectProxy(bytes, {
       fileName,
       source,
       proxyEdge,
