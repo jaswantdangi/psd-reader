@@ -12,6 +12,7 @@ import {
   EXPORT_TILE_CAP, tileEdgeFor, partitionTiles, intersectRect,
   CANVAS_AREA_CAP, canUseCanvasEncoder, encodePngStored,
   SPILL_ROOT, newExportId, spillDirFor, sweepSpillDirectories,
+  BRIDGE_CHUNK_BYTES, chunkRanges, bytesToBase64,
 } from '../src/index.js';
 
 let passed = 0;
@@ -745,6 +746,44 @@ await atest('a first run with no spill root is not an error', async () => {
 await atest('one undeletable directory does not abort the sweep', async () => {
   const fs2 = fakeFs({ [SPILL_ROOT]: ['locked', 'abc'] });
   assert.deepEqual(await sweepSpillDirectories(fs2), ['abc']);
+});
+
+console.log('\nbridge chunking\n');
+
+test('the chunk size is divisible by three, so only the last chunk pads', () => {
+  assert.equal(BRIDGE_CHUNK_BYTES % 3, 0);
+  assert.ok(BRIDGE_CHUNK_BYTES <= 4 * 1024 * 1024);
+});
+
+test('ranges tile the whole buffer with no gap and no overlap', () => {
+  const ranges = chunkRanges(10, 4);
+  assert.deepEqual(ranges, [[0, 4], [4, 8], [8, 10]]);
+});
+
+test('an exact multiple produces no empty trailing range', () => {
+  assert.deepEqual(chunkRanges(8, 4), [[0, 4], [4, 8]]);
+});
+
+test('an empty buffer produces no ranges at all', () => {
+  assert.deepEqual(chunkRanges(0, 4), []);
+});
+
+test('a 303 MB file is 76 bridge calls, and that cost is worth stating', () => {
+  const ranges = chunkRanges(303 * 1024 * 1024);
+  assert.equal(ranges.length, 76);
+});
+
+test('base64 matches Node\'s own encoder for every tail length', () => {
+  for (const length of [0, 1, 2, 3, 4, 5, 6, 255, 256, 1000]) {
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < length; i++) bytes[i] = (i * 37 + 11) & 0xff;
+    assert.equal(bytesToBase64(bytes), Buffer.from(bytes).toString('base64'), `length ${length}`);
+  }
+});
+
+test('base64 handles the high bytes that a naive shift would sign-extend', () => {
+  const bytes = new Uint8Array([0xff, 0xfe, 0xfd, 0x80, 0x00]);
+  assert.equal(bytesToBase64(bytes), Buffer.from(bytes).toString('base64'));
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
