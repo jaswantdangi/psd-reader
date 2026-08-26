@@ -60,3 +60,7 @@ export { CLASS_A_ORDER, OPS, NEUTRAL_ADJUST, createAdjust } from './adjust/ops.j
 export { buildLut, lutDigest, lutFor, isNeutralAdjust, adjustCostOf } from './adjust/lut.js';
 export { createScratch, acquireScratch, releaseScratch, DEFAULT_SCRATCH } from './adjust/scratch.js';
 export { applyAdjustments } from './adjust/apply.js';
+export {
+  HSL_BANDS, HSL_HUE_DEGREES, NEUTRAL_HSL, normaliseHsl, isNeutralHsl, bandWeights,
+} from './adjust/ops.js';
+export { applyHsl } from './adjust/apply.js';

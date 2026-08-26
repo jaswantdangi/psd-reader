@@ -4,6 +4,7 @@ import {
   buildLut, lutDigest, lutFor, isNeutralAdjust, adjustCostOf,
   createScratch, acquireScratch, releaseScratch,
   applyAdjustments,
+  HSL_BANDS, NEUTRAL_HSL, normaliseHsl, isNeutralHsl, bandWeights, applyHsl,
 } from '../src/index.js';
 
 let passed = 0;
@@ -306,6 +307,102 @@ test('the pass uses the table it is handed rather than rebuilding one', () => {
   const identity = buildLut(null);
   const out = applyAdjustments(src, createAdjust({ brightness: 100 }), blank(src), identity);
   assert.deepEqual([...out.data], [...src.data], 'the passed table won, not the parameters');
+});
+
+console.log('\nHSL\n');
+
+const NEUTRAL_BANDS = () => Array.from({ length: 8 }, () => ({ h: 0, s: 0, l: 0 }));
+
+test('band weights are a partition of unity for every integer hue', () => {
+  // A weighting that did not sum to 1 would shift a pixel's colour at a
+  // NEUTRAL setting, at exactly the hues that fall between two bands -- which
+  // is most of them.
+  const w = new Float64Array(8);
+  for (let hue = 0; hue < 360; hue++) {
+    bandWeights(hue, w);
+    let sum = 0, nonZero = 0;
+    for (const v of w) { sum += v; if (v !== 0) nonZero++; }
+    assert.ok(Math.abs(sum - 1) < 1e-12, `hue ${hue} sums to ${sum}`);
+    assert.ok(nonZero <= 2, `hue ${hue} touches ${nonZero} bands`);
+  }
+});
+
+test('a hue exactly on a band centre gives that band all of the weight', () => {
+  const w = new Float64Array(8);
+  HSL_BANDS.forEach((band, i) => {
+    bandWeights(band.centre, w);
+    assert.equal(w[i], 1, `${band.id} at ${band.centre}`);
+  });
+});
+
+test('rgb -> hsl -> rgb round-trips within 1 LSB across the sweep', () => {
+  // Measured, not assumed. This is the FLOOR on how exact any HSL edit can be,
+  // and it is why the neutral case is handled by SKIPPING the pass rather than
+  // by trusting the round trip. Report the worst delta you actually observe.
+  const src = sweep(32, 32);
+  const hsl = normaliseHsl({ bands: NEUTRAL_BANDS(), saturation: 0 });
+  const out = blank(src);
+  out.data.set(src.data);
+  applyHsl(out.data, out.width * out.height, hsl);   // forced: applyAdjustments would skip it
+  for (let i = 0; i < src.data.length; i++)
+    if (i % 4 !== 3 && src.data[(i >> 2) * 4 + 3] !== 0)
+      assert.ok(Math.abs(out.data[i] - src.data[i]) <= 1,
+        `byte ${i}: ${src.data[i]} -> ${out.data[i]}`);
+});
+
+test('a neutral hsl block is SKIPPED, so the output is bit-identical to class A alone', () => {
+  const src = sweep();
+  const plain = applyAdjustments(src, createAdjust({ contrast: 30 }), blank(src));
+  const withHsl = applyAdjustments(
+    src, createAdjust({ contrast: 30, hsl: { bands: NEUTRAL_BANDS(), saturation: 0 } }), blank(src));
+  assert.deepEqual([...withHsl.data], [...plain.data]);
+});
+
+test('a global saturation of -100 produces a grey everywhere', () => {
+  const src = sweep();
+  const out = applyAdjustments(
+    src, createAdjust({ hsl: { bands: NEUTRAL_BANDS(), saturation: -100 } }), blank(src));
+  for (let i = 0; i < src.width * src.height; i++) {
+    if (src.data[i * 4 + 3] === 0) continue;      // transparent pixels are skipped
+    const o = i * 4;
+    assert.equal(out.data[o], out.data[o + 1], `pixel ${i} r/g`);
+    assert.equal(out.data[o + 1], out.data[o + 2], `pixel ${i} g/b`);
+  }
+});
+
+test('a band saturation moves pixels near that band and leaves the opposite band alone', () => {
+  // Two pure hues, 180 degrees apart. Killing the reds must not touch the aqua.
+  const src = { width: 2, height: 1,
+    data: new Uint8ClampedArray([255, 0, 0, 255, 0, 255, 255, 255]) };
+  const bands = NEUTRAL_BANDS();
+  bands[0].s = -100;                              // the red band
+  const out = applyAdjustments(src, createAdjust({ hsl: { bands, saturation: 0 } }), blank(src));
+  assert.equal(out.data[0], out.data[1], 'the red pixel is now grey');
+  assert.deepEqual([...out.data.slice(4, 8)], [0, 255, 255, 255], 'the aqua pixel is untouched');
+});
+
+test('alpha is unchanged by HSL at every alpha band (invariant A)', () => {
+  const src = sweep();
+  const bands = NEUTRAL_BANDS();
+  bands[3].h = 100; bands[3].s = -80; bands[3].l = 60;
+  const out = applyAdjustments(src, createAdjust({ hsl: { bands, saturation: 90 } }), blank(src));
+  for (let i = 0; i < src.width * src.height; i++)
+    assert.equal(out.data[i * 4 + 3], src.data[i * 4 + 3], `pixel ${i}`);
+});
+
+test('normaliseHsl always returns eight clamped bands, and isNeutralHsl agrees', () => {
+  const n = normaliseHsl({ bands: [{ h: 5000 }], saturation: -5000 });
+  assert.equal(n.bands.length, 8);
+  assert.equal(n.bands[0].h, 100);
+  assert.equal(n.bands[0].s, 0);
+  assert.equal(n.saturation, -100);
+  assert.equal(isNeutralHsl(NEUTRAL_HSL), true);
+  assert.equal(isNeutralHsl(n), false);
+  // A present-but-neutral block must not make the whole object non-neutral, or
+  // opening the HSL sheet and touching nothing would cost the expensive pass.
+  const opened = createAdjust({ hsl: { bands: NEUTRAL_BANDS(), saturation: 0 } });
+  assert.equal(isNeutralAdjust(opened), true);
+  assert.equal(adjustCostOf(opened).hsl, false);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
