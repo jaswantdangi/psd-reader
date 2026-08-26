@@ -11,6 +11,7 @@
  */
 import { createBuffer, blendInto } from './composite.js';
 import { create2dSurface } from './surface.js';
+import { resampleMask } from './mask.js';
 
 /**
  * Bilinear resample. Written by hand rather than going through Canvas
@@ -148,6 +149,16 @@ export function drawLayerInto(dest, layer, scale = 1, options = {}) {
   };
   if (rect.left >= dest.width || rect.top >= dest.height) return;
   if (rect.left + rect.width <= 0 || rect.top + rect.height <= 0) return;
+
+  // A layer mask is a per-layer alpha multiplier and nothing else -- blendInto
+  // multiplies `as` by it. It lives on exactly the same grid as `pixels`, so it
+  // resamples to the same target from the same source dimensions and cannot
+  // drift out of alignment under any transform at any scale.
+  //
+  // `disabled` is honoured: Photoshop saves switched-off masks, and applying
+  // one is as wrong as ignoring an enabled one.
+  if (layer.mask && !layer.mask.disabled)
+    rect.mask = resampleMask(layer.mask, rect.width, rect.height);
 
   let pixels = null;
   let reason = 'raster';

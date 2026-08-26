@@ -3,6 +3,7 @@ import fs from 'fs';
 import {
   layerRect, pixelRect, projectMask, downscaleMask, resampleMask,
   readDocument, createProject, loadProjectProxy,
+  renderProject, compositeDocument, compareBuffers, flattenOnto,
 } from '../src/index.js';
 
 let passed = 0;
@@ -239,6 +240,73 @@ test('onProgress reports the total alongside the running count', () => {
   // A determinate bar needs both numbers. Reporting only `decoded` is what
   // makes a 20-second wait indistinguishable from a hang.
   assert.deepEqual(progressTotals, [[1, 1]]);
+});
+
+console.log('\nmasked rendering\n');
+
+/** renderProject against the compositor, which is the pixel-validated oracle. */
+const oracle = async (file) => {
+  const doc = await readDocument(bytesOf('fixtures/' + file), { pixels: 'eager', metadata: false });
+  const ours = renderProject(createProject(doc, file), { scale: 1 });
+  const theirs = compositeDocument(doc);
+  return compareBuffers(flattenOnto(ours), flattenOnto(theirs));
+};
+
+const vectorAndMask = await oracle('vector-and-mask.src.psd');
+const booleanOp = await oracle('boolean.src.psd');
+const gradient = await oracle('gradient.src.psd');
+
+test('a mask whose origin differs from its layer renders exactly as the inspector does', () => {
+  // THE assertion the whole mask ruling stands on. Before this task the fixture
+  // differed on 855 of 9898 pixels beyond rounding (8.64%) with a max channel
+  // delta of 255 -- the mask simply was not applied. The layer sits at [-1,-1]
+  // and its mask at [0,0], so this is also the alignment case: get the
+  // reprojection offset wrong and a one-pixel shear survives here.
+  assert.equal(vectorAndMask.beyondRounding, 0,
+    `expected an exact match, got ${vectorAndMask.beyondRounding} of ${vectorAndMask.total}`);
+  assert.equal(vectorAndMask.maxDelta, 0);
+});
+
+test('a rasterised vector mask renders exactly as the inspector does', () => {
+  // 166 of 90000 pixels wrong before this task, max channel delta 57.
+  assert.equal(booleanOp.beyondRounding, 0,
+    `expected an exact match, got ${booleanOp.beyondRounding} of ${booleanOp.total}`);
+});
+
+test('a fully opaque mask still renders exactly (regression guard only)', () => {
+  // gradient.src.psd was already at 0 before the mask work, because its mask is
+  // fully opaque inside the layer bounds. This can prove the change did no
+  // HARM. It is not evidence that masks work -- do not quote it as such.
+  assert.equal(gradient.beyondRounding, 0);
+});
+
+test('a disabled mask is not applied', () => {
+  // Photoshop saves masks that are switched off. Applying one is wrong in the
+  // opposite direction from ignoring an enabled one, and just as invisible.
+  const node = (disabled) => ({
+    width: 4, height: 4,
+    children: [{
+      name: 'masked', left: 0, top: 0, right: 4, bottom: 4,
+      proxyData: { width: 4, height: 4, data: new Uint8ClampedArray(4 * 4 * 4).fill(255) },
+      proxyMask: new Uint8Array(16),          // fully masked out
+      mask: { disabled },
+    }],
+  });
+  const off = renderProject(createProject(node(true), 'x.psd'), { scale: 1 });
+  const on = renderProject(createProject(node(false), 'x.psd'), { scale: 1 });
+  assert.equal(off.data[3], 255, 'a disabled mask must leave the layer fully drawn');
+  assert.equal(on.data[3], 0, 'an enabled all-zero mask must erase the layer');
+});
+
+test('at proxyScale the mask needs no resampling at all', () => {
+  // Documents the fast path rather than correctness: when the render scale IS
+  // the proxy scale, rect dimensions equal the proxy grid, so resampleMask's
+  // identity early-return fires and no mask is copied per frame. If this ever
+  // fails, resampleMask still renders correctly -- it just costs an allocation.
+  const layer = proxyMasked.layers[0];
+  const rectWidth = Math.max(1, Math.round(layer.w * proxyMasked.proxyScale));
+  assert.equal(rectWidth, layer.pixels.width);
+  assert.equal(resampleMask(layer.mask, rectWidth, layer.pixels.height), layer.mask.data);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
