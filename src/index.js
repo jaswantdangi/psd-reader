@@ -21,3 +21,7 @@ export {
   createSandwichCache, renderSandwiched, sandwichStateFor,
   SANDWICH_FLAT_ABOVE, SANDWICH_BELOW_ONLY,
 } from './sandwich.js';
+export {
+  conformancePattern, conformanceProject, compareRenders, verdictFor,
+  CONFORMANCE_MODES, CONFORMANCE_SIZE,
+} from './conformance.js';

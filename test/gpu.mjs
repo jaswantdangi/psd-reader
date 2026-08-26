@@ -6,6 +6,7 @@ import {
   create2dSurface, measureText, rasteriseTextAt,
   createBuffer, createProject, setLayer, undo, redo, toProjectJson, applyProjectJson, renderProject, drawLayerInto,
   compareBuffers, flattenOnto, createSandwichCache, renderSandwiched, sandwichStateFor, SANDWICH_FLAT_ABOVE, SANDWICH_BELOW_ONLY,
+  conformancePattern, conformanceProject, compareRenders, verdictFor, CONFORMANCE_MODES,
 } from '../src/index.js';
 
 let passed = 0;
@@ -452,6 +453,74 @@ test('an out-of-range selection falls back to the full render', () => {
   for (const index of [-1, 2, null, undefined, 1.5])
     assert.deepEqual(Array.from(renderSandwiched(cache, project, index, { scale: 1 }).data), full);
   assert.equal(cache.builds, 0, 'nothing should have been cached');
+});
+
+console.log('\nconformance fixtures\n');
+
+test('the pattern is deterministic', () => {
+  assert.deepEqual(
+    Array.from(conformancePattern(32, 32, 'source').data),
+    Array.from(conformancePattern(32, 32, 'source').data),
+  );
+});
+
+test('red sweeps every backdrop/source byte pair exactly once', () => {
+  // This is what makes `hard mix`'s b + s == 255 diagonal impossible to miss:
+  // 256 of the 65 536 pairs sit exactly on it.
+  const backdrop = conformancePattern(256, 256, 'backdrop');
+  const source = conformancePattern(256, 256, 'source');
+  const seen = new Uint8Array(65536);
+  for (let i = 0; i < 256 * 256; i++) seen[backdrop.data[i * 4] * 256 + source.data[i * 4]]++;
+  assert.ok(seen.every((n) => n === 1), 'every (backdrop, source) red pair must occur exactly once');
+});
+
+test('both roles include a fully transparent and a fully opaque band', () => {
+  for (const role of ['backdrop', 'source']) {
+    const alphas = new Set();
+    const pattern = conformancePattern(256, 256, role);
+    for (let i = 0; i < 256 * 256; i++) alphas.add(pattern.data[i * 4 + 3]);
+    assert.ok(alphas.has(0), `${role} must include alpha 0 — where JS continues and the GPU returns dst`);
+    assert.ok(alphas.has(255), `${role} must include alpha 255 — where ao == 1`);
+  }
+});
+
+test('green and blue are not copies of red', () => {
+  // The six non-separable modes read all three channels at once. A grey pixel
+  // exercises none of setSat's or clipColor's branches.
+  const pattern = conformancePattern(64, 64, 'backdrop');
+  let differing = 0;
+  for (let i = 0; i < 64 * 64; i++) {
+    const o = i * 4;
+    if (pattern.data[o] !== pattern.data[o + 1] || pattern.data[o] !== pattern.data[o + 2]) differing++;
+  }
+  assert.ok(differing > 64 * 64 * 0.9, `only ${differing} of ${64 * 64} pixels are non-grey`);
+});
+
+test('all 26 modes render through the JS oracle and produce pixels', () => {
+  for (const mode of CONFORMANCE_MODES) {
+    const out = renderProject(conformanceProject(mode, 64), { scale: 1 });
+    assert.equal(out.width, 64, `${mode}: wrong canvas size`);
+    assert.ok(out.data.some((v) => v !== 0), `${mode}: rendered nothing at all`);
+  }
+  assert.equal(CONFORMANCE_MODES.length, 26);
+});
+
+test('a render compared against itself is a PASS at maxDelta 0', () => {
+  // Proves the comparison harness is not itself reporting spurious differences
+  // before it is ever pointed at a GPU.
+  const out = renderProject(conformanceProject('overlay', 64), { scale: 1 });
+  const stat = compareRenders(out, out);
+  assert.equal(stat.maxDelta, 0);
+  assert.equal(verdictFor(stat), 'PASS');
+});
+
+test('the verdict table', () => {
+  assert.equal(verdictFor({ comparable: true, percentReal: 0, maxDelta: 1 }), 'PASS');
+  assert.equal(verdictFor({ comparable: true, percentReal: 0.05, maxDelta: 2 }), 'WARN');
+  assert.equal(verdictFor({ comparable: true, percentReal: 0.05, maxDelta: 3 }), 'FAIL');
+  assert.equal(verdictFor({ comparable: true, percentReal: 0.5, maxDelta: 2 }), 'FAIL');
+  assert.equal(verdictFor({ comparable: false, reason: '2x2 vs 3x3' }), 'FAIL');
+  assert.equal(verdictFor(null), 'FAIL');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
