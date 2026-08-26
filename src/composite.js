@@ -13,6 +13,8 @@
  * composite, and the difference is reported rather than hidden.
  */
 
+import { projectMask, layerRect } from './mask.js';
+
 /** ag-psd reports opacity 0..1. Layer order is bottom-to-top: children[0] is the bottom. */
 
 // ---------------------------------------------------------------- blend modes
@@ -168,38 +170,6 @@ export function blendInto(dest, src, rect, opacity, mode, clipAlpha) {
 
 // ---------------------------------------------------------------- layers
 
-/** Layer mask as a 0..255 array over the layer's own rect, or null. */
-function maskFor(layer, rect) {
-  const mask = layer.mask;
-  if (!mask || !mask.imageData) return null;
-
-  const mw = (mask.right ?? 0) - (mask.left ?? 0);
-  const mh = (mask.bottom ?? 0) - (mask.top ?? 0);
-  if (mw <= 0 || mh <= 0) return null;
-
-  const fallback = mask.defaultColor ?? 0;
-  const out = new Uint8Array(rect.width * rect.height).fill(fallback);
-  const src = mask.imageData.data;
-
-  for (let y = 0; y < rect.height; y++) {
-    const my = rect.top + y - mask.top;
-    if (my < 0 || my >= mh) continue;
-    for (let x = 0; x < rect.width; x++) {
-      const mx = rect.left + x - mask.left;
-      if (mx < 0 || mx >= mw) continue;
-      out[y * rect.width + x] = src[(my * mw + mx) * 4]; // masks are greyscale — red channel
-    }
-  }
-  return out;
-}
-
-const rectOf = (layer) => ({
-  left: layer.left ?? 0,
-  top: layer.top ?? 0,
-  width: (layer.right ?? 0) - (layer.left ?? 0),
-  height: (layer.bottom ?? 0) - (layer.top ?? 0),
-});
-
 /** Alpha coverage of a rendered layer, over the whole canvas — used for clipping. */
 function alphaMap(width, height, rect, pixels, mask, opacity) {
   const map = new Uint8Array(width * height);
@@ -246,9 +216,9 @@ function renderList(list, width, height, ctx) {
             mode === 'pass through' ? 'normal' : mode);
         }
       } else if (layer.imageData) {
-        const rect = rectOf(layer);
+        const rect = layerRect(layer);
         if (rect.width > 0 && rect.height > 0) {
-          rect.mask = maskFor(layer, rect);
+          rect.mask = projectMask(layer, rect);
 
           if (clipped.length) {
             // Render base into its own buffer, stack the clipped layers on it
@@ -259,9 +229,9 @@ function renderList(list, width, height, ctx) {
 
             for (const c of clipped) {
               if (c.hidden === true || !c.imageData) continue;
-              const cr = rectOf(c);
+              const cr = layerRect(c);
               if (cr.width <= 0 || cr.height <= 0) continue;
-              cr.mask = maskFor(c, cr);
+              cr.mask = projectMask(c, cr);
               blendInto(group, c.imageData.data, cr, c.opacity ?? 1, c.blendMode || 'normal', base);
             }
             blendInto(dest, group.data, { left: 0, top: 0, width, height }, opacity, mode);
