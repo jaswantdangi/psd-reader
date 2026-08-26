@@ -8,6 +8,7 @@ import {
   EXPORT_PHASES, phaseFraction, isDeterminate,
   exportFullRes, createJsExportTarget,
   compareBuffers, flattenOnto,
+  EXPORT_TILE_CAP, tileEdgeFor, partitionTiles, intersectRect,
 } from '../src/index.js';
 
 let passed = 0;
@@ -577,6 +578,58 @@ await atest('a moved layer exports at its new position', async () => {
   for (const project of [proxy, eager])
     setLayer(project, project.layers[2].id, { x: 40, y: 700 });
   matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
+});
+
+console.log('\ntile arithmetic\n');
+
+test('the tile edge is the minimum of every limit, not just the texture size', () => {
+  assert.equal(tileEdgeFor({ maxTextureSize: 4096, maxRenderbufferSize: 1024, maxViewportDims: [4096, 4096] }), 1024);
+  assert.equal(tileEdgeFor({ maxTextureSize: 4096, maxRenderbufferSize: 4096, maxViewportDims: [4096, 512] }), 512);
+});
+
+test('the cap wins when the hardware is generous', () => {
+  assert.equal(tileEdgeFor({ maxTextureSize: 16384, maxRenderbufferSize: 16384, maxViewportDims: [16384, 16384] }), EXPORT_TILE_CAP);
+  assert.equal(EXPORT_TILE_CAP, 2048);
+});
+
+test('an explicit cap overrides the default, for the device sweep', () => {
+  assert.equal(tileEdgeFor({ maxTextureSize: 8192, maxRenderbufferSize: 8192, maxViewportDims: [8192, 8192], cap: 4096 }), 4096);
+});
+
+test('an unprobed context falls back to the cap rather than to zero', () => {
+  assert.equal(tileEdgeFor({}), EXPORT_TILE_CAP);
+  assert.equal(tileEdgeFor(), EXPORT_TILE_CAP);
+});
+
+test('the poster partitions into six tiles with correct edge remainders', () => {
+  const tiles = partitionTiles(4961, 3508, 2048);
+  assert.equal(tiles.length, 6, '3 across x 2 down');
+  assert.deepEqual(tiles[0], { x: 0, y: 0, width: 2048, height: 2048 });
+  assert.deepEqual(tiles[2], { x: 4096, y: 0, width: 865, height: 2048 });
+  assert.deepEqual(tiles[5], { x: 4096, y: 2048, width: 865, height: 1460 });
+});
+
+test('the tiles cover the canvas exactly once', () => {
+  const tiles = partitionTiles(4961, 3508, 2048);
+  const area = tiles.reduce((sum, t) => sum + t.width * t.height, 0);
+  assert.equal(area, 4961 * 3508);
+});
+
+test('a canvas inside the tile edge is one tile', () => {
+  assert.deepEqual(partitionTiles(1080, 1080, 2048), [{ x: 0, y: 0, width: 1080, height: 1080 }]);
+});
+
+test('intersection clips a layer rect to a tile', () => {
+  const tile = { x: 2048, y: 0, width: 2048, height: 2048 };
+  assert.deepEqual(intersectRect({ x: 1900, y: 100, width: 400, height: 200 }, tile),
+    { x: 2048, y: 100, width: 252, height: 200 });
+});
+
+test('a layer that misses a tile returns null, so the tile is skipped entirely', () => {
+  const tile = { x: 2048, y: 0, width: 2048, height: 2048 };
+  assert.equal(intersectRect({ x: 0, y: 0, width: 100, height: 100 }, tile), null);
+  assert.equal(intersectRect({ x: 2048, y: 2048, width: 10, height: 10 }, tile), null,
+    'touching an edge is not overlapping it');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

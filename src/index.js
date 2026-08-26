@@ -40,3 +40,4 @@ export {
 export { EXPORT_PHASES, phaseFraction, isDeterminate } from './export/progress.js';
 export { createJsExportTarget } from './export/target-js.js';
 export { exportFullRes } from './export/stream.js';
+export { EXPORT_TILE_CAP, tileEdgeFor, partitionTiles, intersectRect } from './export/tiles.js';
