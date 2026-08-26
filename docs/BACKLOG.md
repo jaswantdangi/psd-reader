@@ -9,6 +9,24 @@ place they survive.
 
 ---
 
+## Correctness gaps (highest priority)
+
+- **Layer masks are dropped by the editor.** `src/composite.js` applies them (17
+  references); `src/edit.js` and `src/render.js` contain **none**. So the read-only
+  compositor honours masks, but any document opened in the editor renders masked
+  layers as if unmasked — in preview *and* in export. This is not a documented
+  limitation, it is a silent wrong-pixels bug, and it will look like the editor
+  "breaks" files that the inspector renders correctly. Found while specifying Phase
+  1C, 2026-08-26. Fixing it means carrying mask rasters through `toLayer()` and
+  applying them in `renderProject`, which is Phase 2-sized work, not a patch.
+- **Decode order and project order diverge.** `src/reader.js` streams every leaf
+  node (skipping only groups); `src/edit.js`'s `flatten()` additionally skips leaves
+  with neither pixels nor text. Harmless today because `loadProjectProxy` stashes
+  proxies **on the node**, not by index — but any future code that matches decoded
+  layers to project layers *positionally* (full-resolution export is the obvious
+  candidate) would silently misalign every layer after the first skipped one. Give
+  layers a stable `sourceIndex` before writing that code.
+
 ## Engine (`src/`)
 
 - **`applyProjectJson` had a stale-cache bug** — fixed 2026-08-25 in the Phase 1A
