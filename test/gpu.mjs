@@ -7,6 +7,7 @@ import {
   createBuffer, createProject, setLayer, undo, redo, toProjectJson, applyProjectJson, renderProject, drawLayerInto,
   compareBuffers, flattenOnto, createSandwichCache, renderSandwiched, sandwichStateFor, SANDWICH_FLAT_ABOVE, SANDWICH_BELOW_ONLY,
   conformancePattern, conformanceProject, compareRenders, verdictFor, CONFORMANCE_MODES,
+  selectTier, tierOverrideFrom, probeCapabilities, TIER_WORKER_GPU, TIER_MAIN_GPU, TIER_JS,
 } from '../src/index.js';
 
 let passed = 0;
@@ -521,6 +522,73 @@ test('the verdict table', () => {
   assert.equal(verdictFor({ comparable: true, percentReal: 0.5, maxDelta: 2 }), 'FAIL');
   assert.equal(verdictFor({ comparable: false, reason: '2x2 vs 3x3' }), 'FAIL');
   assert.equal(verdictFor(null), 'FAIL');
+});
+
+console.log('\ntier selection\n');
+
+const FULL = { offscreenCanvas: true, transferControl: true, webgl2: true, probe: { ok: true } };
+
+test('a tier override wins over every capability', () => {
+  for (const tier of [1, 2, 3]) {
+    const decision = selectTier({ ...FULL, override: tier });
+    assert.equal(decision.tier, tier);
+    assert.match(decision.verdict, /forced/);
+  }
+  assert.equal(selectTier({ webgl2: false, override: 1 }).tier, 1, 'an override bypasses the probe too');
+});
+
+test('an out-of-range override is ignored', () => {
+  for (const bad of [0, 4, -1, 1.5, '2', null, undefined])
+    assert.equal(selectTier({ ...FULL, override: bad }).tier, TIER_WORKER_GPU, `override ${bad} leaked through`);
+});
+
+test('no WebGL2 lands on the JS tier, and says so', () => {
+  const decision = selectTier({ offscreenCanvas: true, transferControl: true, webgl2: false });
+  assert.equal(decision.tier, TIER_JS);
+  assert.match(decision.verdict, /WebGL2/);
+});
+
+test('a failed probe lands on the JS tier and carries the driver reason', () => {
+  const decision = selectTier({ ...FULL, probe: { ok: false, reason: 'link failed: hue' } });
+  assert.equal(decision.tier, TIER_JS);
+  assert.match(decision.verdict, /link failed: hue/, 'the harness has to be able to show why');
+});
+
+test('an unprobed context never reaches a GPU tier', () => {
+  // getContext('webgl2') !== null says nothing about whether the shader
+  // compiler works. Trusting it renders black on the phones that matter.
+  const decision = selectTier({ ...FULL, probe: null });
+  assert.equal(decision.tier, TIER_JS);
+  assert.match(decision.verdict, /probe/);
+});
+
+test('OffscreenCanvas without transferControlToOffscreen is tier 2, not tier 1', () => {
+  // Two separate features. Safari shipped the constructor before the transfer
+  // method (16.4, 2023); probing the constructor alone gives older iOS Safari a
+  // canvas it cannot present.
+  const decision = selectTier({ ...FULL, transferControl: false });
+  assert.equal(decision.tier, TIER_MAIN_GPU);
+  assert.match(decision.verdict, /transferControlToOffscreen/);
+
+  assert.equal(selectTier({ ...FULL, offscreenCanvas: false, transferControl: false }).tier, TIER_MAIN_GPU);
+});
+
+test('the full capability set reaches tier 1', () => {
+  const decision = selectTier(FULL);
+  assert.equal(decision.tier, TIER_WORKER_GPU);
+  assert.ok(decision.verdict.length > 0);
+});
+
+test('probeCapabilities reports no GPU in Node, and selectTier agrees', () => {
+  const caps = probeCapabilities();
+  assert.equal(caps.webgl2, false);
+  assert.equal(caps.probe, null);
+  assert.equal(selectTier(caps).tier, TIER_JS);
+  assert.equal(tierOverrideFrom('?tier=2'), 2);
+  assert.equal(tierOverrideFrom('?tier=9'), null);
+  assert.equal(tierOverrideFrom('?other=1'), null);
+  assert.equal(tierOverrideFrom(''), null);
+  assert.equal(tierOverrideFrom(undefined), null);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

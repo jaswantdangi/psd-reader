@@ -25,3 +25,7 @@ export {
   conformancePattern, conformanceProject, compareRenders, verdictFor,
   CONFORMANCE_MODES, CONFORMANCE_SIZE,
 } from './conformance.js';
+export {
+  selectTier, tierOverrideFrom, probeCapabilities, CONTEXT_ATTRIBUTES,
+  TIER_WORKER_GPU, TIER_MAIN_GPU, TIER_JS,
+} from './gpu/detect.js';
