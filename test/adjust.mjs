@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   CLASS_A_ORDER, OPS, NEUTRAL_ADJUST, createAdjust,
   buildLut, lutDigest, lutFor, isNeutralAdjust, adjustCostOf,
+  createScratch, acquireScratch, releaseScratch,
 } from '../src/index.js';
 
 let passed = 0;
@@ -167,6 +168,55 @@ test('adjustCostOf reports the three cost terms separately', () => {
   assert.deepEqual(adjustCostOf(null), { lut: false, hsl: false, overlay: false });
   assert.deepEqual(adjustCostOf(createAdjust({ contrast: 5 })),
     { lut: true, hsl: false, overlay: false });
+});
+
+console.log('\nthe shared scratch\n');
+
+test('acquireScratch returns a view of exactly the requested size', () => {
+  const s = createScratch();
+  const view = acquireScratch(s, 3, 2);
+  assert.equal(view.width, 3);
+  assert.equal(view.height, 2);
+  assert.equal(view.data.length, 3 * 2 * 4);
+  assert.ok(view.data instanceof Uint8ClampedArray);
+});
+
+test('a smaller request reuses the buffer without allocating', () => {
+  const s = createScratch();
+  acquireScratch(s, 64, 64);
+  const after = s.allocations;
+  acquireScratch(s, 8, 8);
+  acquireScratch(s, 1, 1);
+  assert.equal(s.allocations, after, 'a shrink must never allocate');
+});
+
+test('a larger request grows the buffer exactly once', () => {
+  const s = createScratch();
+  acquireScratch(s, 8, 8);
+  assert.equal(s.allocations, 1);
+  acquireScratch(s, 64, 64);
+  assert.equal(s.allocations, 2);
+  acquireScratch(s, 64, 64);
+  assert.equal(s.allocations, 2);
+});
+
+test('the view is rect-sized, so a previous larger layer\'s bytes are unreachable', () => {
+  // Not "unread" -- unreachable. A big adjusted layer followed by a small one
+  // must not be able to leak a single pixel of the first into the second, and
+  // a length is a stronger guarantee than a loop bound someone can edit.
+  const s = createScratch();
+  acquireScratch(s, 4, 4).data.fill(255);
+  const small = acquireScratch(s, 2, 2);
+  assert.equal(small.data.length, 16);
+});
+
+test('releaseScratch drops the buffer so it can be collected before an encode peak', () => {
+  const s = createScratch();
+  acquireScratch(s, 32, 32);
+  releaseScratch(s);
+  assert.equal(s.data, null);
+  assert.equal(s.bytes, 0);
+  assert.equal(acquireScratch(s, 4, 4).data.length, 64, 'it must still work afterwards');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
