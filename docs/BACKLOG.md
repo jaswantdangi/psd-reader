@@ -11,6 +11,21 @@ place they survive.
 
 ## Correctness gaps (highest priority)
 
+- **Streaming does not release mask pixels — a live memory leak.** `src/reader.js`
+  clears `imageData`, `canvas` and `rawData` after each `onLayer` call, but not
+  `layer.mask.imageData`, which `decodeLayerPixels` has already populated. Measured
+  on `fixtures/masks.src.psd`: **104 KB of mask pixels still resident** after a
+  streamed load that reports zero retained layer pixels. It scales with layer area,
+  so a poster-sized masked layer retains tens of MB.
+
+  This invalidates part of the Phase 1A memory claim. The spike that measured
+  `retainedFullResMB: 0` used **synthetic fixtures with no masks**, so it could not
+  have caught this — the guarantee was verified on a case that could not fail.
+
+  Fix is the same change as the Phase 2 mask prerequisite: downscale the mask
+  alongside its layer in `loadProjectProxy` and release the full-resolution
+  original. Doing both at once nets a memory *reduction* rather than a cost.
+
 - **Layer masks AND clipping are dropped by the editor.** `src/composite.js` applies
   both (17 `mask` references, 12 `clip`); `src/edit.js` and `src/render.js` contain
   **zero of either**. So the read-only compositor honours them, but any document
