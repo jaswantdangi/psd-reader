@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import {
   layerRect, pixelRect, projectMask, downscaleMask, resampleMask,
-  readDocument, createProject,
+  readDocument, createProject, loadProjectProxy,
 } from '../src/index.js';
 
 let passed = 0;
@@ -200,6 +200,45 @@ test('createProject counts the leaves flatten() dropped', () => {
   // Without this the "empty document" state is blank and inexplicable: every
   // leaf was pixel-less, and the screen can say so only if it knows how many.
   assert.equal(createProject(grouped(), 'grouped.psd').skippedLeaves, 1);
+});
+
+console.log('\nproxy masks\n');
+
+let startInfo = null;
+const progressTotals = [];
+const proxyMasked = await loadProjectProxy(bytesOf('fixtures/vector-and-mask.src.psd'), {
+  fileName: 'vector-and-mask.src.psd',
+  proxyEdge: 48,                       // 101x98 document, so this really downscales
+  onStart: (info) => { startInfo = info; },
+  onProgress: (decoded, total) => { progressTotals.push([decoded, total]); },
+});
+
+test('a streamed masked load keeps the mask on the proxy pixel grid', () => {
+  const layer = proxyMasked.layers[0];
+  assert.ok(layer.mask, 'the mask was dropped by the streamed path');
+  assert.equal(layer.mask.width, layer.pixels.width);
+  assert.equal(layer.mask.height, layer.pixels.height);
+  assert.ok(layer.pixels.width < layer.sourceW, 'proxyEdge 48 must actually downscale');
+});
+
+test('the proxy mask is one byte per pixel, not four', () => {
+  // The whole memory argument. Sixty full-canvas masked layers at RGBA would
+  // be ~189 MB of channels holding the same value.
+  const layer = proxyMasked.layers[0];
+  assert.ok(layer.mask.data instanceof Uint8Array);
+  assert.equal(layer.mask.data.length, layer.mask.width * layer.mask.height);
+});
+
+test('onStart reports the leaf count before any layer is decoded', () => {
+  assert.ok(startInfo, 'onStart never fired');
+  assert.equal(startInfo.layers, 1, 'vector-and-mask.src.psd has one leaf');
+  assert.equal(startInfo.width, 101);
+});
+
+test('onProgress reports the total alongside the running count', () => {
+  // A determinate bar needs both numbers. Reporting only `decoded` is what
+  // makes a 20-second wait indistinguishable from a hang.
+  assert.deepEqual(progressTotals, [[1, 1]]);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

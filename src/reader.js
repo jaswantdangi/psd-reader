@@ -79,9 +79,10 @@ async function readMetadata(bytes, warnings) {
  * @param {(layer: object, pixels: {width:number,height:number,data:Uint8ClampedArray}|undefined) => any} [options.onLayer]
  *   Required when `pixels: 'stream'`. Copy what you need before returning —
  *   the buffer is released immediately afterwards.
- * @param {(size: {width: number, height: number}) => any} [options.onStart]
+ * @param {(info: {width: number, height: number, layers: number}) => any} [options.onStart]
  *   `pixels: 'stream'` only. Fires once, after the structure parse and before
  *   any layer is decoded, so a caller can size proxies without a second parse.
+ *   `layers` is the number of leaf nodes that will be streamed.
  * @param {(layer: object, sourceIndex: number) => boolean} [options.wantLayer]
  *   `pixels: 'stream'` only. Return false to skip the decode entirely. The
  *   sourceIndex counter still advances for a skipped layer, so refusing one
@@ -127,8 +128,16 @@ export async function readDocument(source, options = {}) {
 
   if (pixels === 'stream') {
     // Fires after the structure parse, before any layer is decoded, so a
-    // caller can size its proxies without parsing the file a second time.
-    if (typeof onStart === 'function') await onStart({ width: psd.width, height: psd.height });
+    // caller can size its proxies without parsing the file a second time. The
+    // leaf count rides along because it is already computed here and nowhere
+    // cheaper -- it is what turns a 12-20 second decode from a spinner into a
+    // determinate bar.
+    if (typeof onStart === 'function')
+      await onStart({
+        width: psd.width,
+        height: psd.height,
+        layers: layers.reduce((n, l) => (l.children ? n : n + 1), 0),
+      });
 
     // Identity for every leaf the file contains, assigned before any decision
     // about whether to decode it. edit.js's flatten() drops leaves with neither
