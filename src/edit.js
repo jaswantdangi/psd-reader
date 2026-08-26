@@ -216,6 +216,24 @@ function flatten(children, out, warnings, path = [], stats = { skipped: 0 }, inW
 }
 
 /**
+ * Leaves carrying a vector mask that nothing in this codebase rasterises.
+ *
+ * ag-psd exposes `layer.vectorMask` and `mask.fromVectorData`; neither is ever
+ * consulted by composite.js or render.js. A layer whose ONLY mask is vector
+ * data therefore renders completely unmasked, in the inspector and the editor
+ * alike. Photoshop sometimes also writes a rasterised copy into `mask.imageData`
+ * -- when it has, the layer renders correctly and must not be warned about.
+ */
+function countUnrasterisedVectorMasks(children) {
+  let n = 0;
+  for (const node of children || []) {
+    if (node.children) { n += countUnrasterisedVectorMasks(node.children); continue; }
+    if (node.vectorMask && !node.mask?.imageData && !node.proxyMask) n++;
+  }
+  return n;
+}
+
+/**
  * @param {object} doc  Result of `readDocument()` — either `pixels: 'eager'`,
  *   or `pixels: 'stream'` with proxies stashed on each node as `proxyData`.
  * @param {string} fileName
@@ -226,6 +244,30 @@ export function createProject(doc, fileName = 'untitled.psd', options = {}) {
   const warnings = new Set();
   const stats = { skipped: 0 };
   const layers = flatten(doc.children, [], warnings, [], stats);
+
+  // The reader's own findings -- the Patt pattern warning and ag-psd's whole
+  // Unhandled feature list -- were being dropped on the floor here. The shape
+  // is the real bug: createProject takes a doc and ignores a field on it.
+  for (const warning of doc.warnings || []) warnings.add(warning);
+
+  // Clipping is CARRIED but NOT APPLIED. This is one of three disclosure
+  // surfaces the spec requires; the per-row chip and the Clipped filter are the
+  // other two. None of them is dismissible, because the file's clip runs are a
+  // permanent property of the document and reordering silently destroys them.
+  const clipped = layers.filter((l) => l.clipping).length;
+  if (clipped)
+    warnings.add(
+      `${clipped} layer${clipped === 1 ? ' is' : 's are'} clipped to the layer below. ` +
+      `Clipping is not applied — ${clipped === 1 ? 'it is' : 'they are'} drawn in full and will ` +
+      `differ from Photoshop. Reordering will not restore the relationship.`,
+    );
+
+  const vectorMasked = countUnrasterisedVectorMasks(doc.children);
+  if (vectorMasked)
+    warnings.add(
+      `${vectorMasked} layer${vectorMasked === 1 ? ' has' : 's have'} a vector mask. Vector masks are ` +
+      `not rasterised — ${vectorMasked === 1 ? 'that layer is' : 'those layers are'} drawn unmasked.`,
+    );
 
   return {
     fileName,

@@ -309,4 +309,37 @@ test('at proxyScale the mask needs no resampling at all', () => {
   assert.equal(resampleMask(layer.mask, rectWidth, layer.pixels.height), layer.mask.data);
 });
 
+console.log('\ndocument warnings\n');
+
+/** Four leaves, three of them vector-masked with no mask raster at all. */
+const vectorsDoc = await readDocument(bytesOf('fixtures/vectors.src.psd'), { pixels: 'eager', metadata: false });
+
+test('the reader\'s own warnings reach the project', () => {
+  // createProject took a doc and ignored a field on it. Every fixture carries
+  // the Patt pattern warning, and until now the editor could not surface it.
+  const project = createProject(maskedDoc, 'vector-and-mask.src.psd');
+  assert.ok(maskedDoc.warnings.length > 0, 'fixture must carry reader warnings');
+  for (const w of maskedDoc.warnings) assert.ok(project.warnings.includes(w), `dropped: ${w}`);
+});
+
+test('clipped layers raise a warning that says clipping is not applied', () => {
+  const project = createProject(grouped(), 'grouped.psd');
+  const w = project.warnings.find((x) => /clipped/i.test(x));
+  assert.ok(w, 'a clipped layer must raise a document warning');
+  assert.match(w, /1 layer/);
+  assert.match(w, /not applied/i);
+});
+
+test('a document with nothing clipped raises no clipping warning', () => {
+  const project = createProject(maskedDoc, 'vector-and-mask.src.psd');
+  assert.equal(project.warnings.some((x) => /clipped/i.test(x)), false);
+});
+
+test('vector masks with no raster are counted and warned about', () => {
+  // Those three layers render UNMASKED, everywhere, silently — until now.
+  const w = createProject(vectorsDoc, 'vectors.src.psd').warnings.find((x) => /vector mask/i.test(x));
+  assert.ok(w, 'a vector-masked layer must raise a document warning');
+  assert.match(w, /3 layers/);
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
