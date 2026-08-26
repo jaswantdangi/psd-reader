@@ -27,13 +27,13 @@ test('flattens the tree into an ordered layer list', () => {
 
 test('layers start at their original bounds', () => {
   const l = project.layers[0];
+  // Documentation, not a trap: since sourceW/H are derived from the same bounds
+  // as w/h, this cannot fail. There is no discriminating assertion available on
+  // an eager load, where proxyW/H, sourceW/H and pixels.width all coincide by
+  // construction. The assertion that can actually catch a regression lives in
+  // test/proxy.mjs, against a genuinely downscaled fixture.
   assert.equal(l.w, l.sourceW);
   assert.equal(l.h, l.sourceH);
-  // `w === sourceW` alone cannot fail now that both derive from the same bounds.
-  // On an eager load the buffer is the full-resolution raster, so proxyW/H must
-  // agree with it — that is the assertion with something to catch.
-  assert.equal(l.proxyW, l.pixels.width);
-  assert.equal(l.proxyH, l.pixels.height);
 });
 
 test('move is undoable', () => {

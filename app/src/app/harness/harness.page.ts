@@ -50,11 +50,24 @@ export class HarnessPage {
     this.busy.set(true);
     this.status.set(`reading ${file.name}…`);
 
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const t0 = performance.now();
-    const result = await this.loader.load(bytes, file.name, `file://${file.name}`);
-    const ms = Math.round(performance.now() - t0);
-    this.busy.set(false);
+    let result;
+    let ms = 0;
+    try {
+      // `loader.load` resolves rather than rejects on every failure it handles,
+      // but reading the file and constructing the Worker can both still throw.
+      // Without the finally, `busy` would stick true and the progress line would
+      // stay on screen forever — the same stuck-UI failure this is meant to show.
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const t0 = performance.now();
+      result = await this.loader.load(bytes, file.name, `file://${file.name}`);
+      ms = Math.round(performance.now() - t0);
+    } catch (e: any) {
+      this.error.set(`Could not read ${file.name}: ${e?.message ?? e}`);
+      this.status.set('');
+      return;
+    } finally {
+      this.busy.set(false);
+    }
 
     if (!result.ok) { this.error.set(result.message); this.status.set(''); return; }
 

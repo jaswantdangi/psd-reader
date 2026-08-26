@@ -45,6 +45,14 @@ place they survive.
   it would pass if `onProgress` fired exactly once. Two characters to strengthen.
 - **No test exercises 2/4/8 GB device memory**, which all clamp to the same budget.
   One assertion that they do would document the two-valued reality above.
+- **`test/edit.mjs`'s "layers start at their original bounds" cannot fail.** Since
+  `sourceW/H` are derived from the same bounds as `w/h`, the assertion is
+  documentation. An attempt to strengthen it with `proxyW === pixels.width` was
+  reverted — that is tautological too, because `proxyW` and `pixels` are assigned
+  from the same object in the same literal in `toLayer()`, and on an eager load
+  every one of those dimensions coincides anyway. The discriminating coverage lives
+  in `test/proxy.mjs` against a genuinely downscaled fixture. Worth revisiting only
+  if `edit.mjs` ever gains a proxy-loaded fixture.
 
 ## App (`app/`)
 
