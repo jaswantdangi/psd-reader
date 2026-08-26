@@ -50,3 +50,7 @@ export {
   renderScaleFor, cssZoomFor, maxDocScale, isPreviewQuality,
   ZOOM_MAX_FACTOR, MIN_DOC_SCALE, MIN_VISIBLE_PX,
 } from './view.js';
+export {
+  HANDLES, HANDLE_HIT_CSS_PX, TAP_SLOP_CSS_PX, MIN_LAYER_SIZE,
+  handleAt, arbitrate, anchorFor, resizeFrom, moveBy, isTap,
+} from './gesture.js';

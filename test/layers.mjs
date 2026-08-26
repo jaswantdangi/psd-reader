@@ -8,6 +8,8 @@ import {
   toProjectJson, applyProjectJson,
   createView, viewToDoc, docToView, fitView, zoomAbout, clampView,
   renderScaleFor, cssZoomFor, maxDocScale, isPreviewQuality,
+  HANDLES, HANDLE_HIT_CSS_PX, TAP_SLOP_CSS_PX, MIN_LAYER_SIZE,
+  handleAt, arbitrate, anchorFor, resizeFrom, moveBy, isTap,
 } from '../src/index.js';
 
 let passed = 0;
@@ -536,6 +538,82 @@ test('clampView keeps a corner of the document reachable', () => {
   const far = clampView(createView({ docScale: 1, panX: 99999, panY: -99999 }), project, viewport, { minVisible: 48 });
   assert.equal(far.panX, 400 - 48, 'panned right until only a sliver is left');
   assert.equal(far.panY, 48 - 1000, 'panned up until only a sliver is left');
+});
+
+console.log('\ngestures\n');
+
+const SEL = { x: 100, y: 100, w: 200, h: 100 };   // document coords
+const inside = { x: 150, y: 150 };
+const outside = { x: 900, y: 900 };
+const corner = { x: 300, y: 200 };                // the SE handle
+
+test('two pointers are always the view, even starting inside the selection', () => {
+  // No ambiguous case: a pinch can never fight a transform, and a second finger
+  // never turns into an accidental edit.
+  const g = arbitrate({ pointerCount: 2, selection: SEL, docPoint: inside, handleRadius: 20 });
+  assert.equal(g.kind, 'view-pinch');
+});
+
+test('one pointer on a corner handle scales the selection', () => {
+  const g = arbitrate({ pointerCount: 1, selection: SEL, docPoint: corner, handleRadius: 20 });
+  assert.equal(g.kind, 'scale');
+  assert.equal(g.handle, 'se');
+});
+
+test('one pointer inside the selection moves it', () => {
+  const g = arbitrate({ pointerCount: 1, selection: SEL, docPoint: inside, handleRadius: 20 });
+  assert.equal(g.kind, 'move');
+  assert.equal(g.handle, null);
+});
+
+test('one pointer anywhere else pans the view', () => {
+  const g = arbitrate({ pointerCount: 1, selection: SEL, docPoint: outside, handleRadius: 20 });
+  assert.equal(g.kind, 'view-pan');
+});
+
+test('with nothing selected, one pointer always pans', () => {
+  // The whole reason the first move of a layer is tap-then-drag.
+  const g = arbitrate({ pointerCount: 1, selection: null, docPoint: inside, handleRadius: 20 });
+  assert.equal(g.kind, 'view-pan');
+});
+
+test('handleAt picks the nearest corner inside the radius and nothing outside it', () => {
+  assert.equal(handleAt(SEL, 102, 103, 20), 'nw');
+  assert.equal(handleAt(SEL, 298, 199, 20), 'se');
+  assert.equal(handleAt(SEL, 200, 150, 20), null, 'the middle is not a handle');
+  assert.equal(handleAt(SEL, 130, 100, 20), null, 'just past the radius is not a handle');
+});
+
+test('resizeFrom anchors the opposite corner', () => {
+  assert.deepEqual(anchorFor('se', SEL), { x: 100, y: 100 });
+  assert.deepEqual(resizeFrom(SEL, 'se', 400, 500), { x: 100, y: 100, w: 300, h: 400 });
+  assert.deepEqual(resizeFrom(SEL, 'nw', 50, 60), { x: 50, y: 60, w: 250, h: 140 });
+});
+
+test('resizeFrom clamps at the minimum size instead of flipping, on every handle', () => {
+  // A flip is a state the project model cannot express: w/h have no sign, and
+  // renderProject does Math.max(1, round(w * scale)). Allowing the gesture
+  // would preview a flipped layer and export an unflipped one.
+  for (const handle of HANDLES) {
+    const anchor = anchorFor(handle, SEL);
+    const out = resizeFrom(SEL, handle, anchor.x, anchor.y);
+    assert.equal(out.w, MIN_LAYER_SIZE, `${handle} produced w=${out.w}`);
+    assert.equal(out.h, MIN_LAYER_SIZE, `${handle} produced h=${out.h}`);
+  }
+  // Dragging far PAST the anchor must not mirror the layer to the other side.
+  const past = resizeFrom(SEL, 'se', -5000, -5000);
+  assert.equal(past.w, MIN_LAYER_SIZE);
+  assert.equal(past.x, 100, 'the anchored corner must not move');
+});
+
+test('moveBy rounds to whole document pixels and never changes size', () => {
+  const out = moveBy(SEL, 12.4, -3.6);
+  assert.deepEqual(out, { x: 112, y: 96, w: 200, h: 100 });
+});
+
+test('isTap is true only below the slop', () => {
+  assert.equal(isTap(2, 2, TAP_SLOP_CSS_PX), true);
+  assert.equal(isTap(0, 9, TAP_SLOP_CSS_PX), false);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
