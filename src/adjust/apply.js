@@ -10,7 +10,10 @@
  * spec: four consumers depend on it and three of them fail silently.
  */
 import { buildLut } from './lut.js';
-import { HSL_BANDS, HSL_HUE_DEGREES, bandWeights, isNeutralHsl } from './ops.js';
+import { blendInto } from '../composite.js';
+import {
+  HSL_BANDS, HSL_HUE_DEGREES, bandWeights, isNeutralHsl, isNeutralOverlay,
+} from './ops.js';
 
 /**
  * Do two typed-array views share bytes?
@@ -64,6 +67,10 @@ export function applyAdjustments(pixels, adjust, out, lut = null) {
   // Stage 2. Skipped entirely when neutral, decided ONCE per layer per frame
   // from the parameters, never per pixel.
   if (adjust?.hsl && !isNeutralHsl(adjust.hsl)) applyHsl(dst, count, adjust.hsl);
+
+  // Stage 3. Pointwise in the pixel's NORMALISED position, so it is
+  // scale-invariant and tiles with no halo.
+  if (adjust?.overlay && !isNeutralOverlay(adjust.overlay)) applyOverlay(out, adjust.overlay);
 
   return out;
 }
@@ -149,5 +156,82 @@ export function applyHsl(dst, count, hsl) {
     hslToRgb(h, s, l, c);
     dst[o] = c[0]; dst[o + 1] = c[1]; dst[o + 2] = c[2];
     // dst[o + 3] deliberately untouched -- invariant A
+  }
+}
+
+/** The gradient colour at `t`, written into `out` as r, g, b, a(0..1). */
+function sampleStops(stops, t, out) {
+  const first = stops[0];
+  if (t <= first.t) { out[0] = first.r; out[1] = first.g; out[2] = first.b; out[3] = first.a; return; }
+  const last = stops[stops.length - 1];
+  if (t >= last.t) { out[0] = last.r; out[1] = last.g; out[2] = last.b; out[3] = last.a; return; }
+
+  for (let i = 1; i < stops.length; i++) {
+    const b = stops[i];
+    if (t > b.t) continue;
+    const a = stops[i - 1];
+    const span = b.t - a.t;
+    const f = span > 0 ? (t - a.t) / span : 0;
+    out[0] = a.r + (b.r - a.r) * f;
+    out[1] = a.g + (b.g - a.g) * f;
+    out[2] = a.b + (b.b - a.b) * f;
+    out[3] = a.a + (b.a - a.a) * f;
+    return;
+  }
+}
+
+/**
+ * Paint a procedural gradient over the adjusted buffer, in place.
+ *
+ * Row by row, through blendInto. Two reasons, both about not building a second
+ * compositor: the 26 blend modes stay in ONE implementation -- the
+ * pixel-validated oracle -- and the gradient needs only a `width * 4` row
+ * buffer rather than a second full-size scratch, which the export peak cannot
+ * afford.
+ *
+ * The gradient position is normalised: (x + 0.5) / width, never a pixel offset.
+ * That is the whole scale-invariance argument, and it is one line.
+ */
+export function applyOverlay(out, overlay) {
+  const { width, height } = out;
+  const row = new Uint8ClampedArray(width * 4);
+  const alphas = new Uint8ClampedArray(width);
+  const sample = new Float64Array(4);
+  const radians = (overlay.angle * Math.PI) / 180;
+  const ca = Math.cos(radians);
+  const sa = Math.sin(radians);
+  const radial = overlay.kind === 'radial';
+  const rect = { left: 0, top: 0, width, height: 1 };
+
+  for (let y = 0; y < height; y++) {
+    const v = (y + 0.5) / height;
+    const base = y * width * 4;
+
+    for (let x = 0; x < width; x++) {
+      const u = (x + 0.5) / width;
+      const t = radial
+        ? Math.min(1, Math.hypot(u - overlay.cx, v - overlay.cy) / overlay.radius)
+        : Math.min(1, Math.max(0, 0.5 + (u - 0.5) * ca + (v - 0.5) * sa));
+
+      sampleStops(overlay.stops, t, sample);
+
+      const dstAlpha = out.data[base + x * 4 + 3];
+      alphas[x] = dstAlpha;
+      row[x * 4] = sample[0];
+      row[x * 4 + 1] = sample[1];
+      row[x * 4 + 2] = sample[2];
+      // Clipped to the layer's OWN alpha. Without this a gradient paints into
+      // the transparent region and turns a cut-out into a rectangle.
+      row[x * 4 + 3] = sample[3] * 255 * (dstAlpha / 255);
+    }
+
+    rect.top = y;
+    blendInto(out, row, rect, overlay.opacity, overlay.mode);
+
+    // blendInto is a GENERAL compositor: ao = as + ab(1 - as) raises alpha on
+    // every partially transparent pixel. An overlay tints; it does not add
+    // coverage. Restoring the column is what keeps invariant A true rather than
+    // nearly true.
+    for (let x = 0; x < width; x++) out.data[base + x * 4 + 3] = alphas[x];
   }
 }

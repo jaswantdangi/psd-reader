@@ -16,7 +16,7 @@
  * texture and reads them with texelFetch, so there is no shader arithmetic to
  * diverge. Divergence is not reduced there, it is structurally impossible.
  */
-import { CLASS_A_ORDER, OPS, isNeutralHsl } from './ops.js';
+import { CLASS_A_ORDER, OPS, isNeutralHsl, isNeutralOverlay } from './ops.js';
 
 /**
  * Compose the whole class-A stack into one table.
@@ -85,7 +85,7 @@ export function isNeutralAdjust(adjust) {
   for (const id of CLASS_A_ORDER)
     if ((adjust[id] ?? OPS[id].neutral) !== OPS[id].neutral) return false;
   if (adjust.hsl && !isNeutralHsl(adjust.hsl)) return false;
-  return !adjust.overlay;
+  return !adjust.overlay || isNeutralOverlay(adjust.overlay);
 }
 
 /**
@@ -100,5 +100,5 @@ export function isNeutralAdjust(adjust) {
 export const adjustCostOf = (adjust) => ({
   lut: !!adjust && CLASS_A_ORDER.some((id) => (adjust[id] ?? OPS[id].neutral) !== OPS[id].neutral),
   hsl: !!adjust?.hsl && !isNeutralHsl(adjust.hsl),
-  overlay: !!adjust?.overlay,
+  overlay: !!adjust?.overlay && !isNeutralOverlay(adjust.overlay),
 });

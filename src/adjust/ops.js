@@ -30,6 +30,8 @@
  * whole composition, so five stacked ops do not clip five times.
  */
 
+import { SUPPORTED_BLEND_MODES } from '../composite.js';
+
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
 /**
@@ -131,10 +133,8 @@ export function createAdjust(partial = {}) {
     out[id] = Number.isFinite(raw) ? clamp(raw, op.range[0], op.range[1]) : op.neutral;
   }
 
-  // Structural pass-through for now: Task 5 and Task 6 replace these two lines
-  // with normaliseHsl() and normaliseOverlay(), which clamp and complete them.
   out.hsl = partial.hsl ? normaliseHsl(partial.hsl) : null;
-  out.overlay = partial.overlay ? structuredClone(partial.overlay) : null;
+  out.overlay = partial.overlay ? normaliseOverlay(partial.overlay) : null;
 
   return deepFreeze(out);
 }
@@ -296,4 +296,74 @@ OPS.hsl = {
   class: 'B', lut: false, glsl: HSL_GLSL, gpuDeferred: null,
   label: 'HSL', range: null, neutral: null,
   evaluate: null,          // cross-channel: it cannot be a per-channel function
+};
+
+export const OVERLAY_KINDS = ['linear', 'radial'];
+
+/** A gradient needs two stops. This is what a missing or ragged one becomes. */
+const DEFAULT_STOPS = () => ([
+  { t: 0, r: 0, g: 0, b: 0, a: 0 },
+  { t: 1, r: 0, g: 0, b: 0, a: 0 },
+]);
+
+/**
+ * Complete, clamp and sort an overlay.
+ *
+ * Everything here is in NORMALISED layer coordinates -- cx, cy and radius are
+ * fractions of the layer rect, never pixels -- which is what makes the overlay
+ * scale-invariant and is why no proxyScale term appears anywhere in this file.
+ */
+export function normaliseOverlay(overlay) {
+  const stops = (Array.isArray(overlay?.stops) ? overlay.stops : [])
+    .map((s) => ({
+      t: clamp(Number(s?.t) || 0, 0, 1),
+      r: clamp(Math.round(Number(s?.r) || 0), 0, 255),
+      g: clamp(Math.round(Number(s?.g) || 0), 0, 255),
+      b: clamp(Math.round(Number(s?.b) || 0), 0, 255),
+      a: clamp(Number(s?.a ?? 1), 0, 1),
+    }))
+    .sort((p, q) => p.t - q.t);
+
+  const angle = Number(overlay?.angle);
+  const radius = Number(overlay?.radius ?? 0.7071);
+
+  return {
+    kind: OVERLAY_KINDS.includes(overlay?.kind) ? overlay.kind : 'linear',
+    angle: Number.isFinite(angle) ? angle : 0,
+    cx: clamp(Number(overlay?.cx ?? 0.5) || 0, -1, 2),
+    cy: clamp(Number(overlay?.cy ?? 0.5) || 0, -1, 2),
+    // A zero radius divides by zero and paints the far stop everywhere.
+    radius: Number.isFinite(radius) && radius > 0 ? radius : 0.7071,
+    stops: stops.length >= 2 ? stops : DEFAULT_STOPS(),
+    // Chosen from OUR list, not the file's -- so Phase 2's "current value not in
+    // the picker" case cannot arise for an overlay, and does not need
+    // duplicating here for no reason.
+    mode: SUPPORTED_BLEND_MODES.includes(overlay?.mode) ? overlay.mode : 'normal',
+    opacity: clamp(Number(overlay?.opacity ?? 1), 0, 1),
+  };
+}
+
+/** Nothing to paint: no opacity, or every stop fully transparent. */
+export const isNeutralOverlay = (overlay) =>
+  !overlay || overlay.opacity <= 0 || (overlay.stops ?? []).every((s) => s.a <= 0);
+
+/**
+ * The one positional op.
+ *
+ * `gpuDeferred` is not a to-do, it is a DESIGN CONSTRAINT that has to be
+ * resolved before an overlay can run on a GPU tier: the fragment program
+ * already specialises on the LAYER's blend mode (programNameFor -- one program
+ * per mode, deliberately never a switch on a uniform), and an overlay carries
+ * its OWN mode from the same 26. Supporting both makes the program key a 26x26
+ * matrix, which nothing in 1B anticipated. Until 1B-2 resolves it, a layer
+ * carrying an overlay must stay on the JS tier -- which costs nothing today,
+ * because selectTier returns TIER_JS for everything with the verdict
+ * 'shader probe not run'.
+ */
+OPS.overlay = {
+  class: 'P', lut: false, glsl: null,
+  gpuDeferred: 'a per-layer overlay blend mode multiplied by the layer\'s own is a 26x26 ' +
+               'program matrix that programNameFor cannot express; resolve in 1B-2',
+  label: 'Overlay', range: null, neutral: null,
+  evaluate: null,
 };

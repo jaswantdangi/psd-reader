@@ -5,6 +5,7 @@ import {
   createScratch, acquireScratch, releaseScratch,
   applyAdjustments,
   HSL_BANDS, NEUTRAL_HSL, normaliseHsl, isNeutralHsl, bandWeights, applyHsl,
+  SUPPORTED_BLEND_MODES, normaliseOverlay, isNeutralOverlay,
 } from '../src/index.js';
 
 let passed = 0;
@@ -403,6 +404,120 @@ test('normaliseHsl always returns eight clamped bands, and isNeutralHsl agrees',
   const opened = createAdjust({ hsl: { bands: NEUTRAL_BANDS(), saturation: 0 } });
   assert.equal(isNeutralAdjust(opened), true);
   assert.equal(adjustCostOf(opened).hsl, false);
+});
+
+console.log('\nthe gradient overlay\n');
+
+const RAMP = [{ t: 0, r: 0, g: 0, b: 0, a: 1 }, { t: 1, r: 255, g: 255, b: 255, a: 1 }];
+
+/** An opaque black row, `w` wide. */
+const blackRow = (w) => {
+  const data = new Uint8ClampedArray(w * 4);
+  for (let i = 0; i < w; i++) data[i * 4 + 3] = 255;
+  return { width: w, height: 1, data };
+};
+
+test('a linear gradient samples at NORMALISED positions, identically at two resolutions', () => {
+  // The scale-invariance claim, made checkable. Every Phase 3 operation is
+  // pointwise and carries no length parameter, so preview and export apply the
+  // same function -- there is no proxyScale term to get wrong and nowhere for a
+  // preview/export mismatch to hide. That is what the radius exclusion buys.
+  const overlay = createAdjust({
+    overlay: { kind: 'linear', angle: 0, stops: RAMP, mode: 'normal', opacity: 1 },
+  });
+  for (const width of [4, 8, 64]) {
+    const src = blackRow(width);
+    const out = applyAdjustments(src, overlay, blank(src));
+    for (let x = 0; x < width; x++)
+      assert.equal(out.data[x * 4], Math.round(255 * ((x + 0.5) / width)),
+        `width ${width}, x ${x}`);
+  }
+});
+
+test('a radial gradient is centred and rises away from the centre', () => {
+  const overlay = createAdjust({
+    overlay: { kind: 'radial', cx: 0.5, cy: 0.5, radius: 0.5, stops: RAMP,
+               mode: 'normal', opacity: 1 },
+  });
+  const src = blackRow(4);
+  const out = applyAdjustments(src, overlay, blank(src));
+  assert.equal(out.data[0], out.data[12], 'symmetric about the centre');
+  assert.ok(out.data[4] < out.data[0], 'the centre is nearer the near stop');
+});
+
+test('a transparent pixel is untouched in all four channels', () => {
+  // Without the alpha clip a gradient paints into the transparent region and
+  // turns a cut-out into a rectangle.
+  const src = { width: 2, height: 1, data: new Uint8ClampedArray([9, 9, 9, 0, 9, 9, 9, 255]) };
+  const overlay = createAdjust({
+    overlay: { kind: 'linear', angle: 0, mode: 'normal', opacity: 1,
+               stops: [{ t: 0, r: 255, g: 0, b: 0, a: 1 }, { t: 1, r: 255, g: 0, b: 0, a: 1 }] },
+  });
+  const out = applyAdjustments(src, overlay, blank(src));
+  assert.deepEqual([...out.data.slice(0, 4)], [9, 9, 9, 0], 'the transparent pixel is untouched');
+  assert.equal(out.data[4], 255, 'the opaque pixel took the overlay');
+});
+
+test('alpha is byte-identical before and after, at every alpha band (invariant A)', () => {
+  // blendInto raises alpha (ao = as + ab(1 - as)) on every partially transparent
+  // pixel. An overlay TINTS; it does not add coverage. Restoring the column is
+  // what keeps this true rather than nearly true -- and hitTest, rect.mask and
+  // composite.js's alphaMap all depend on it.
+  const src = sweep();
+  const overlay = createAdjust({
+    overlay: { kind: 'radial', mode: 'overlay', opacity: 0.8,
+               stops: [{ t: 0, r: 200, g: 40, b: 90, a: 1 },
+                       { t: 1, r: 10, g: 220, b: 30, a: 0.6 }] },
+  });
+  const out = applyAdjustments(src, overlay, blank(src));
+  for (let i = 0; i < src.width * src.height; i++)
+    assert.equal(out.data[i * 4 + 3], src.data[i * 4 + 3], `pixel ${i}`);
+});
+
+test('a zero-opacity or fully transparent overlay is neutral and is skipped', () => {
+  const src = sweep();
+  const plain = applyAdjustments(src, createAdjust({ contrast: 12 }), blank(src));
+  for (const overlay of [
+    { kind: 'linear', stops: RAMP, mode: 'normal', opacity: 0 },
+    { kind: 'linear', mode: 'normal', opacity: 1,
+      stops: [{ t: 0, r: 255, g: 0, b: 0, a: 0 }, { t: 1, r: 0, g: 0, b: 255, a: 0 }] },
+  ]) {
+    const a = createAdjust({ contrast: 12, overlay });
+    assert.equal(isNeutralOverlay(a.overlay), true);
+    assert.equal(adjustCostOf(a).overlay, false);
+    assert.deepEqual([...applyAdjustments(src, a, blank(src)).data], [...plain.data]);
+  }
+});
+
+test('the overlay goes through blendInto, so all 26 modes are available to it', () => {
+  // Reuse, not reimplementation: a second copy of 26 blend modes inside the
+  // overlay is a second thing that can drift from the pixel-validated oracle.
+  const src = blackRow(4);
+  const seen = new Set();
+  for (const mode of SUPPORTED_BLEND_MODES) {
+    const a = createAdjust({
+      overlay: { kind: 'linear', angle: 0, stops: RAMP, mode, opacity: 1 },
+    });
+    assert.equal(a.overlay.mode, mode, `${mode} survived normalisation`);
+    seen.add(applyAdjustments(src, a, blank(src)).data.join(','));
+  }
+  assert.ok(seen.size > 1, 'different modes must produce different results');
+});
+
+test('normaliseOverlay sorts stops, completes defaults and rejects an unknown mode', () => {
+  const o = normaliseOverlay({
+    kind: 'nonsense', mode: 'dissolve', opacity: 5,
+    stops: [{ t: 1, r: 300, g: -5, b: 10, a: 2 }, { t: 0, r: 0, g: 0, b: 0, a: 1 }],
+  });
+  assert.equal(o.kind, 'linear');
+  assert.equal(o.mode, 'normal', 'dissolve is the one mode the compositor does not implement');
+  assert.equal(o.opacity, 1);
+  assert.deepEqual(o.stops.map((s) => s.t), [0, 1], 'sorted by position');
+  assert.equal(o.stops[1].r, 255);
+  assert.equal(o.stops[1].g, 0);
+  assert.equal(o.stops[1].a, 1);
+  assert.equal(normaliseOverlay({ stops: [] }).stops.length, 2, 'a gradient needs two stops');
+  assert.ok(normaliseOverlay({ radius: 0 }).radius > 0, 'a zero radius divides by zero');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
