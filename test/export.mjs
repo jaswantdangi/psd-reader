@@ -4,6 +4,7 @@ import {
   createProject, loadProjectProxy, readDocument,
   ExportError, isSelfRendering, buildExportOrder, wantedIndices, assertIdentifiable, isFastPath, planSpill,
   spillHeader, encodeSpill, decodeSpill, createMemorySpill, SPILL_MAGIC, SPILL_VERSION, SPILL_HEADER_BYTES,
+  createBuffer, drawLayerInto,
 } from '../src/index.js';
 
 let passed = 0;
@@ -288,6 +289,64 @@ await atest('the memory adapter writes, reads, removes and disposes', async () =
 await atest('reading a spill that was never written names the file', async () => {
   const spill = createMemorySpill();
   await assert.rejects(() => spill.read('9.rgba'), (e) => e.code === 'SPILL_MISSING' && /9\.rgba/.test(e.message));
+});
+
+
+console.log('\ndrawLayerInto injection\n');
+
+const solid = (w, h, [r, g, b, a]) => {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) { data[i * 4] = r; data[i * 4 + 1] = g; data[i * 4 + 2] = b; data[i * 4 + 3] = a; }
+  return { width: w, height: h, data };
+};
+const rasterLayer = (over) => ({
+  id: 1, name: 'raster', kind: 'raster', visible: true, opacity: 1, blendMode: 'normal',
+  x: 0, y: 0, w: 4, h: 4, pixels: solid(4, 4, [255, 0, 0, 255]), rerendered: false, rendered: null, text: null,
+  ...over,
+});
+
+test('injected pixels replace the layer\'s own', () => {
+  const dest = createBuffer(4, 4);
+  drawLayerInto(dest, rasterLayer(), 1, { pixels: solid(4, 4, [0, 0, 255, 255]) });
+  assert.deepEqual([...dest.data.subarray(0, 4)], [0, 0, 255, 255], 'the injected blue must win');
+});
+
+test('an explicit null means "no pixels", NOT "use the layer\'s"', () => {
+  // This is the whole reason the option is read with `in`. Under a proxy load
+  // layer.pixels is a 1024-edge thumbnail; falling back to it at scale 1 would
+  // draw a full-size blurred layer, which looks like a working export.
+  const dest = createBuffer(4, 4);
+  const missed = [];
+  drawLayerInto(dest, rasterLayer(), 1, { pixels: null, onMissing: (l, why) => missed.push(why) });
+  assert.deepEqual([...dest.data.subarray(0, 4)], [0, 0, 0, 0], 'nothing may be drawn');
+  assert.deepEqual(missed, ['raster']);
+});
+
+test('omitting the option keeps the existing behaviour exactly', () => {
+  const dest = createBuffer(4, 4);
+  drawLayerInto(dest, rasterLayer(), 1);
+  assert.deepEqual([...dest.data.subarray(0, 4)], [255, 0, 0, 255]);
+});
+
+test('a re-rendered text layer with no drawing surface is reported, not skipped', () => {
+  // Node has no canvas, so rasteriseTextAt returns null -- the same thing that
+  // happens in a worker without 1B's OffscreenCanvas surface. Today that layer
+  // silently vanishes from the output.
+  const dest = createBuffer(4, 4);
+  const missed = [];
+  drawLayerInto(dest, {
+    id: 2, name: 'headline', kind: 'text', visible: true, opacity: 1, blendMode: 'normal',
+    x: 0, y: 0, w: 4, h: 4, pixels: null, rerendered: true, rendered: null,
+    text: { content: 'hi', fontFamily: 'sans-serif', fontSize: 12, color: '#000', bold: false, italic: false, align: 'left' },
+  }, 1, { pixels: null, onMissing: (l, why) => missed.push(`${l.name}:${why}`) });
+  assert.deepEqual(missed, ['headline:text']);
+});
+
+test('a layer entirely off the canvas is not a missing layer', () => {
+  const dest = createBuffer(4, 4);
+  const missed = [];
+  drawLayerInto(dest, rasterLayer({ x: 100, y: 100 }), 1, { pixels: null, onMissing: (l, why) => missed.push(why) });
+  assert.deepEqual(missed, [], 'off-canvas culling happens before pixels are ever looked for');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

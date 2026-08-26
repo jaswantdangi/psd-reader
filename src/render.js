@@ -125,8 +125,19 @@ function textPixelsAt(layer, width, height) {
  * @param {{width:number,height:number,data:Uint8ClampedArray}} dest
  * @param {object} layer
  * @param {number} [scale]  1 renders at document resolution.
+ * @param {{pixels?: {width:number,height:number,data:Uint8ClampedArray}|null,
+ *          onMissing?: (layer: object, reason: 'text'|'raster') => void}} [options]
+ *   `pixels` REPLACES `layer.pixels` for raster layers whenever the key is
+ *   PRESENT -- including when its value is null. Read with `in`, never with
+ *   `||`: full-resolution export streams the real pixels this way, and under a
+ *   proxy load `layer.pixels` is a 1024-edge thumbnail. Falling back to it at
+ *   scale 1 would draw a correctly-sized, blurred layer, which is the one
+ *   failure shape that looks like success.
+ *   `onMissing` fires instead of the silent return when a layer yields no
+ *   pixels, so export can make a vanished text layer fatal while leaving a
+ *   pixel-less raster the same silent skip the preview gives it.
  */
-export function drawLayerInto(dest, layer, scale = 1) {
+export function drawLayerInto(dest, layer, scale = 1, options = {}) {
   if (!layer.visible || layer.opacity <= 0) return;
 
   const rect = {
@@ -138,18 +149,22 @@ export function drawLayerInto(dest, layer, scale = 1) {
   if (rect.left >= dest.width || rect.top >= dest.height) return;
   if (rect.left + rect.width <= 0 || rect.top + rect.height <= 0) return;
 
-  let pixels;
+  let pixels = null;
+  let reason = 'raster';
   if (layer.kind === 'text' && layer.rerendered) {
     // Draw the glyphs at their final size. Rasterising once and resampling the
     // bitmap is what made scaled text look pixelated.
+    reason = 'text';
     pixels = textPixelsAt(layer, rect.width, rect.height);
   } else {
     // Raster layers really are bitmaps — resampling is all there is.
-    const source = layer.pixels;
-    if (!source || !source.width || !source.height) return;
-    pixels = resample(source, rect.width, rect.height);
+    const source = 'pixels' in options ? options.pixels : layer.pixels;
+    if (source && source.width && source.height) pixels = resample(source, rect.width, rect.height);
   }
-  if (!pixels) return;
+  if (!pixels) {
+    if (options.onMissing) options.onMissing(layer, reason);
+    return;
+  }
 
   blendInto(dest, pixels.data, rect, layer.opacity, layer.blendMode);
 }
