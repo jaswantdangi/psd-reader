@@ -6,6 +6,7 @@ import {
   applyAdjustments,
   HSL_BANDS, NEUTRAL_HSL, normaliseHsl, isNeutralHsl, bandWeights, applyHsl,
   SUPPORTED_BLEND_MODES, normaliseOverlay, isNeutralOverlay,
+  PRESETS, PRESET_IDS, presetAdjust,
 } from '../src/index.js';
 
 let passed = 0;
@@ -518,6 +519,64 @@ test('normaliseOverlay sorts stops, completes defaults and rejects an unknown mo
   assert.equal(o.stops[1].a, 1);
   assert.equal(normaliseOverlay({ stops: [] }).stops.length, 2, 'a gradient needs two stops');
   assert.ok(normaliseOverlay({ radius: 0 }).radius > 0, 'a zero radius divides by zero');
+});
+
+console.log('\npresets\n');
+
+test('every preset has a unique id and a label, and there are at least twelve', () => {
+  assert.ok(PRESETS.length >= 12, `only ${PRESETS.length} presets`);
+  assert.equal(new Set(PRESET_IDS).size, PRESETS.length, 'duplicate preset id');
+  for (const p of PRESETS) assert.ok(p.label && p.label.length, `${p.id} has no label`);
+});
+
+test('every preset parameter is inside its op\'s declared range', () => {
+  // A preset is authored by hand, so this is the only thing standing between a
+  // typo and a table built from a clamped-at-the-boundary parameter that looks
+  // deliberate.
+  for (const p of PRESETS)
+    for (const id of CLASS_A_ORDER) {
+      const v = p[id] ?? 0;
+      const [lo, hi] = OPS[id].range;
+      assert.ok(v >= lo && v <= hi, `${p.id}.${id} = ${v}`);
+    }
+});
+
+test('no preset is neutral, and every one builds a usable table', () => {
+  for (const p of PRESETS) {
+    const a = presetAdjust(p.id);
+    assert.equal(isNeutralAdjust(a), false, `${p.id} does nothing`);
+    const lut = buildLut(a);
+    for (let i = 0; i < 768; i++)
+      assert.ok(Number.isInteger(lut[i]) && lut[i] >= 0 && lut[i] <= 255, `${p.id} entry ${i}`);
+  }
+});
+
+test('presetAdjust returns a frozen object carrying the preset id', () => {
+  const a = presetAdjust('ember');
+  assert.equal(a.preset, 'ember');
+  assert.ok(Object.isFrozen(a));
+  assert.equal(presetAdjust('no-such-preset').preset, 'none');
+});
+
+test('intensity scales every parameter toward neutral, and 0 IS neutral', () => {
+  // One multiply on ten numbers, before the table is built. That is the whole
+  // strength slider -- no new op, and nothing per pixel.
+  const full = presetAdjust('ember', 1);
+  const half = presetAdjust('ember', 0.5);
+  for (const id of CLASS_A_ORDER)
+    assert.ok(Math.abs(half[id] - full[id] / 2) < 1e-9, `${id}: ${half[id]} vs ${full[id] / 2}`);
+  assert.equal(isNeutralAdjust(presetAdjust('ember', 0)), true);
+});
+
+test('intensity scales the hsl block too, not just the sliders', () => {
+  const p = PRESETS.find((x) => x.hsl);
+  const full = presetAdjust(p.id, 1);
+  const half = presetAdjust(p.id, 0.5);
+  assert.ok(Math.abs(half.hsl.saturation - full.hsl.saturation / 2) < 1e-9);
+  full.hsl.bands.forEach((band, i) => {
+    for (const k of ['h', 's', 'l'])
+      assert.ok(Math.abs(half.hsl.bands[i][k] - band[k] / 2) < 1e-9, `band ${i}.${k}`);
+  });
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
