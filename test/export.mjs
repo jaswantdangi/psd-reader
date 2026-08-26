@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'fs';
-import { createProject, loadProjectProxy, readDocument } from '../src/index.js';
+import {
+  createProject, loadProjectProxy, readDocument,
+  ExportError, isSelfRendering, buildExportOrder, wantedIndices, assertIdentifiable, isFastPath, planSpill,
+} from '../src/index.js';
 
 let passed = 0;
 const test = (name, fn) => {
@@ -111,6 +114,111 @@ test('the pattern warning still fires by default, even under metadata: false', (
 
 test('patterns: false skips the three whole-file byte scans', () => {
   assert.ok(!withoutPatterns.warnings.some(isPatternWarning));
+});
+
+
+console.log('\nexport order and spill planning\n');
+
+/** A stand-in project: only the fields buildExportOrder and planSpill read. */
+const orderOf = (...specs) => specs.map((s, i) => ({
+  id: i + 1,
+  name: s.name ?? `layer ${i}`,
+  kind: s.kind ?? 'raster',
+  visible: s.visible ?? true,
+  opacity: s.opacity ?? 1,
+  rerendered: s.rerendered ?? false,
+  sourceIndex: s.sourceIndex,
+}));
+const projectOf = (...specs) => ({ width: 10, height: 10, layers: orderOf(...specs) });
+
+test('the order is bottom to top, minus the invisible and the zero-opacity', () => {
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 0 },
+    { sourceIndex: 1, visible: false },
+    { sourceIndex: 2, opacity: 0 },
+    { sourceIndex: 3 },
+  ));
+  assert.deepEqual(order.map((l) => l.sourceIndex), [0, 3]);
+});
+
+test('a hidden layer is not wanted from the stream at all', () => {
+  const order = buildExportOrder(projectOf({ sourceIndex: 0 }, { sourceIndex: 1, visible: false }));
+  assert.deepEqual([...wantedIndices(order)], [0]);
+});
+
+test('a re-rendered text layer draws itself and is never awaited from the file', () => {
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 0 },
+    { sourceIndex: 1, kind: 'text', rerendered: true },
+  ));
+  assert.equal(isSelfRendering(order[1]), true);
+  assert.deepEqual([...wantedIndices(order)], [0], 'index 1 must not be requested from the stream');
+});
+
+test('an UNTOUCHED Photoshop text layer is a raster and IS awaited from the file', () => {
+  // render.js gates the sharp path on `rerendered`, which starts false. At
+  // proxy scale that is harmless; at scale 1 it would upscale a 1024-edge
+  // raster. Export must stream its full-resolution pixels like any other layer.
+  const order = buildExportOrder(projectOf({ sourceIndex: 0, kind: 'text', rerendered: false }));
+  assert.equal(isSelfRendering(order[0]), false);
+  assert.deepEqual([...wantedIndices(order)], [0]);
+});
+
+test('a layer with no identity is refused before a single byte is read', () => {
+  const order = buildExportOrder(projectOf({ sourceIndex: null, name: 'orphan' }));
+  assert.throws(() => assertIdentifiable(order), (e) => e.code === 'NO_IDENTITY' && /orphan/.test(e.message));
+});
+
+test('untouched order is the fast path and spills nothing', () => {
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 0 }, { sourceIndex: 1 }, { sourceIndex: 2 }, { sourceIndex: 3 },
+  ));
+  assert.equal(isFastPath(order), true);
+  assert.deepEqual(planSpill(order).spill, []);
+});
+
+test('moving the BOTTOM layer to the top spills exactly one', () => {
+  // order = [1, 2, 3, 0]. Arrival 0 comes first and is needed last, so it parks;
+  // 1, 2, 3 then arrive in the order they are needed and never touch disk.
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 1 }, { sourceIndex: 2 }, { sourceIndex: 3 }, { sourceIndex: 0 },
+  ));
+  assert.equal(isFastPath(order), false);
+  assert.deepEqual(planSpill(order).spill, [0]);
+});
+
+test('moving the TOP layer to the bottom spills all but one', () => {
+  // order = [3, 0, 1, 2]. The first thing needed is the LAST thing to arrive,
+  // so everything before it parks. The spec's prose has these two cases the
+  // wrong way round; the arithmetic here is what the walk actually does.
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 3 }, { sourceIndex: 0 }, { sourceIndex: 1 }, { sourceIndex: 2 },
+  ));
+  assert.deepEqual(planSpill(order).spill, [0, 1, 2]);
+});
+
+test('a full reversal is the worst case and still spills only n-1', () => {
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 3 }, { sourceIndex: 2 }, { sourceIndex: 1 }, { sourceIndex: 0 },
+  ));
+  assert.deepEqual(planSpill(order).spill, [0, 1, 2]);
+});
+
+test('a self-rendering layer at the bottom is satisfied before the first arrival', () => {
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 0, kind: 'text', rerendered: true },
+    { sourceIndex: 1 }, { sourceIndex: 2 },
+  ));
+  assert.deepEqual(planSpill(order).spill, [], 'nothing needs parking -- the text draws itself first');
+});
+
+test('isFastPath and planSpill never disagree', () => {
+  const cases = [[0, 1, 2], [2, 0, 1], [1, 0, 2], [0, 2, 1], [2, 1, 0], [0, 1, 2, 3], [3, 0, 1, 2]];
+  for (const indices of cases) {
+    const order = buildExportOrder(projectOf(...indices.map((sourceIndex) => ({ sourceIndex }))));
+    assert.equal(isFastPath(order), planSpill(order).spill.length === 0,
+      `disagreement on ${JSON.stringify(indices)} -- the walk would take one path and the plan predict the other`);
+  }
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

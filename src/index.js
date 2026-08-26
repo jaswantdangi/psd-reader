@@ -29,3 +29,7 @@ export {
   selectTier, tierOverrideFrom, probeCapabilities, CONTEXT_ATTRIBUTES,
   TIER_WORKER_GPU, TIER_MAIN_GPU, TIER_JS,
 } from './gpu/detect.js';
+export { ExportError } from './export/errors.js';
+export {
+  isSelfRendering, buildExportOrder, wantedIndices, assertIdentifiable, isFastPath, planSpill,
+} from './export/order.js';
