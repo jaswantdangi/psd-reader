@@ -96,4 +96,21 @@ test('the layers that did arrive really were decoded', () => {
   assert.deepEqual(wantDecoded, [true, true, true, true]);
 });
 
+const withPatterns = await readDocument(bytesOf('fixtures/vectors.src.psd'), {
+  pixels: 'none', metadata: false,
+});
+const withoutPatterns = await readDocument(bytesOf('fixtures/vectors.src.psd'), {
+  pixels: 'none', metadata: false, patterns: false,
+});
+const isPatternWarning = (w) => /Pattern definitions/.test(w);
+
+test('the pattern warning still fires by default, even under metadata: false', () => {
+  assert.ok(withPatterns.warnings.some(isPatternWarning),
+    'load must keep surfacing this -- the export path is the only caller that should opt out');
+});
+
+test('patterns: false skips the three whole-file byte scans', () => {
+  assert.ok(!withoutPatterns.warnings.some(isPatternWarning));
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

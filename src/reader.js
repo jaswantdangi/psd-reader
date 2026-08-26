@@ -87,9 +87,14 @@ async function readMetadata(bytes, warnings) {
  *   sourceIndex counter still advances for a skipped layer, so refusing one
  *   does not shift the identity of any layer after it.
  * @param {boolean} [options.metadata=true]
+ * @param {boolean} [options.patterns=true]
+ *   Scan the whole file three times for pattern definitions. Only drives a
+ *   warning. Full-resolution export passes false: the warning was already
+ *   surfaced when the document was opened, and three O(n) passes over a
+ *   300 MB file is not free on a phone.
  */
 export async function readDocument(source, options = {}) {
-  const { pixels = 'none', onLayer, onStart, wantLayer, metadata: wantMetadata = true, embedded = false } = options;
+  const { pixels = 'none', onLayer, onStart, wantLayer, metadata: wantMetadata = true, embedded = false, patterns = true } = options;
 
   if (pixels === 'stream' && typeof onLayer !== 'function')
     throw new Error("pixels: 'stream' requires an onLayer callback");
@@ -167,7 +172,7 @@ export async function readDocument(source, options = {}) {
     }
   }
 
-  if (PATTERN_KEYS.some((key) => containsKey(bytes, key)))
+  if (patterns && PATTERN_KEYS.some((key) => containsKey(bytes, key)))
     warnings.push('Pattern definitions (Patt) present but not readable — no library supports them. Layers using pattern fills will not render correctly.');
 
   // The flattened preview Photoshop wrote on save — exact by definition.
