@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import {
-  createProject, loadProjectProxy, readDocument, reorderLayer,
+  createProject, loadProjectProxy, readDocument, reorderLayer, setLayer,
   ExportError, isSelfRendering, buildExportOrder, wantedIndices, assertIdentifiable, isFastPath, planSpill,
   spillHeader, encodeSpill, decodeSpill, createMemorySpill, SPILL_MAGIC, SPILL_VERSION, SPILL_HEADER_BYTES,
-  createBuffer, drawLayerInto,
+  createBuffer, drawLayerInto, renderProject,
   EXPORT_PHASES, phaseFraction, isDeterminate,
   exportFullRes, createJsExportTarget,
+  compareBuffers, flattenOnto,
 } from '../src/index.js';
 
 let passed = 0;
@@ -522,6 +523,60 @@ await atest('a re-rendered text layer that cannot be drawn is fatal, not silentl
     () => runExport(project, createMemorySpill()),
     (e) => e.code === 'TEXT_MISSING' && /headline/.test(e.message),
   );
+});
+
+console.log('\nthe oracle\n');
+
+/** The same file, read eagerly, with every layer at full resolution. */
+const openEager = async () => createProject(
+  await readDocument(bytesOf(FIXTURE), { pixels: 'eager', metadata: false }),
+  'vectors.src.psd',
+);
+
+const matches = (got, want) => {
+  const stat = compareBuffers(flattenOnto(got), flattenOnto(want));
+  assert.ok(stat.comparable, stat.reason);
+  assert.equal(stat.percentReal, 0,
+    `${stat.beyondRounding} of ${stat.total} pixels differ by more than 1 (max ${stat.maxDelta})`);
+};
+
+await atest('an untouched export matches the full-resolution reference', async () => {
+  const proxy = await openProxy();
+  const eager = await openEager();
+  matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
+});
+
+await atest('a reordered export matches — this is the spill path under test', async () => {
+  const proxy = await openProxy();
+  const eager = await openEager();
+  reorderLayer(proxy, 3, 0);
+  reorderLayer(eager, 3, 0);
+
+  const spill = createMemorySpill();
+  matches(await runExport(proxy, spill), renderProject(eager, { scale: 1 }));
+  assert.deepEqual(spill.writes, ['0.rgba', '1.rgba', '2.rgba'], 'the spill path really was exercised');
+});
+
+await atest('a transform re-applies to FULL-RESOLUTION pixels, not the proxy', async () => {
+  // The proxy is 256-edge; the layer is 417 px and is being scaled to 626.
+  // If export ever fell back to layer.pixels this would upscale a thumbnail
+  // by 2.4x and differ from the reference on nearly every pixel.
+  const proxy = await openProxy();
+  const eager = await openEager();
+  for (const project of [proxy, eager])
+    setLayer(project, project.layers[3].id, { w: 626, h: 626 });
+  reorderLayer(proxy, 3, 0);
+  reorderLayer(eager, 3, 0);
+
+  matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
+});
+
+await atest('a moved layer exports at its new position', async () => {
+  const proxy = await openProxy();
+  const eager = await openEager();
+  for (const project of [proxy, eager])
+    setLayer(project, project.layers[2].id, { x: 40, y: 700 });
+  matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
