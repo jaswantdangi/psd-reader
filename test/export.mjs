@@ -11,6 +11,7 @@ import {
   compareBuffers, flattenOnto,
   EXPORT_TILE_CAP, tileEdgeFor, partitionTiles, intersectRect,
   CANVAS_AREA_CAP, canUseCanvasEncoder, encodePngStored,
+  SPILL_ROOT, newExportId, spillDirFor, sweepSpillDirectories,
 } from '../src/index.js';
 
 let passed = 0;
@@ -701,6 +702,49 @@ test('an image needing more than one stored block round-trips too', () => {
 test('a 1x1 image is legal', () => {
   const source = filled(1, 1, 9);
   assert.deepEqual([...decodePng(encodePngStored(source)).data], [...source.data]);
+});
+
+console.log('\nspill sweep\n');
+
+const fakeFs = (tree) => ({
+  removed: [],
+  async readdir(path) {
+    if (!(path in tree)) throw new Error(`no such directory: ${path}`);
+    return tree[path];
+  },
+  async rmdir(path) {
+    if (path.endsWith('locked')) throw new Error('resource busy');
+    this.removed.push(path);
+  },
+});
+
+test('an export id is unique per export and file-name safe', () => {
+  const a = newExportId(1756200000000, () => 0.5);
+  const b = newExportId(1756200000000, () => 0.75);
+  assert.notEqual(a, b, 'two exports started in the same millisecond must not collide');
+  assert.match(a, /^[a-z0-9-]+$/);
+  assert.equal(spillDirFor(a), `${SPILL_ROOT}/${a}`);
+});
+
+await atest('the sweep deletes every orphaned export directory', async () => {
+  const fs2 = fakeFs({ [SPILL_ROOT]: ['abc', 'def'] });
+  const removed = await sweepSpillDirectories(fs2);
+  assert.deepEqual(removed, ['abc', 'def']);
+  assert.deepEqual(fs2.removed, [`${SPILL_ROOT}/abc`, `${SPILL_ROOT}/def`]);
+});
+
+await atest('the sweep leaves a live export alone', async () => {
+  const fs2 = fakeFs({ [SPILL_ROOT]: ['abc', 'live'] });
+  assert.deepEqual(await sweepSpillDirectories(fs2, { keep: ['live'] }), ['abc']);
+});
+
+await atest('a first run with no spill root is not an error', async () => {
+  assert.deepEqual(await sweepSpillDirectories(fakeFs({})), []);
+});
+
+await atest('one undeletable directory does not abort the sweep', async () => {
+  const fs2 = fakeFs({ [SPILL_ROOT]: ['locked', 'abc'] });
+  assert.deepEqual(await sweepSpillDirectories(fs2), ['abc']);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

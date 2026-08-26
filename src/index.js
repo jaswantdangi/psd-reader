@@ -42,3 +42,4 @@ export { createJsExportTarget } from './export/target-js.js';
 export { exportFullRes } from './export/stream.js';
 export { EXPORT_TILE_CAP, tileEdgeFor, partitionTiles, intersectRect } from './export/tiles.js';
 export { CANVAS_AREA_CAP, canUseCanvasEncoder, encodePngStored } from './export/png.js';
+export { SPILL_ROOT, newExportId, spillDirFor, sweepSpillDirectories } from './export/sweep.js';
