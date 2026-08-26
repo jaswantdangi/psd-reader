@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import {
-  createProject, loadProjectProxy, readDocument,
+  createProject, loadProjectProxy, readDocument, reorderLayer,
   ExportError, isSelfRendering, buildExportOrder, wantedIndices, assertIdentifiable, isFastPath, planSpill,
   spillHeader, encodeSpill, decodeSpill, createMemorySpill, SPILL_MAGIC, SPILL_VERSION, SPILL_HEADER_BYTES,
   createBuffer, drawLayerInto,
   EXPORT_PHASES, phaseFraction, isDeterminate,
+  exportFullRes, createJsExportTarget,
 } from '../src/index.js';
 
 let passed = 0;
@@ -384,6 +385,143 @@ test('parse and encode are honest about having no interior progress', () => {
   assert.equal(isDeterminate('encode'), false);
   assert.equal(isDeterminate('layers'), true);
   assert.equal(isDeterminate('write'), true);
+});
+
+console.log('\nthe export walk\n');
+
+const FIXTURE = 'fixtures/vectors.src.psd';
+const FIXTURE_SIZE = fs.statSync(FIXTURE).size;
+
+/** A proxy-loaded project with a real, re-readable source handle. */
+const openProxy = () => loadProjectProxy(bytesOf(FIXTURE), {
+  fileName: 'vectors.src.psd',
+  proxyEdge: 256,
+  source: { uri: FIXTURE, name: 'vectors.src.psd', size: FIXTURE_SIZE, kind: 'blob' },
+});
+
+const runExport = (project, spill, extra = {}) => exportFullRes({
+  project,
+  readSource: async () => bytesOf(FIXTURE),
+  spill,
+  createTarget: createJsExportTarget,
+  ...extra,
+});
+
+await atest('the fast path blends every layer as it streams and never touches disk', async () => {
+  const project = await openProxy();
+  const spill = createMemorySpill();
+  const out = await runExport(project, spill);
+  assert.equal(out.width, 1080);
+  assert.equal(out.height, 1080);
+  assert.deepEqual(spill.writes, [], 'an untouched order must not spill');
+  assert.equal(spill.files.size, 0);
+});
+
+await atest('the spill path parks exactly what planSpill predicted', async () => {
+  const project = await openProxy();
+  reorderLayer(project, 3, 0);                 // top layer to the bottom
+  const spill = createMemorySpill();
+  await runExport(project, spill);
+  const expected = planSpill(buildExportOrder(project)).spill.map((i) => `${i}.rgba`);
+  assert.deepEqual(spill.writes, expected,
+    'the walk and the plan must agree, or one of them is wrong and nothing would notice');
+  assert.deepEqual(spill.writes, ['0.rgba', '1.rgba', '2.rgba']);
+});
+
+await atest('every spill file is gone when the export succeeds', async () => {
+  const project = await openProxy();
+  reorderLayer(project, 3, 0);
+  const spill = createMemorySpill();
+  await runExport(project, spill);
+  assert.equal(spill.files.size, 0, 'success must leave zero bytes behind');
+});
+
+await atest('a hidden layer is never decoded and never spilled', async () => {
+  const project = await openProxy();
+  project.layers[1].visible = false;
+  reorderLayer(project, 3, 0);
+  const spill = createMemorySpill();
+  await runExport(project, spill);
+  assert.ok(!spill.writes.includes('1.rgba'), 'a hidden layer is pure waste on the critical path');
+});
+
+await atest('progress reports every phase and ends at 1', async () => {
+  const project = await openProxy();
+  const seen = [];
+  await runExport(project, createMemorySpill(), { onProgress: (p) => seen.push(p) });
+  const phases = [...new Set(seen.map((p) => p.phase))];
+  assert.deepEqual(phases, ['read', 'parse', 'layers', 'readback']);
+  assert.equal(seen[seen.length - 1].fraction, 0.92, 'readback is the last phase this plan owns');
+  const layers = seen.filter((p) => p.phase === 'layers');
+  assert.equal(layers.length, 4, 'one report per decoded layer, not one per file');
+});
+
+await atest('cancelling mid-stream throws CANCELLED and leaves nothing behind', async () => {
+  const project = await openProxy();
+  reorderLayer(project, 3, 0);
+  const spill = createMemorySpill();
+  const signal = { cancelled: false };
+  await assert.rejects(
+    () => runExport(project, spill, {
+      signal,
+      onProgress: (p) => { if (p.phase === 'layers') signal.cancelled = true; },
+    }),
+    (e) => e.code === 'CANCELLED',
+  );
+  assert.equal(spill.files.size, 0, 'the finally must clean up on cancel too');
+});
+
+await atest('a source file of the wrong size is refused before it is parsed', async () => {
+  const project = await openProxy();
+  project.source.size = FIXTURE_SIZE + 1;
+  await assert.rejects(
+    () => runExport(project, createMemorySpill()),
+    (e) => e.code === 'SOURCE_CHANGED' && /vectors\.src\.psd/.test(e.message),
+  );
+});
+
+await atest('a source file of the wrong dimensions is refused before it is blended', async () => {
+  const project = await openProxy();
+  project.width = 999;
+  await assert.rejects(
+    () => exportFullRes({
+      project,
+      readSource: async () => bytesOf(FIXTURE),
+      spill: createMemorySpill(),
+      createTarget: createJsExportTarget,
+    }),
+    (e) => e.code === 'SOURCE_MISMATCH' && /999/.test(e.message),
+  );
+});
+
+await atest('a project whose layers have no identity is refused before the file is read', async () => {
+  const doc = await readDocument(bytesOf(FIXTURE), { pixels: 'eager', metadata: false });
+  const eager = createProject(doc, 'vectors.src.psd');
+  let read = false;
+  await assert.rejects(
+    () => exportFullRes({
+      project: eager,
+      readSource: async () => { read = true; return bytesOf(FIXTURE); },
+      spill: createMemorySpill(),
+      createTarget: createJsExportTarget,
+    }),
+    (e) => e.code === 'NO_IDENTITY',
+  );
+  assert.equal(read, false, 'refusing must cost nothing');
+});
+
+await atest('a re-rendered text layer that cannot be drawn is fatal, not silently dropped', async () => {
+  // Node has no canvas, so this is the worker-without-OffscreenCanvas case.
+  const project = await openProxy();
+  const layer = project.layers[1];
+  layer.kind = 'text';
+  layer.rerendered = true;
+  layer.text = { content: 'headline', fontFamily: 'sans-serif', fontSize: 24, color: '#000', bold: false, italic: false, align: 'left' };
+  layer.name = 'headline';
+  await assert.rejects(
+    () => runExport(project, createMemorySpill()),
+    (e) => e.code === 'TEXT_MISSING' && /headline/.test(e.message),
+  );
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

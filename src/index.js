@@ -38,3 +38,5 @@ export {
   SPILL_MAGIC, SPILL_VERSION, SPILL_HEADER_BYTES,
 } from './export/spill.js';
 export { EXPORT_PHASES, phaseFraction, isDeterminate } from './export/progress.js';
+export { createJsExportTarget } from './export/target-js.js';
+export { exportFullRes } from './export/stream.js';
