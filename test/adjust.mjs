@@ -7,6 +7,7 @@ import {
   HSL_BANDS, NEUTRAL_HSL, normaliseHsl, isNeutralHsl, bandWeights, applyHsl,
   SUPPORTED_BLEND_MODES, normaliseOverlay, isNeutralOverlay,
   PRESETS, PRESET_IDS, presetAdjust,
+  createProject, setAdjust, undo, nextGestureKey,
 } from '../src/index.js';
 
 let passed = 0;
@@ -577,6 +578,103 @@ test('intensity scales the hsl block too, not just the sliders', () => {
     for (const k of ['h', 's', 'l'])
       assert.ok(Math.abs(half.hsl.bands[i][k] - band[k] / 2) < 1e-9, `band ${i}.${k}`);
   });
+});
+
+console.log('\nthe layer model\n');
+
+/** Two full-canvas raster layers, built the way conformance.js builds its own. */
+const twoLayerProject = () => createProject({
+  width: 8, height: 8,
+  children: [
+    { name: 'bottom', left: 0, top: 0, right: 8, bottom: 8,
+      proxyData: { width: 8, height: 8, data: new Uint8ClampedArray(8 * 8 * 4).fill(160) } },
+    { name: 'top', left: 0, top: 0, right: 8, bottom: 8,
+      proxyData: { width: 8, height: 8, data: new Uint8ClampedArray(8 * 8 * 4).fill(90) } },
+  ],
+}, 'two.psd');
+
+test('a fresh layer carries adjust === null', () => {
+  // null is the neutral value of the WHOLE object, and it is what makes a
+  // document with no adjustments cost exactly what it costs today: one branch.
+  for (const layer of twoLayerProject().layers) assert.equal(layer.adjust, null);
+});
+
+test('setAdjust replaces the object wholesale and freezes it', () => {
+  const p = twoLayerProject();
+  const id = p.layers[0].id;
+  setAdjust(p, id, { brightness: 20 });
+  assert.equal(p.layers[0].adjust.brightness, 20);
+  assert.ok(Object.isFrozen(p.layers[0].adjust));
+  const first = p.layers[0].adjust;
+  setAdjust(p, id, { contrast: 10 });
+  assert.notEqual(p.layers[0].adjust, first, 'a new object, never the same one mutated');
+  assert.equal(p.layers[0].adjust.brightness, 20, 'the merge kept the earlier parameter');
+});
+
+test('mutating a STALE layer.adjust reference does not corrupt undo', () => {
+  // setLayer does `from[key] = layer[key]`, so an object-valued field's undo
+  // entry holds THE SAME OBJECT as the new value. If a caller could mutate it,
+  // undo would restore the mutated version -- a no-op that looks like undo is
+  // broken rather than like the mutation was wrong. Freezing makes the attempt
+  // throw; this asserts the outcome that matters either way.
+  const p = twoLayerProject();
+  const id = p.layers[0].id;
+  setAdjust(p, id, { brightness: 20 });
+  const stale = p.layers[0].adjust;
+  setAdjust(p, id, { brightness: 80 });
+  assert.throws(() => { 'use strict'; stale.brightness = 999; }, TypeError);
+  undo(p);
+  assert.equal(p.layers[0].adjust.brightness, 20, 'undo restored the real earlier value');
+});
+
+test('one gesture key is ONE history entry, and revision does not move during the drag', () => {
+  // The whole reason the sandwich cache survives a slider drag. revision is
+  // bumped by commit/undo/redo/applyProjectJson but NOT by setLayer's
+  // coalescing early-return, and sandwich.js keys on revision. Move this bump
+  // and the drag cache is worthless.
+  const p = twoLayerProject();
+  const id = p.layers[0].id;
+  const key = nextGestureKey('adjust');
+  setAdjust(p, id, { brightness: 10 }, key);
+  const afterFirst = p.revision;
+  const historyAfterFirst = p.history.length;
+  for (let v = 11; v <= 40; v++) setAdjust(p, id, { brightness: v }, key);
+  assert.equal(p.history.length, historyAfterFirst, 'thirty frames, one undo step');
+  assert.equal(p.revision, afterFirst, 'revision must NOT move on a coalesced frame');
+  assert.ok(p.mutation > afterFirst, 'mutation must move on every applied frame');
+  assert.equal(p.layers[0].adjust.brightness, 40);
+  undo(p);
+  assert.equal(p.layers[0].adjust, null, 'one undo returns to where the drag started');
+});
+
+test('two separate drags are two undo steps', () => {
+  const p = twoLayerProject();
+  const id = p.layers[0].id;
+  setAdjust(p, id, { brightness: 10 }, nextGestureKey('adjust'));
+  setAdjust(p, id, { brightness: 40 }, nextGestureKey('adjust'));
+  assert.equal(p.history.length, 2);
+  undo(p);
+  assert.equal(p.layers[0].adjust.brightness, 10, 'undo restores the PREVIOUS value, not neutral');
+});
+
+test('touching a slider marks the preset custom; applying one does not', () => {
+  // Silently keeping the highlight would claim a look the numbers no longer are.
+  const p = twoLayerProject();
+  const id = p.layers[0].id;
+  setAdjust(p, id, presetAdjust('ember'));
+  assert.equal(p.layers[0].adjust.preset, 'ember');
+  setAdjust(p, id, { contrast: 60 });
+  assert.equal(p.layers[0].adjust.preset, 'custom');
+});
+
+test('an adjustment pulled back to neutral is stored as null', () => {
+  // Not an empty object. isNeutralAdjust short-cuts the entire pass on null,
+  // and a layer that has been reset must cost what an untouched one costs.
+  const p = twoLayerProject();
+  const id = p.layers[0].id;
+  setAdjust(p, id, { brightness: 30 });
+  setAdjust(p, id, { brightness: 0 });
+  assert.equal(p.layers[0].adjust, null);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

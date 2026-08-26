@@ -15,6 +15,8 @@
  */
 
 import { projectMask, pixelRect } from './mask.js';
+import { createAdjust } from './adjust/ops.js';
+import { isNeutralAdjust } from './adjust/lut.js';
 
 /**
  * Blend modes offered in the UI — every mode the compositor implements, in
@@ -137,6 +139,19 @@ function toLayer(source) {
     groupPath: '',
     /** One of the groups this layer came from raised a flattening warning. Assigned by flatten(). */
     groupWarned: false,
+    /**
+     * Non-destructive raster adjustments: one FROZEN object, or null when
+     * neutral. Evaluated at render time inside drawLayerInto, after resampling
+     * and before blending -- never baked into `pixels`, never written to a
+     * saved project as pixels, and never seen by a neighbouring layer.
+     *
+     * REPLACED WHOLESALE, NEVER MUTATED. setLayer captures object-valued `from`
+     * by reference, so mutating this in place destroys the undo entry before it
+     * is written. createAdjust deep-freezes every object it builds, which turns
+     * that mistake into a TypeError where it happens instead of a silent loss
+     * later. Go through setAdjust().
+     */
+    adjust: null,
     /** Set when we have re-drawn the layer ourselves instead of using Photoshop's pixels. */
     rerendered: false,
     /** Cache of our own render, invalidated whenever `text` changes. */
@@ -397,6 +412,43 @@ export function setLayer(project, id, changes, coalesceKey) {
   }
 
   return commit(project, { type: 'set', id, from, to: changes, coalesceKey });
+}
+
+/**
+ * Merge a change into a layer's adjustment.
+ *
+ * The ONLY sanctioned way to change one. It rebuilds a complete, clamped,
+ * deeply frozen object from the current parameters plus `changes` and hands
+ * that to setLayer, so:
+ *
+ *   - `from` and `to` are always DIFFERENT objects, and undo works;
+ *   - an out-of-range number can never reach an evaluator;
+ *   - a neutral result is stored as `null` rather than as an empty-looking
+ *     object, so isNeutralAdjust short-cuts the whole pass and a reset layer
+ *     costs what an untouched one costs.
+ *
+ * Pass a gesture key from nextGestureKey('adjust') for a slider drag: setLayer
+ * then coalesces the frames into ONE history entry and leaves `revision`
+ * alone, which is what lets the sandwich cache survive the gesture.
+ *
+ * @param {object} project
+ * @param {number} id
+ * @param {object} changes  any subset of the adjust schema
+ * @param {string} [coalesceKey]
+ */
+export function setAdjust(project, id, changes, coalesceKey) {
+  const layer = findLayer(project, id);
+  if (!layer) return project;
+
+  // Touching a parameter without naming a preset means the numbers are no
+  // longer the preset's. Keeping the highlight would claim a look they are not.
+  const touchesParameters = Object.keys(changes).some((k) => k !== 'preset');
+  const preset = 'preset' in changes ? changes.preset
+    : touchesParameters && layer.adjust && layer.adjust.preset !== 'none' ? 'custom'
+    : layer.adjust?.preset;
+
+  const next = createAdjust({ ...(layer.adjust ?? {}), ...changes, preset });
+  return setLayer(project, id, { adjust: isNeutralAdjust(next) ? null : next }, coalesceKey);
 }
 
 export function reorderLayer(project, fromIndex, toIndex) {
