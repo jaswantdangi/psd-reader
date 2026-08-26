@@ -59,3 +59,4 @@ export { PANEL_FILTERS, badgesFor, clipBaseFor, panelRows } from './panel.js';
 export { CLASS_A_ORDER, OPS, NEUTRAL_ADJUST, createAdjust } from './adjust/ops.js';
 export { buildLut, lutDigest, lutFor, isNeutralAdjust, adjustCostOf } from './adjust/lut.js';
 export { createScratch, acquireScratch, releaseScratch, DEFAULT_SCRATCH } from './adjust/scratch.js';
+export { applyAdjustments } from './adjust/apply.js';

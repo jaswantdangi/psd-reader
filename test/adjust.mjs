@@ -3,6 +3,7 @@ import {
   CLASS_A_ORDER, OPS, NEUTRAL_ADJUST, createAdjust,
   buildLut, lutDigest, lutFor, isNeutralAdjust, adjustCostOf,
   createScratch, acquireScratch, releaseScratch,
+  applyAdjustments,
 } from '../src/index.js';
 
 let passed = 0;
@@ -217,6 +218,94 @@ test('releaseScratch drops the buffer so it can be collected before an encode pe
   assert.equal(s.data, null);
   assert.equal(s.bytes, 0);
   assert.equal(acquireScratch(s, 4, 4).data.length, 64, 'it must still work afterwards');
+});
+
+console.log('\nthe per-pixel pass\n');
+
+/** A buffer sweeping all four channels, so alpha assertions have every band. */
+const sweep = (w = 16, h = 16) => {
+  const data = new Uint8ClampedArray(w * h * 4);
+  const bands = [0, 1, 64, 127, 128, 200, 254, 255];
+  for (let i = 0; i < w * h; i++) {
+    data[i * 4] = i & 255;
+    data[i * 4 + 1] = (i * 7 + 33) & 255;
+    data[i * 4 + 2] = (i * 13 + 91) & 255;
+    data[i * 4 + 3] = bands[i & 7];
+  }
+  return { width: w, height: h, data };
+};
+
+const blank = (src) => ({ width: src.width, height: src.height,
+  data: new Uint8ClampedArray(src.data.length) });
+
+test('a neutral adjust produces a buffer bit-identical to its input', () => {
+  const src = sweep();
+  const out = applyAdjustments(src, null, blank(src));
+  assert.deepEqual([...out.data], [...src.data]);
+});
+
+test('applying into the input buffer THROWS', () => {
+  // Finding 1. On the default preview path resample() identity-returns, so the
+  // buffer drawLayerInto is holding IS layer.pixels -- and an in-place
+  // adjustment would overwrite the layer's originals permanently and compound
+  // every frame of a drag. This is a defect that survives review by looking
+  // correct; a runtime assertion in the one function that can commit it is
+  // cheaper than remembering.
+  const src = sweep(4, 4);
+  assert.throws(
+    () => applyAdjustments(src, createAdjust({ brightness: 20 }), src),
+    /write into its own input/,
+  );
+});
+
+test('OVERLAPPING views of one ArrayBuffer also throw', () => {
+  // acquireScratch hands out subarrays, so `out.data !== pixels.data` is not
+  // enough on its own -- two views of the same buffer would corrupt half the
+  // image and pass a reference check.
+  const buf = new Uint8ClampedArray(16);
+  const a = { width: 2, height: 1, data: buf.subarray(0, 8) };
+  const b = { width: 2, height: 1, data: buf.subarray(4, 12) };
+  assert.throws(() => applyAdjustments(a, createAdjust({ brightness: 5 }), b),
+    /write into its own input/);
+});
+
+test('NON-overlapping views of one ArrayBuffer are allowed', () => {
+  // The guard must not be so blunt that the shared scratch becomes unusable.
+  const buf = new Uint8ClampedArray(16);
+  const a = { width: 2, height: 1, data: buf.subarray(0, 8) };
+  const c = { width: 2, height: 1, data: buf.subarray(8, 16) };
+  applyAdjustments(a, createAdjust({ brightness: 5 }), c);
+  assert.ok(c.data[0] > 0);
+});
+
+test('mismatched dimensions throw rather than writing a sheared image', () => {
+  const src = sweep(4, 4);
+  assert.throws(
+    () => applyAdjustments(src, null, { width: 3, height: 4, data: new Uint8ClampedArray(48) }),
+    /4x4/,
+  );
+});
+
+test('alpha is UNCHANGED for every class-A op at both extremes (invariant A)', () => {
+  // blendInto reads alpha for `as`, rect.mask multiplies it, hitTest thresholds
+  // it, and composite.js's alphaMap builds clipping from it. One invariant
+  // keeps four consumers correct, and it is SILENT in three of them.
+  const src = sweep();
+  for (const id of CLASS_A_ORDER)
+    for (const value of OPS[id].range) {
+      const out = applyAdjustments(src, createAdjust({ [id]: value }), blank(src));
+      for (let i = 0; i < src.width * src.height; i++)
+        assert.equal(out.data[i * 4 + 3], src.data[i * 4 + 3], `${id} at ${value}, pixel ${i}`);
+    }
+});
+
+test('the pass uses the table it is handed rather than rebuilding one', () => {
+  // The whole point of caching a LUT on the layer is that the per-frame cost is
+  // three indexes, not 768 evaluations plus three indexes.
+  const src = sweep(4, 4);
+  const identity = buildLut(null);
+  const out = applyAdjustments(src, createAdjust({ brightness: 100 }), blank(src), identity);
+  assert.deepEqual([...out.data], [...src.data], 'the passed table won, not the parameters');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
