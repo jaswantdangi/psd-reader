@@ -10,7 +10,11 @@ addEventListener('message', async ({ data }) => {
       fileName,
       source,
       proxyEdge,
-      onProgress: (decoded: number) => postMessage({ type: 'progress', decoded }),
+      // `total` is forwarded as well: loadProjectProxy already has it from
+      // onStart, and a determinate bar over a 12-20 s decode is the whole
+      // reason the reader computes it before the first layer arrives.
+      onProgress: (decoded: number, total: number) =>
+        postMessage({ type: 'progress', decoded, total }),
     });
     // Transfer the proxy buffers rather than copying them.
     const transfers = project.layers
