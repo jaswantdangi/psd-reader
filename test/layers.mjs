@@ -6,6 +6,8 @@ import {
   renderProject, compositeDocument, compareBuffers, flattenOnto,
   setLayer, undo, redo, nextGestureKey,
   toProjectJson, applyProjectJson,
+  createView, viewToDoc, docToView, fitView, zoomAbout, clampView,
+  renderScaleFor, cssZoomFor, maxDocScale, isPreviewQuality,
 } from '../src/index.js';
 
 let passed = 0;
@@ -462,6 +464,78 @@ test('applyProjectJson restores the mask toggle without touching the raster', ()
   applyProjectJson(project, json);
   assert.equal(project.layers[0].mask.disabled, true);
   assert.equal(project.layers[0].mask.data, data, 'the raster must survive untouched');
+});
+
+console.log('\nview transform\n');
+
+const VIEWPORTS = [
+  { left: 0, top: 0, width: 390, height: 700 },
+  { left: 24, top: 56, width: 360, height: 520 },
+];
+
+test('viewToDoc and docToView are exact inverses across the whole range', () => {
+  // A bug here mis-EDITS the document rather than merely mis-drawing it, so it
+  // gets a swept property rather than a couple of examples.
+  for (const viewport of VIEWPORTS)
+    for (const docScale of [0.05, 0.37, 1, 2.5, 8])
+      for (const panX of [-940, -13, 0, 211])
+        for (const panY of [-500, 0, 77]) {
+          const view = createView({ docScale, panX, panY });
+          for (const [dx, dy] of [[0, 0], [1, 1], [4961, 3508], [-30, 12]]) {
+            const screen = docToView(view, dx, dy, viewport);
+            const back = viewToDoc(view, screen.x, screen.y, viewport);
+            assert.ok(Math.abs(back.x - dx) < 1e-9 && Math.abs(back.y - dy) < 1e-9,
+              `round trip failed at ${docScale}/${panX}/${panY} for ${dx},${dy}`);
+          }
+        }
+});
+
+test('fitView centres the document inside the viewport with a margin', () => {
+  const view = fitView({ width: 200, height: 100 }, { left: 0, top: 0, width: 400, height: 400 }, { margin: 20 });
+  assert.ok(Math.abs(view.docScale - 360 / 200) < 1e-9, 'the long edge fits the usable width');
+  assert.ok(Math.abs(view.panX - (400 - 200 * view.docScale) / 2) < 1e-9);
+  assert.ok(Math.abs(view.panY - (400 - 100 * view.docScale) / 2) < 1e-9);
+});
+
+test('zoomAbout leaves the document point under the pointer exactly where it was', () => {
+  const viewport = VIEWPORTS[1];
+  const view = createView({ docScale: 1, panX: 40, panY: -12 });
+  const before = viewToDoc(view, 200, 300, viewport);
+  const after = viewToDoc(zoomAbout(view, 2.5, 200, 300, viewport), 200, 300, viewport);
+  assert.ok(Math.abs(after.x - before.x) < 1e-9);
+  assert.ok(Math.abs(after.y - before.y) < 1e-9);
+});
+
+test('zoomAbout clamps to the supplied bounds', () => {
+  const viewport = VIEWPORTS[0];
+  const view = createView({ docScale: 1 });
+  assert.equal(zoomAbout(view, 100, 0, 0, viewport, { max: 4 }).docScale, 4);
+  assert.equal(zoomAbout(view, 0.0001, 0, 0, viewport, { min: 0.1 }).docScale, 0.1);
+});
+
+test('the zoom cap is 4x proxy 1:1, and anything above 1:1 is preview quality', () => {
+  // Past the cap there is no information left to reveal -- layer.pixels IS the
+  // proxy -- and the blur is merely larger.
+  assert.equal(maxDocScale(0.25), 1);
+  assert.equal(isPreviewQuality(createView({ docScale: 0.25 }), 0.25), false);
+  assert.equal(isPreviewQuality(createView({ docScale: 0.26 }), 0.25), true);
+});
+
+test('the renderer is never asked for more scale than the proxy holds', () => {
+  const view = createView({ docScale: 2 });
+  const renderScale = renderScaleFor(view, 0.25);
+  assert.equal(renderScale, 0.25, 'renderProject gets the proxy scale, never the zoom');
+  assert.equal(cssZoomFor(view, renderScale), 8, 'the rest is a CSS transform');
+  // Zooming OUT still asks for less work, not more.
+  assert.equal(renderScaleFor(createView({ docScale: 0.1 }), 0.25), 0.1);
+});
+
+test('clampView keeps a corner of the document reachable', () => {
+  const viewport = { left: 0, top: 0, width: 400, height: 400 };
+  const project = { width: 1000, height: 1000 };
+  const far = clampView(createView({ docScale: 1, panX: 99999, panY: -99999 }), project, viewport, { minVisible: 48 });
+  assert.equal(far.panX, 400 - 48, 'panned right until only a sliver is left');
+  assert.equal(far.panY, 48 - 1000, 'panned up until only a sliver is left');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

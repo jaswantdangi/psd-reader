@@ -45,3 +45,8 @@ export { EXPORT_TILE_CAP, tileEdgeFor, partitionTiles, intersectRect } from './e
 export { CANVAS_AREA_CAP, canUseCanvasEncoder, encodePngStored } from './export/png.js';
 export { SPILL_ROOT, newExportId, spillDirFor, sweepSpillDirectories } from './export/sweep.js';
 export { BRIDGE_CHUNK_BYTES, chunkRanges, bytesToBase64 } from './export/chunks.js';
+export {
+  createView, viewToDoc, docToView, fitView, zoomAbout, clampView,
+  renderScaleFor, cssZoomFor, maxDocScale, isPreviewQuality,
+  ZOOM_MAX_FACTOR, MIN_DOC_SCALE, MIN_VISIBLE_PX,
+} from './view.js';
