@@ -1,0 +1,72 @@
+import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
+import { Icon } from './icon';
+
+/**
+ * The `✕ / TITLE / ✓` header every tool sheet wears.
+ *
+ * Consistency here is the point: once one sheet's tick means something
+ * different from another's, none of them mean anything. So the shell owns the
+ * header and the sheet owns only its content.
+ *
+ * `✓` closes. `✕` asks the page to roll the sheet's whole session back through
+ * `discardTo` — nothing bakes in this editor, so there is no apply step for the
+ * tick to perform.
+ */
+@Component({
+  selector: 'app-sheet-shell',
+  standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [Icon],
+  template: `
+    <section
+      class="flex max-h-[72vh] w-full flex-col rounded-t-2xl border-t border-white/10 bg-neutral-900 shadow-[0_-12px_40px_rgba(0,0,0,0.5)]"
+      role="dialog"
+      [attr.aria-label]="title()"
+    >
+      <header class="flex h-14 shrink-0 items-center justify-between border-b border-white/10 px-1">
+        <button
+          type="button"
+          class="flex h-12 w-12 items-center justify-center rounded-xl text-neutral-300 active:bg-white/10"
+          [attr.aria-label]="cancelLabel()"
+          (click)="cancel.emit()"
+        >
+          <app-icon name="close" />
+        </button>
+
+        <h2 class="text-[13px] font-semibold uppercase tracking-[0.18em] text-neutral-200">
+          {{ title() }}
+        </h2>
+
+        @if (showConfirm()) {
+          <button
+            type="button"
+            class="flex h-12 w-12 items-center justify-center rounded-xl text-sky-400 active:bg-white/10"
+            aria-label="Done"
+            (click)="confirm.emit()"
+          >
+            <app-icon name="check" />
+          </button>
+        } @else {
+          <span class="h-12 w-12"></span>
+        }
+      </header>
+
+      <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+        <ng-content />
+      </div>
+    </section>
+  `,
+})
+export class SheetShell {
+  readonly title = input.required<string>();
+  /**
+   * The layers sheet has no tick. Every change it makes is already committed
+   * and undoable, and a confirm that does nothing would teach the user that
+   * confirm means nothing on the sheets where it does.
+   */
+  readonly showConfirm = input(true);
+  readonly cancelLabel = input('Close');
+
+  readonly cancel = output<void>();
+  readonly confirm = output<void>();
+}
