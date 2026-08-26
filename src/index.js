@@ -55,3 +55,4 @@ export {
   handleAt, arbitrate, anchorFor, resizeFrom, moveBy, isTap,
   chooseRenderMode, FRAME_BUDGET_MS, REDUCED_INTERACTION_SCALE,
 } from './gesture.js';
+export { PANEL_FILTERS, badgesFor, clipBaseFor, panelRows } from './panel.js';

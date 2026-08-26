@@ -11,6 +11,7 @@ import {
   HANDLES, HANDLE_HIT_CSS_PX, TAP_SLOP_CSS_PX, MIN_LAYER_SIZE,
   handleAt, arbitrate, anchorFor, resizeFrom, moveBy, isTap,
   chooseRenderMode, FRAME_BUDGET_MS, REDUCED_INTERACTION_SCALE,
+  panelRows,
 } from '../src/index.js';
 
 let passed = 0;
@@ -656,6 +657,113 @@ test('a rung that has never been measured is tried once rather than skipped', ()
   // every device to the bottom of the ladder forever.
   assert.equal(chooseRenderMode({}).mode, 'live');
   assert.equal(chooseRenderMode({ liveMs: 400 }).mode, 'sandwich');
+});
+
+console.log('\nlayers panel\n');
+
+const px = () => ({ proxyData: { width: 4, height: 2, data: new Uint8ClampedArray(4 * 2 * 4) } });
+const box = { left: 0, top: 0, right: 4, bottom: 2 };
+
+/** Bottom to top: Layer 1, Layer 1 (grouped), Sky (hidden), SALE (text), Sticker (clipped). */
+const panelDoc = () => ({
+  width: 40, height: 20,
+  children: [
+    { name: 'Layer 1', ...box, ...px() },
+    { name: 'Backgrounds', children: [
+      { name: 'Layer 1', ...box, ...px(), opacity: 0.62, blendMode: 'screen' },
+      { name: 'Sky', ...box, ...px(), hidden: true },
+    ] },
+    { name: 'SALE', ...box, ...px(), text: { text: 'SUMMER SALE', style: {} } },
+    { name: 'Sticker', ...box, ...px(), clipping: true },
+  ],
+});
+const panelProject = () => createProject(panelDoc(), 'panel.psd');
+
+test('rows come back top of the stack first', () => {
+  // The model stores index 0 at the bottom; the panel shows the top layer at
+  // the top. This is the one place those two orders are reconciled.
+  const { rows } = panelRows(panelProject());
+  assert.deepEqual(rows.map((r) => r.name), ['Sticker', 'SALE', 'Sky', 'Layer 1', 'Layer 1']);
+  assert.deepEqual(rows.map((r) => r.index), [4, 3, 2, 1, 0]);
+});
+
+test('search matches the name, the group path and a text layer\'s content', () => {
+  const project = panelProject();
+  assert.deepEqual(panelRows(project, { search: 'sticker' }).rows.map((r) => r.name), ['Sticker']);
+  assert.deepEqual(panelRows(project, { search: 'backgrounds' }).rows.map((r) => r.name), ['Sky', 'Layer 1']);
+  // A layer called "SALE" holding "SUMMER SALE" is found by what it says.
+  assert.deepEqual(panelRows(project, { search: 'summer' }).rows.map((r) => r.name), ['SALE']);
+});
+
+test('filters combine with AND', () => {
+  const project = panelProject();
+  assert.deepEqual(panelRows(project, { filters: ['hidden'] }).rows.map((r) => r.name), ['Sky']);
+  assert.deepEqual(panelRows(project, { filters: ['blended'] }).rows.map((r) => r.name), ['Layer 1']);
+  assert.equal(panelRows(project, { filters: ['hidden', 'text'] }).rows.length, 0);
+});
+
+test('only colliding names get a z-index discriminator', () => {
+  // Display only. Nothing writes layer.name -- a fake rename in the undo
+  // history would be worse than an ambiguous list.
+  const { rows } = panelRows(panelProject());
+  const byName = Object.fromEntries(rows.map((r) => [r.name + ':' + r.index, r.discriminator]));
+  assert.equal(byName['Layer 1:0'], '#0');
+  assert.equal(byName['Layer 1:1'], '#1');
+  assert.equal(byName['Sticker:4'], null, 'a unique name needs no discriminator');
+});
+
+test('an all-unnamed document discriminates every row', () => {
+  // toLayer already substitutes '(unnamed)', so they all collide.
+  const doc = { width: 8, height: 4, children: [{ ...box, ...px() }, { ...box, ...px() }] };
+  const { rows } = panelRows(createProject(doc, 'x.psd'));
+  assert.deepEqual(rows.map((r) => r.name), ['(unnamed)', '(unnamed)']);
+  assert.deepEqual(rows.map((r) => r.discriminator), ['#1', '#0']);
+});
+
+test('badges are suppressed at their defaults', () => {
+  // A 60-row list where every row reads "raster · normal · 100%" is 60 rows of
+  // noise, and the one row that differs stops standing out.
+  const { rows } = panelRows(panelProject());
+  const plain = rows.find((r) => r.index === 0).badges;
+  assert.deepEqual(plain, {
+    text: false, mask: false, maskOff: false, clipped: false, hidden: false,
+    opacity: null, blendMode: null, groupPath: null, warned: false,
+  });
+  const blended = rows.find((r) => r.index === 1).badges;
+  assert.equal(blended.opacity, 62);
+  assert.equal(blended.blendMode, 'screen');
+  assert.equal(blended.groupPath, 'Backgrounds');
+});
+
+test('filtered-to-zero is a different state from an empty document', () => {
+  // Opposite remedies: one needs the filters cleared, the other needs a
+  // different file. Showing the onboarding copy to someone who mistyped a
+  // search is the classic version of this bug.
+  assert.equal(panelRows(panelProject(), { search: 'zzzz' }).state, 'filtered-to-zero');
+  const empty = createProject({ width: 4, height: 4, children: [{ name: 'no pixels' }] }, 'e.psd');
+  const result = panelRows(empty);
+  assert.equal(result.state, 'empty-document');
+  assert.equal(result.skippedLeaves, 1, 'the copy has to say how many leaves were dropped');
+});
+
+test('a selection hidden by the filter is reported, never silently dropped', () => {
+  const project = panelProject();
+  const sky = project.layers[2];
+  const result = panelRows(project, { search: 'zzzz', selectedId: sky.id });
+  assert.equal(result.selectionHidden, true, 'the panel must offer to clear, not deselect');
+  assert.equal(panelRows(project, { selectedId: sky.id }).selectionHidden, false);
+});
+
+test('the clip chip names the nearest unclipped layer below', () => {
+  const project = panelProject();
+  const { rows } = panelRows(project);
+  assert.equal(rows.find((r) => r.index === 4).clipBase, 'SALE');
+  assert.equal(rows.find((r) => r.index === 3).clipBase, null, 'an unclipped layer has no base');
+  // Photoshop permits a clipped layer at the bottom of the stack, and renders
+  // it unclipped. The chip has to say there is nothing to clip to.
+  const orphan = createProject({ width: 4, height: 4, children: [{ name: 'c', ...box, ...px(), clipping: true }] }, 'o.psd');
+  assert.equal(panelRows(orphan).rows[0].clipBase, null);
+  assert.equal(panelRows(orphan).rows[0].badges.clipped, true);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
