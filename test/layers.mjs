@@ -4,6 +4,7 @@ import {
   layerRect, pixelRect, projectMask, downscaleMask, resampleMask,
   readDocument, createProject, loadProjectProxy,
   renderProject, compositeDocument, compareBuffers, flattenOnto,
+  setLayer, undo, redo, nextGestureKey,
 } from '../src/index.js';
 
 let passed = 0;
@@ -340,6 +341,71 @@ test('vector masks with no raster are counted and warned about', () => {
   const w = createProject(vectorsDoc, 'vectors.src.psd').warnings.find((x) => /vector mask/i.test(x));
   assert.ok(w, 'a vector-masked layer must raise a document warning');
   assert.match(w, /3 layers/);
+});
+
+console.log('\ncommands and counters\n');
+
+const draggable = () => createProject(grouped(), 'grouped.psd');
+
+test('nextGestureKey mints a distinct key on every call', () => {
+  const a = nextGestureKey('xform');
+  const b = nextGestureKey('xform');
+  assert.notEqual(a, b);
+  assert.match(a, /^xform#\d+$/);
+});
+
+test('one gesture key collapses a whole drag into one undo entry', () => {
+  const project = draggable();
+  const id = project.layers[0].id;
+  const key = nextGestureKey('xform');
+  for (let x = 1; x <= 20; x++) setLayer(project, id, { x }, key);
+  assert.equal(project.history.length, 1);
+  assert.equal(project.layers[0].x, 20);
+  undo(project);
+  assert.equal(project.layers[0].x, 0, 'one drag must undo in one step');
+});
+
+test('two gestures are two undo entries, even on the same layer and field', () => {
+  // The bug a literal coalesce key produces: two drags minutes apart merge into
+  // one entry, and the first one becomes unreachable.
+  const project = draggable();
+  const id = project.layers[0].id;
+  setLayer(project, id, { x: 10 }, nextGestureKey('xform'));
+  setLayer(project, id, { x: 20 }, nextGestureKey('xform'));
+  assert.equal(project.history.length, 2);
+});
+
+test('mutation advances on the coalesced frames of a drag', () => {
+  const project = draggable();
+  const id = project.layers[0].id;
+  const key = nextGestureKey('xform');
+  setLayer(project, id, { x: 1 }, key);
+  const after = project.mutation;
+  setLayer(project, id, { x: 2 }, key);
+  assert.equal(project.mutation, after + 1, 'a coalesced frame still changed pixels');
+});
+
+test('revision does NOT advance on the coalesced frames of a drag', () => {
+  // Load-bearing, and the reason there are two counters. sandwich.js:107 keys
+  // its drag cache on `revision`; bumping it here would rebuild `below` and
+  // `above` on every frame and delete the cache's entire purpose.
+  const project = draggable();
+  const id = project.layers[0].id;
+  const key = nextGestureKey('xform');
+  setLayer(project, id, { x: 1 }, key);
+  const after = project.revision;
+  setLayer(project, id, { x: 2 }, key);
+  assert.equal(project.revision, after, 'the sandwich cache must survive a gesture');
+});
+
+test('mutation advances on undo and on redo', () => {
+  const project = draggable();
+  setLayer(project, project.layers[0].id, { x: 5 });
+  const afterCommit = project.mutation;
+  undo(project);
+  assert.equal(project.mutation, afterCommit + 1);
+  redo(project);
+  assert.equal(project.mutation, afterCommit + 2);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

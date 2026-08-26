@@ -7,7 +7,7 @@ export { compositeDocument, compareBuffers, differenceBuffer, createBuffer, flat
 export { layerRect, pixelRect, projectMask, downscaleMask, resampleMask } from './mask.js';
 export {
   createProject, findLayer, commit, setLayer, reorderLayer, undo, redo,
-  hitTest, toProjectJson, applyProjectJson, BLEND_MODES, FONT_STACKS,
+  hitTest, toProjectJson, applyProjectJson, nextGestureKey, BLEND_MODES, FONT_STACKS,
 } from './edit.js';
 export { renderProject, resample, rasteriseTextAt, measureText, drawLayerInto } from './render.js';
 export { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE } from './proxy.js';

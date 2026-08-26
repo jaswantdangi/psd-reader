@@ -288,6 +288,8 @@ export function createProject(doc, fileName = 'untitled.psd', options = {}) {
      * reason the sandwich cache survives a gesture.
      */
     revision: 0,
+    /** Bumped by every APPLIED command, coalesced drag frames and undo included. */
+    mutation: 0,
     history: [],
     future: [],
   };
@@ -315,6 +317,16 @@ function applyCommand(project, command) {
     const [moved] = project.layers.splice(command.from, 1);
     project.layers.splice(command.to, 0, moved);
   }
+
+  /**
+   * Every path reaches here: commit, setLayer's coalescing early-return, undo
+   * and redo. `revision` deliberately does NOT move on the coalesced frames of
+   * a drag -- that asymmetry is what lets the sandwich cache survive a gesture
+   * (src/sandwich.js:103-107). Anything that must react to EVERY applied
+   * change -- an Angular signal, a thumbnail, the panel's badge row -- reads
+   * this counter instead. Two counters, two different questions.
+   */
+  project.mutation = (project.mutation ?? 0) + 1;
 }
 
 function invert(command) {
@@ -322,6 +334,20 @@ function invert(command) {
     ? { ...command, to: command.from, from: command.to }
     : { ...command, from: command.to, to: command.from };
 }
+
+/**
+ * A coalesce key scoped to ONE gesture.
+ *
+ * setLayer merges a command into the previous one when the keys match, which is
+ * what turns four hundred pointer moves into a single undo step. A literal key
+ * would also merge two SEPARATE drags of the same layer, minutes apart, and the
+ * earlier one would become unreachable. The nonce is what stops that, and it
+ * lives here rather than in the UI so no caller can forget it.
+ *
+ * Mint one at pointer-down and reuse it for the whole gesture.
+ */
+let gestureSerial = 0;
+export const nextGestureKey = (prefix) => `${prefix}#${++gestureSerial}`;
 
 /** Run a command and push it onto the undo stack. */
 export function commit(project, command) {
@@ -457,5 +483,6 @@ export function applyProjectJson(project, json) {
   project.history.length = 0;
   project.future.length = 0;
   project.revision = (project.revision ?? 0) + 1;
+  project.mutation = (project.mutation ?? 0) + 1;
   return project;
 }
