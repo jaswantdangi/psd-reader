@@ -3,6 +3,7 @@ import fs from 'fs';
 import {
   createProject, loadProjectProxy, readDocument,
   ExportError, isSelfRendering, buildExportOrder, wantedIndices, assertIdentifiable, isFastPath, planSpill,
+  spillHeader, encodeSpill, decodeSpill, createMemorySpill, SPILL_MAGIC, SPILL_VERSION, SPILL_HEADER_BYTES,
 } from '../src/index.js';
 
 let passed = 0;
@@ -219,6 +220,74 @@ test('isFastPath and planSpill never disagree', () => {
     assert.equal(isFastPath(order), planSpill(order).spill.length === 0,
       `disagreement on ${JSON.stringify(indices)} -- the walk would take one path and the plan predict the other`);
   }
+});
+
+
+console.log('\nspill codec\n');
+
+const filled = (w, h, seed) => {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < data.length; i++) data[i] = (i * 7 + seed) & 0xff;
+  return { width: w, height: h, data };
+};
+
+test('a spill round-trips its dimensions and every byte', () => {
+  const source = filled(5, 3, 11);
+  const out = decodeSpill(encodeSpill(source));
+  assert.equal(out.width, 5);
+  assert.equal(out.height, 3);
+  assert.deepEqual([...out.data], [...source.data]);
+});
+
+test('the header is sixteen bytes and starts with PSDX', () => {
+  const header = spillHeader(5, 3);
+  assert.equal(header.length, SPILL_HEADER_BYTES);
+  assert.deepEqual([...header.subarray(0, 4)], [0x50, 0x53, 0x44, 0x58]);
+});
+
+test('a truncated spill raises instead of blending', () => {
+  const bytes = encodeSpill(filled(5, 3, 2));
+  assert.throws(() => decodeSpill(bytes.subarray(0, bytes.length - 4)),
+    (e) => e.code === 'SPILL_TRUNCATED' && /truncated/.test(e.message));
+});
+
+test('a file that is not a spill raises instead of being read as one', () => {
+  const bytes = encodeSpill(filled(2, 2, 0));
+  bytes[0] = 0x51;
+  assert.throws(() => decodeSpill(bytes), (e) => e.code === 'SPILL_CORRUPT');
+});
+
+test('a future spill version raises rather than being misread', () => {
+  const bytes = encodeSpill(filled(2, 2, 0));
+  bytes[4] = SPILL_VERSION + 1;
+  assert.throws(() => decodeSpill(bytes), (e) => e.code === 'SPILL_CORRUPT');
+});
+
+test('a header shorter than sixteen bytes raises', () => {
+  assert.throws(() => decodeSpill(new Uint8Array(8)), (e) => e.code === 'SPILL_TRUNCATED');
+});
+
+test('a zero-sized spill is legal -- a wanted layer can decode to nothing', () => {
+  const out = decodeSpill(encodeSpill({ width: 0, height: 0, data: new Uint8ClampedArray(0) }));
+  assert.equal(out.width, 0);
+  assert.equal(out.data.length, 0);
+});
+
+await atest('the memory adapter writes, reads, removes and disposes', async () => {
+  const spill = createMemorySpill();
+  const source = filled(4, 2, 3);
+  await spill.write('7.rgba', [spillHeader(4, 2), source.data]);
+  assert.deepEqual(spill.writes, ['7.rgba']);
+  const out = decodeSpill(await spill.read('7.rgba'));
+  assert.deepEqual([...out.data], [...source.data], 'chunked writes must concatenate in order');
+  await spill.remove('7.rgba');
+  assert.equal(spill.files.size, 0);
+  await spill.dispose();
+});
+
+await atest('reading a spill that was never written names the file', async () => {
+  const spill = createMemorySpill();
+  await assert.rejects(() => spill.read('9.rgba'), (e) => e.code === 'SPILL_MISSING' && /9\.rgba/.test(e.message));
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

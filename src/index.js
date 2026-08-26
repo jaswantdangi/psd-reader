@@ -33,3 +33,7 @@ export { ExportError } from './export/errors.js';
 export {
   isSelfRendering, buildExportOrder, wantedIndices, assertIdentifiable, isFastPath, planSpill,
 } from './export/order.js';
+export {
+  spillHeader, encodeSpill, decodeSpill, createMemorySpill,
+  SPILL_MAGIC, SPILL_VERSION, SPILL_HEADER_BYTES,
+} from './export/spill.js';
