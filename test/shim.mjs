@@ -25,13 +25,25 @@ const shimExports = new Set([...shimSource.matchAll(/^export const (\w+)/gm)].ma
 const srcDir = new URL('../src/', import.meta.url);
 const imported = new Map(); // name -> file
 
-for (const file of fs.readdirSync(srcDir)) {
-  if (!file.endsWith('.js')) continue;
-  const text = fs.readFileSync(new URL(file, srcDir), 'utf8');
+// Walk subdirectories too. This used to read src/ one level deep, which meant
+// anything added under src/<subdir>/ escaped the guard entirely — a new file
+// there could import an ag-psd symbol the shim does not re-export, and the
+// demo pages would blank with every test still green.
+function collectSources(dir, out = []) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) collectSources(new URL(`${entry.name}/`, dir), out);
+    else if (entry.name.endsWith('.js')) out.push(new URL(entry.name, dir));
+  }
+  return out;
+}
+
+for (const url of collectSources(srcDir)) {
+  const text = fs.readFileSync(url, 'utf8');
+  const label = decodeURIComponent(url.href.slice(srcDir.href.length));
   for (const m of text.matchAll(/import\s*\{([^}]+)\}\s*from\s*['"]ag-psd['"]/g))
     for (const raw of m[1].split(',')) {
       const name = raw.trim().split(/\s+as\s+/)[0].trim();
-      if (name) imported.set(name, file);
+      if (name) imported.set(name, label);
     }
 }
 
