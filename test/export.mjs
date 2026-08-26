@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'fs';
+import zlib from 'node:zlib';
 import {
   createProject, loadProjectProxy, readDocument, reorderLayer, setLayer,
   ExportError, isSelfRendering, buildExportOrder, wantedIndices, assertIdentifiable, isFastPath, planSpill,
@@ -9,6 +10,7 @@ import {
   exportFullRes, createJsExportTarget,
   compareBuffers, flattenOnto,
   EXPORT_TILE_CAP, tileEdgeFor, partitionTiles, intersectRect,
+  CANVAS_AREA_CAP, canUseCanvasEncoder, encodePngStored,
 } from '../src/index.js';
 
 let passed = 0;
@@ -630,6 +632,75 @@ test('a layer that misses a tile returns null, so the tile is skipped entirely',
   assert.equal(intersectRect({ x: 0, y: 0, width: 100, height: 100 }, tile), null);
   assert.equal(intersectRect({ x: 2048, y: 2048, width: 10, height: 10 }, tile), null,
     'touching an edge is not overlapping it');
+});
+
+console.log('\nPNG writer\n');
+
+/** Independent decoder: node:zlib for inflate and CRC, so nothing checks itself. */
+function decodePng(png) {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  for (let i = 0; i < 8; i++) assert.equal(png[i], signature[i], `signature byte ${i}`);
+
+  const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+  const idat = [];
+  let header = null;
+  let p = 8;
+  let sawEnd = false;
+
+  while (p < png.length) {
+    const length = view.getUint32(p, false);
+    const type = String.fromCharCode(png[p + 4], png[p + 5], png[p + 6], png[p + 7]);
+    assert.equal(view.getUint32(p + 8 + length, false), zlib.crc32(png.subarray(p + 4, p + 8 + length)),
+      `CRC32 of the ${type} chunk`);
+    if (type === 'IHDR')
+      header = {
+        width: view.getUint32(p + 8, false), height: view.getUint32(p + 12, false),
+        depth: png[p + 16], colour: png[p + 17], interlace: png[p + 20],
+      };
+    if (type === 'IDAT') idat.push(Buffer.from(png.subarray(p + 8, p + 8 + length)));
+    if (type === 'IEND') sawEnd = true;
+    p += 12 + length;
+  }
+
+  assert.ok(sawEnd, 'the file must end with IEND');
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = 1 + header.width * 4;
+  const data = new Uint8ClampedArray(header.width * header.height * 4);
+  for (let y = 0; y < header.height; y++) {
+    assert.equal(raw[y * stride], 0, `scanline ${y} must use filter 0`);
+    data.set(raw.subarray(y * stride + 1, y * stride + stride), y * header.width * 4);
+  }
+  return { ...header, data };
+}
+
+test('the poster is over the iOS canvas area cap, which is why this exists', () => {
+  assert.equal(CANVAS_AREA_CAP, 16777216);
+  assert.equal(4961 * 3508, 17403188);
+  assert.equal(canUseCanvasEncoder(4961, 3508), false);
+  assert.equal(canUseCanvasEncoder(1080, 1080), true);
+});
+
+test('a small image round-trips through zlib byte for byte', () => {
+  const source = filled(3, 2, 5);
+  const decoded = decodePng(encodePngStored(source));
+  assert.equal(decoded.width, 3);
+  assert.equal(decoded.height, 2);
+  assert.equal(decoded.depth, 8);
+  assert.equal(decoded.colour, 6, 'colour type 6 is 8-bit RGBA');
+  assert.equal(decoded.interlace, 0);
+  assert.deepEqual([...decoded.data], [...source.data]);
+});
+
+test('an image needing more than one stored block round-trips too', () => {
+  // 200x200 raw is 200 * (1 + 800) = 160,200 bytes, so three stored blocks.
+  const source = filled(200, 200, 31);
+  const decoded = decodePng(encodePngStored(source));
+  assert.deepEqual([...decoded.data], [...source.data]);
+});
+
+test('a 1x1 image is legal', () => {
+  const source = filled(1, 1, 9);
+  assert.deepEqual([...decodePng(encodePngStored(source)).data], [...source.data]);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
