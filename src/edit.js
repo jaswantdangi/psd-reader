@@ -310,7 +310,6 @@ function applyCommand(project, command) {
         // would let the next lookup hit a matching key and return null.
         layer.renderedKey = null;
         layer.rendered = null;
-        layer.rerendered = true;
       } else layer[key] = value;
     }
   } else if (command.type === 'reorder') {
@@ -367,6 +366,20 @@ export function commit(project, command) {
 export function setLayer(project, id, changes, coalesceKey) {
   const layer = findLayer(project, id);
   if (!layer) return project;
+
+  // ONE owner for `rerendered`, and it has to be here rather than in
+  // applyCommand: render.js:154 branches on this flag to decide whether a text
+  // layer re-rasterises at its target size (sharp) or goes through resample()
+  // (pixelated), and applyCommand also replays INVERTED commands. A flag set
+  // there is never captured in `from`, so undoing a text resize would leave the
+  // layer stuck on the live renderer. Deciding it here makes it invertible.
+  //
+  // Photoshop's text pixels are a bitmap; upscaling them can only blur. Raster
+  // layers really are bitmaps, so resampling is all there is and the flag stays
+  // false for them.
+  if (layer.kind === 'text' && !('rerendered' in changes)
+      && ('w' in changes || 'h' in changes || 'text' in changes))
+    changes = { ...changes, rerendered: true };
 
   const from = {};
   for (const key of Object.keys(changes))

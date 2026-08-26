@@ -181,10 +181,6 @@ overlay.addEventListener('pointermove', (e) => {
       x: Math.round(nx), y: Math.round(ny),
       w: Math.max(1, Math.round(nw)), h: Math.max(1, Math.round(nh)),
     };
-    // Photoshop's text pixels are a bitmap — upscaling them can only blur.
-    // Scaling a text layer therefore hands it to the live renderer, which
-    // re-shapes the glyphs at the new size and stays sharp.
-    if (layer.kind === 'text') changes.rerendered = true;
     setLayer(project, layer.id, changes, 'drag-' + layer.id);
   }
 
@@ -328,10 +324,10 @@ function renderInspector() {
         : Math.round(Number(input.value) || 0);
       if (key === 'opacity') $('opacity-value').textContent = Math.round(value * 100) + '%';
       const changes = { [key]: key === 'w' || key === 'h' ? Math.max(1, value) : value };
-      if (layer.kind === 'text' && (key === 'w' || key === 'h')) changes.rerendered = true;
       setLayer(project, layer.id, changes,
         input.type === 'range' ? 'slider-' + layer.id + '-' + key : undefined);
-      if (changes.rerendered) renderLayerPanel();
+      // setLayer now owns `rerendered`, so ask the layer rather than the change set.
+      if (layer.kind === 'text' && (key === 'w' || key === 'h')) renderLayerPanel();
       updateHistoryButtons();
       scheduleRender(input.type === 'range' ? dragQuality : 1);
     });

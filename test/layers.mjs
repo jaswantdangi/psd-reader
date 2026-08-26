@@ -408,4 +408,30 @@ test('mutation advances on undo and on redo', () => {
   assert.equal(project.mutation, afterCommit + 2);
 });
 
+const textDoc = await readDocument(bytesOf('fixtures/text.src.psd'), { pixels: 'eager', metadata: false });
+
+test('resizing a text layer switches it to live rendering without the caller saying so', () => {
+  const project = createProject(textDoc, 'text.src.psd');
+  const layer = project.layers.find((l) => l.kind === 'text');
+  assert.ok(layer, 'text.src.psd must contain a text layer');
+  assert.equal(layer.rerendered, false, 'should start on Photoshop pixels');
+  setLayer(project, layer.id, { w: layer.w * 3, h: layer.h * 3 }, nextGestureKey('xform'));
+  assert.equal(layer.rerendered, true, 'upscaling a text bitmap can only blur it');
+});
+
+test('resizing a raster layer leaves it on its own pixels', () => {
+  const project = draggable();
+  const layer = project.layers[0];
+  setLayer(project, layer.id, { w: 40, h: 40 }, nextGestureKey('xform'));
+  assert.equal(layer.rerendered, false);
+});
+
+test('undo restores the previous rerendered state', () => {
+  const project = createProject(textDoc, 'text.src.psd');
+  const layer = project.layers.find((l) => l.kind === 'text');
+  setLayer(project, layer.id, { w: layer.w * 3 }, nextGestureKey('xform'));
+  undo(project);
+  assert.equal(layer.rerendered, false, 'undo must return the layer to Photoshop pixels');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
