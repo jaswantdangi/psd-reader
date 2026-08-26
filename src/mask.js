@@ -72,3 +72,53 @@ export function projectMask(node, rect) {
   }
   return out;
 }
+
+/**
+ * Box-average a projected mask down to the dimensions of a proxy pixel buffer.
+ *
+ * `target` is the BUFFER, not a scale. Passing `node.proxyData` here means the
+ * mask reads the very dimensions its pixels ended up with, rather than
+ * evaluating `Math.round(w * scale)` a second time. The two expressions agree
+ * today; making one READ the other means they cannot disagree tomorrow, at any
+ * rounding, at any scale, under any future change to downscaleImage.
+ *
+ * Box-average for the same reason downscaleImage uses one: bilinear reads four
+ * neighbours and aliases badly below about half scale, which is exactly where a
+ * proxy lives. No alpha weighting -- there is only one channel, and it IS the
+ * coverage.
+ *
+ * @param {Uint8Array} data
+ * @param {{width:number,height:number}} source  dimensions of `data`
+ * @param {{width:number,height:number}} target  the proxy pixel buffer
+ * @returns {{width:number,height:number,data:Uint8Array}|null}
+ *   `data` is returned by reference when no resizing is needed.
+ */
+export function downscaleMask(data, source, target) {
+  if (!data || !source || !target || !target.width || !target.height) return null;
+
+  const w = target.width;
+  const h = target.height;
+  if (w === source.width && h === source.height) return { width: w, height: h, data };
+
+  const out = new Uint8Array(w * h);
+  const xRatio = source.width / w;
+  const yRatio = source.height / h;
+
+  for (let y = 0; y < h; y++) {
+    const sy0 = Math.floor(y * yRatio);
+    const sy1 = Math.min(source.height, Math.max(sy0 + 1, Math.ceil((y + 1) * yRatio)));
+
+    for (let x = 0; x < w; x++) {
+      const sx0 = Math.floor(x * xRatio);
+      const sx1 = Math.min(source.width, Math.max(sx0 + 1, Math.ceil((x + 1) * xRatio)));
+
+      let sum = 0, n = 0;
+      for (let sy = sy0; sy < sy1; sy++)
+        for (let sx = sx0; sx < sx1; sx++) { sum += data[sy * source.width + sx]; n++; }
+
+      out[y * w + x] = n ? Math.round(sum / n) : 0;
+    }
+  }
+
+  return { width: w, height: h, data: out };
+}

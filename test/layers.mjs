@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import {
-  layerRect, pixelRect, projectMask,
+  layerRect, pixelRect, projectMask, downscaleMask,
 } from '../src/index.js';
 
 let passed = 0;
@@ -89,6 +89,35 @@ test('projectMask returns null when there is no mask raster', () => {
     ),
     null,
   );
+});
+
+test('downscaleMask takes its dimensions from the target buffer, not from a scale', () => {
+  // A 10x10 mask against a target of 3x2. Any implementation that recomputed
+  // round(10 * scale) would produce 3x3 and shear the mask against its layer
+  // by a whole row. This is the assertion the alignment claim rests on.
+  const data = new Uint8Array(100).fill(255);
+  const out = downscaleMask(data, { width: 10, height: 10 }, { width: 3, height: 2 });
+  assert.equal(out.width, 3);
+  assert.equal(out.height, 2);
+  assert.equal(out.data.length, 6);
+});
+
+test('downscaleMask box-averages rather than point-sampling', () => {
+  // 2x1: fully covered beside fully clear. A point sample returns 255 or 0;
+  // the average is the honest answer for a coverage plane.
+  const out = downscaleMask(new Uint8Array([255, 0]), { width: 2, height: 1 }, { width: 1, height: 1 });
+  assert.equal(out.data[0], 128);
+});
+
+test('downscaleMask keeps a fully covered mask fully covered', () => {
+  const out = downscaleMask(new Uint8Array(64).fill(255), { width: 8, height: 8 }, { width: 3, height: 3 });
+  assert.deepEqual([...out.data], new Array(9).fill(255));
+});
+
+test('downscaleMask returns the source array untouched when nothing shrinks', () => {
+  const data = new Uint8Array([1, 2, 3, 4]);
+  const out = downscaleMask(data, { width: 2, height: 2 }, { width: 2, height: 2 });
+  assert.equal(out.data, data, 'a same-size "downscale" must not allocate');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
