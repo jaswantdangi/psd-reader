@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import {
   layerRect, pixelRect, projectMask, downscaleMask, resampleMask,
+  readDocument, createProject,
 } from '../src/index.js';
 
 let passed = 0;
@@ -140,6 +141,65 @@ test('resampleMask upscales without leaving the 0..255 range', () => {
   const out = resampleMask(mask, 8, 8);
   assert.equal(out.length, 64);
   for (const v of out) assert.ok(Number.isFinite(v) && v >= 0 && v <= 255, `out of range: ${v}`);
+});
+
+console.log('\nlayer model\n');
+
+/** An eager read of the one fixture whose mask has a different origin from its layer. */
+const maskedDoc = await readDocument(bytesOf('fixtures/vector-and-mask.src.psd'), { pixels: 'eager', metadata: false });
+const maskedProject = createProject(maskedDoc, 'vector-and-mask.src.psd');
+
+/** A hand-built document: one group with two leaves, one of which has no pixels. */
+const grouped = () => ({
+  width: 20, height: 10,
+  children: [{
+    name: 'Backgrounds', opacity: 0.5,
+    children: [
+      { name: 'Sky', left: 0, top: 0, right: 10, bottom: 10,
+        proxyData: { width: 10, height: 10, data: new Uint8ClampedArray(10 * 10 * 4) } },
+      { name: 'empty', left: 0, top: 0, right: 0, bottom: 0 },
+      { name: 'Clipped to sky', clipping: true, left: 0, top: 0, right: 10, bottom: 10,
+        proxyData: { width: 10, height: 10, data: new Uint8ClampedArray(10 * 10 * 4) } },
+    ],
+  }],
+});
+
+test('a masked layer carries its mask on the same grid as its pixels', () => {
+  const layer = maskedProject.layers[0];
+  assert.ok(layer.mask, 'vector-and-mask.src.psd must produce a masked layer');
+  assert.equal(layer.mask.width, layer.pixels.width);
+  assert.equal(layer.mask.height, layer.pixels.height);
+  assert.equal(layer.mask.data.length, layer.pixels.width * layer.pixels.height);
+});
+
+test('mask.disabled is read from the file rather than assumed', () => {
+  assert.equal(maskedProject.layers[0].mask.disabled, false);
+});
+
+test('clipping is carried onto the layer', () => {
+  const layers = createProject(grouped(), 'grouped.psd').layers;
+  assert.deepEqual(layers.map((l) => l.clipping), [false, true]);
+});
+
+test('groupPath records the groups a layer was flattened out of', () => {
+  const layers = createProject(grouped(), 'grouped.psd').layers;
+  assert.equal(layers[0].groupPath, 'Backgrounds');
+  assert.equal(maskedProject.layers[0].groupPath, '', 'a top-level layer has no group path');
+});
+
+test('layers from a group that raised a warning are individually marked', () => {
+  // The group blends at 50%, which flatten() already warns about. Without this
+  // flag the warning says "somewhere in this document" and the panel cannot
+  // point at the rows it is about.
+  const project = createProject(grouped(), 'grouped.psd');
+  assert.ok(project.warnings.some((w) => /Backgrounds/.test(w)));
+  assert.deepEqual(project.layers.map((l) => l.groupWarned), [true, true]);
+});
+
+test('createProject counts the leaves flatten() dropped', () => {
+  // Without this the "empty document" state is blank and inexplicable: every
+  // leaf was pixel-less, and the screen can say so only if it knows how many.
+  assert.equal(createProject(grouped(), 'grouped.psd').skippedLeaves, 1);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

@@ -14,6 +14,8 @@
  *    undo/redo is just replaying the inverse.
  */
 
+import { projectMask, pixelRect } from './mask.js';
+
 /**
  * Blend modes offered in the UI — every mode the compositor implements, in
  * Photoshop's own menu order.
@@ -52,6 +54,35 @@ const rgbToHex = (c) =>
 
 let nextId = 1;
 
+/**
+ * The layer's mask, on the pixel buffer's own grid.
+ *
+ * A streamed load has already done the expensive half inside loadProjectProxy --
+ * projecting at full resolution, then shrinking to the proxy -- and left the
+ * result on `proxyMask`, because reader.js releases `mask.imageData` the moment
+ * onLayer returns. An eager load has no proxy step, so the projection happens
+ * here against the full-resolution buffer that is still attached.
+ *
+ * Either way the result has NO independent geometry: it is `pixels.width` by
+ * `pixels.height`, so render time resamples mask and pixels to the same target
+ * from the same source and they cannot drift apart.
+ */
+function maskOf(source, pixelSource) {
+  if (!pixelSource) return null;
+  const data = source.proxyMask
+    ?? (source.mask?.imageData ? projectMask(source, pixelRect(source, pixelSource)) : null);
+  if (!data) return null;
+  return {
+    data,
+    width: pixelSource.width,
+    height: pixelSource.height,
+    // Photoshop saves masks that are switched off. Reading the flag is not
+    // optional -- honouring a disabled mask renders the file wrong in the
+    // opposite direction from ignoring an enabled one.
+    disabled: source.mask?.disabled === true,
+  };
+}
+
 function toLayer(source) {
   const x = source.left ?? 0;
   const y = source.top ?? 0;
@@ -87,6 +118,25 @@ function toLayer(source) {
      * read, which never streams and therefore has nothing to match.
      */
     sourceIndex: source.sourceIndex ?? null,
+    /**
+     * Layer mask as a 0..255 coverage plane on exactly the `pixels` grid, or
+     * null. blendInto has always accepted one; nothing ever supplied it, which
+     * is why masked documents rendered correctly in the inspector and wrong in
+     * the editor -- in preview AND in export.
+     */
+    mask: maskOf(source, pixelSource),
+    /**
+     * The file clips this layer to the one below it. NOT APPLIED: clipping is a
+     * nested composite, not an alpha multiply, and it collides with the free
+     * reorder this panel exists to offer. The field exists so the UI can say so
+     * -- a per-row chip, a filter, and a document warning -- rather than
+     * rendering the layer in full and saying nothing.
+     */
+    clipping: source.clipping === true,
+    /** ' / '-joined names of the groups this layer was flattened out of. Assigned by flatten(). */
+    groupPath: '',
+    /** One of the groups this layer came from raised a flattening warning. Assigned by flatten(). */
+    groupWarned: false,
     /** Set when we have re-drawn the layer ourselves instead of using Photoshop's pixels. */
     rerendered: false,
     /** Cache of our own render, invalidated whenever `text` changes. */
@@ -120,29 +170,47 @@ function toLayer(source) {
  * every layer individually editable, which is the point of the editor. It is
  * only lossless when a group had default opacity and blending — otherwise the
  * render changes, so we say so.
+ *
+ * @param {string[]} path      group names above this level, outermost first
+ * @param {{skipped:number}} stats  mutated: leaves dropped for having nothing to draw
+ * @param {boolean} inWarnedGroup   a group above this level raised a warning
  */
-function flatten(children, out, warnings) {
+function flatten(children, out, warnings, path = [], stats = { skipped: 0 }, inWarnedGroup = false) {
   for (const node of children || []) {
     if (node.children) {
       const opacity = node.opacity ?? 1;
       const mode = node.blendMode || 'pass through';
-      if (opacity !== 1 || (mode !== 'pass through' && mode !== 'normal'))
+      let raised = false;
+      if (opacity !== 1 || (mode !== 'pass through' && mode !== 'normal')) {
         warnings.add(
           `Group "${node.name || 'unnamed'}" had ${mode} blending at ${Math.round(opacity * 100)}% ` +
           `opacity. Groups are flattened for editing, so this layer stack will render differently than in Photoshop.`,
         );
-      if (node.hidden === true)
+        raised = true;
+      }
+      if (node.hidden === true) {
         warnings.add(`Group "${node.name || 'unnamed'}" was hidden; its layers are individually hidden instead.`);
+        raised = true;
+      }
 
       const before = out.length;
-      flatten(node.children, out, warnings);
+      flatten(node.children, out, warnings, [...path, node.name || 'unnamed'], stats, inWarnedGroup || raised);
       // A hidden group hides its contents — but only its own, not everything
       // flattened so far.
       if (node.hidden === true) for (let i = before; i < out.length; i++) out[i].visible = false;
       continue;
     }
-    if (!node.imageData && !node.proxyData && !node.text) continue; // nothing to draw or edit
-    out.push(toLayer(node));
+    if (!node.imageData && !node.proxyData && !node.text) {
+      // Counted, not silently dropped: a document where EVERY leaf lands here
+      // produces an empty panel, and "this PSD has no editable layers, N layers
+      // had no pixels or text" is the only copy that explains it.
+      stats.skipped++;
+      continue;
+    }
+    const layer = toLayer(node);
+    layer.groupPath = path.join(' / ');
+    layer.groupWarned = inWarnedGroup;
+    out.push(layer);
   }
   return out;
 }
@@ -156,7 +224,8 @@ function flatten(children, out, warnings) {
 export function createProject(doc, fileName = 'untitled.psd', options = {}) {
   const { proxyScale = 1, source = null } = options;
   const warnings = new Set();
-  const layers = flatten(doc.children, [], warnings);
+  const stats = { skipped: 0 };
+  const layers = flatten(doc.children, [], warnings, [], stats);
 
   return {
     fileName,
@@ -168,6 +237,8 @@ export function createProject(doc, fileName = 'untitled.psd', options = {}) {
     source,
     layers,                       // index 0 = bottom, matching the file
     warnings: [...warnings],
+    /** Leaves flatten() dropped for carrying neither pixels nor text. Drives the empty-document copy. */
+    skippedLeaves: stats.skipped,
     /**
      * Bumped by every mutation, so caches keyed on it drop on any commit, undo
      * or redo — but NOT on the coalesced frames of a drag, which take
