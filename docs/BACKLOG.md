@@ -11,14 +11,19 @@ place they survive.
 
 ## Correctness gaps (highest priority)
 
-- **Layer masks are dropped by the editor.** `src/composite.js` applies them (17
-  references); `src/edit.js` and `src/render.js` contain **none**. So the read-only
-  compositor honours masks, but any document opened in the editor renders masked
-  layers as if unmasked — in preview *and* in export. This is not a documented
-  limitation, it is a silent wrong-pixels bug, and it will look like the editor
-  "breaks" files that the inspector renders correctly. Found while specifying Phase
-  1C, 2026-08-26. Fixing it means carrying mask rasters through `toLayer()` and
-  applying them in `renderProject`, which is Phase 2-sized work, not a patch.
+- **Layer masks AND clipping are dropped by the editor.** `src/composite.js` applies
+  both (17 `mask` references, 12 `clip`); `src/edit.js` and `src/render.js` contain
+  **zero of either**. So the read-only compositor honours them, but any document
+  opened in the editor renders masked layers as if unmasked and clipped layers as if
+  unclipped — in preview *and* in export. This is not a documented limitation, it is
+  a silent wrong-pixels bug, and it will look like the editor "breaks" files the
+  inspector renders correctly. Found while specifying Phases 1B and 1C, 2026-08-26.
+  Fixing it means carrying mask rasters and clipping runs through `toLayer()` and
+  honouring them in `renderProject` — Phase 2-sized work, not a patch.
+
+  This is also why Phase 1B's GPU conformance suite compares **GPU against the JS
+  compositor**, not GPU against Photoshop: the editor render path is already known
+  to differ from Photoshop for these files, so Photoshop is the wrong oracle for it.
 - **Decode order and project order diverge.** `src/reader.js` streams every leaf
   node (skipping only groups); `src/edit.js`'s `flatten()` additionally skips leaves
   with neither pixels nor text. Harmless today because `loadProjectProxy` stashes

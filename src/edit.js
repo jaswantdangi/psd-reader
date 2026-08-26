@@ -14,11 +14,23 @@
  *    undo/redo is just replaying the inverse.
  */
 
-/** Blend modes offered in the UI — the separable set our compositor implements exactly. */
+/**
+ * Blend modes offered in the UI — every mode the compositor implements, in
+ * Photoshop's own menu order.
+ *
+ * This list must stay in step with `SEPARABLE` and `NON_SEPARABLE` in
+ * composite.js. It previously offered 18 of the 26, so eight working modes
+ * were invisible: a file using one still rendered correctly but the user could
+ * neither see nor preserve it. `dissolve` is deliberately absent — it is the
+ * one mode the compositor does not implement.
+ */
 export const BLEND_MODES = [
-  'normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten',
-  'color dodge', 'color burn', 'hard light', 'soft light',
-  'difference', 'exclusion', 'linear dodge', 'linear burn',
+  'normal',
+  'darken', 'multiply', 'color burn', 'linear burn', 'darker color',
+  'lighten', 'screen', 'color dodge', 'linear dodge', 'lighter color',
+  'overlay', 'soft light', 'hard light', 'vivid light', 'linear light',
+  'pin light', 'hard mix',
+  'difference', 'exclusion', 'subtract', 'divide',
   'hue', 'saturation', 'color', 'luminosity',
 ];
 

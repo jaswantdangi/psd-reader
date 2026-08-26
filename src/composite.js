@@ -52,6 +52,15 @@ const SEPARABLE = {
 /** Non-separable modes need the whole pixel at once (W3C compositing spec). */
 const NON_SEPARABLE = new Set(['hue', 'saturation', 'color', 'luminosity', 'darker color', 'lighter color']);
 
+/**
+ * Every blend mode this compositor actually implements.
+ *
+ * Derived from the tables above rather than hand-listed, so it cannot drift
+ * from them. `edit.js` offers these in the UI, and a test asserts the two
+ * agree — they had silently diverged by eight modes once already.
+ */
+export const SUPPORTED_BLEND_MODES = [...Object.keys(SEPARABLE), ...NON_SEPARABLE];
+
 const lum = (r, g, b) => 0.3 * r + 0.59 * g + 0.11 * b;
 
 function clipColor(c) {

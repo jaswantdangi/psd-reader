@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   readDocument, createProject, setLayer, reorderLayer, undo, redo,
   hitTest, renderProject, resample, toProjectJson, applyProjectJson,
+  BLEND_MODES, SUPPORTED_BLEND_MODES,
 } from '../src/index.js';
 
 let passed = 0;
@@ -236,6 +237,17 @@ test('changing text clears the render cache key, not just the pixels', () => {
   setLayer(textProject, tl.id, { text: { content: 'changed' } });
   assert.equal(tl.renderedKey, null, 'a stale key would return null pixels and hide the layer');
   undo(textProject);
+});
+
+test('the UI offers exactly the blend modes the compositor implements', () => {
+  // These drifted by eight modes once: the compositor handled 26, the UI listed
+  // 18, so a file using `vivid light` rendered correctly while the user could
+  // neither see nor preserve the mode. Asserting both directions — a hidden
+  // mode is a lost feature, a phantom mode renders wrong.
+  const hidden = SUPPORTED_BLEND_MODES.filter((m) => !BLEND_MODES.includes(m));
+  const phantom = BLEND_MODES.filter((m) => !SUPPORTED_BLEND_MODES.includes(m));
+  assert.deepEqual(hidden, [], 'implemented by the compositor but hidden from the user');
+  assert.deepEqual(phantom, [], 'offered to the user but not implemented — would render wrong');
 });
 
 delete globalThis.document;
