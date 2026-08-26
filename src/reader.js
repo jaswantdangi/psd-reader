@@ -82,10 +82,14 @@ async function readMetadata(bytes, warnings) {
  * @param {(size: {width: number, height: number}) => any} [options.onStart]
  *   `pixels: 'stream'` only. Fires once, after the structure parse and before
  *   any layer is decoded, so a caller can size proxies without a second parse.
+ * @param {(layer: object, sourceIndex: number) => boolean} [options.wantLayer]
+ *   `pixels: 'stream'` only. Return false to skip the decode entirely. The
+ *   sourceIndex counter still advances for a skipped layer, so refusing one
+ *   does not shift the identity of any layer after it.
  * @param {boolean} [options.metadata=true]
  */
 export async function readDocument(source, options = {}) {
-  const { pixels = 'none', onLayer, onStart, metadata: wantMetadata = true, embedded = false } = options;
+  const { pixels = 'none', onLayer, onStart, wantLayer, metadata: wantMetadata = true, embedded = false } = options;
 
   if (pixels === 'stream' && typeof onLayer !== 'function')
     throw new Error("pixels: 'stream' requires an onLayer callback");
@@ -132,6 +136,10 @@ export async function readDocument(source, options = {}) {
     for (const layer of layers) {
       if (layer.children) continue; // groups carry no pixels of their own
       layer.sourceIndex = sourceIndex++;
+      // Skip the decode for layers the caller will not use. The counter above
+      // has already advanced, which is the whole point -- a skipped layer must
+      // not renumber the ones after it.
+      if (typeof wantLayer === 'function' && !wantLayer(layer, layer.sourceIndex)) continue;
       decodeLayerPixels(layer, true);
       await onLayer(layer, layer.imageData);
       layer.imageData = undefined;

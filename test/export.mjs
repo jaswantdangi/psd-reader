@@ -69,4 +69,31 @@ test('a streamed load carries the stamp all the way onto the project layer', () 
     assert.equal(typeof layer.sourceIndex, 'number', `layer "${layer.name}" lost its identity`);
 });
 
+console.log('\nselective decode\n');
+
+const wantSeen = [];
+const wantDecoded = [];
+await readDocument(bytesOf('fixtures/shapes.src.psd'), {
+  pixels: 'stream', metadata: false,
+  wantLayer: (_layer, index) => index % 2 === 0,
+  onLayer: (node) => {
+    wantSeen.push(node.sourceIndex);
+    wantDecoded.push(Boolean(node.imageData));
+  },
+});
+
+test('wantLayer keeps onLayer from firing for layers the caller refused', () => {
+  assert.deepEqual(wantSeen, [0, 2, 4, 6], 'shapes.src.psd has eight leaves; four were wanted');
+});
+
+test('a skipped layer still consumes its index, so nothing after it shifts', () => {
+  // If the counter advanced only for decoded layers the indices would read
+  // [0, 1, 2, 3] and every later layer would be matched to the wrong file layer.
+  assert.equal(Math.max(...wantSeen), 6);
+});
+
+test('the layers that did arrive really were decoded', () => {
+  assert.deepEqual(wantDecoded, [true, true, true, true]);
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
