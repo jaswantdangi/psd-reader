@@ -101,6 +101,22 @@ place they survive.
   in `test/proxy.mjs` against a genuinely downscaled fixture. Worth revisiting only
   if `edit.mjs` ever gains a proxy-loaded fixture.
 
+## Export (Phase 1C)
+
+- **Export has no cancellation path.** The Phase 1C spec calls for defined behaviour
+  when a user backgrounds the app mid-export, and Task 7's brief is titled "progress
+  phases and the cancellation signal" — but the brief defines no cancellation
+  interface and none was invented. So a 12-20 s mobile export currently cannot be
+  stopped: no abort signal, no defined state if the worker is killed part-way, and
+  spilled files from an abandoned run are cleaned only by the launch sweep.
+  Backgrounding an app mid-task is normal phone behaviour, not an edge case.
+
+- **`planSpill` and the export walk are two implementations of one state machine.**
+  They are pinned by a single assertion (walk's actual spill writes == `planSpill`'s
+  prediction). That assertion is load-bearing: weaken or reorder it and the two can
+  drift into producing a plausible-looking wrong image with a green suite. If either
+  side is ever refactored, check that assertion still compares what it claims to.
+
 ## App (`app/`)
 
 **Nothing under `app/` has automated coverage.** That was a deliberate design
