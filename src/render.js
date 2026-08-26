@@ -12,6 +12,9 @@
 import { createBuffer, blendInto } from './composite.js';
 import { create2dSurface } from './surface.js';
 import { resampleMask } from './mask.js';
+import { isNeutralAdjust, lutFor, adjustCostOf } from './adjust/lut.js';
+import { applyAdjustments } from './adjust/apply.js';
+import { acquireScratch, DEFAULT_SCRATCH } from './adjust/scratch.js';
 
 /**
  * Bilinear resample. Written by hand rather than going through Canvas
@@ -116,6 +119,17 @@ function textPixelsAt(layer, width, height) {
 }
 
 /**
+ * Per-frame cost counters.
+ *
+ * Phase 1B and Phase 2 both established that an approximation or a cost the
+ * user cannot see is a bug. These are the Phase 3 instance: the debug readout
+ * shows `lut: N / hsl: M`, the two terms separately, because they differ by an
+ * estimated order of magnitude per layer and a single total would hide which
+ * one a slow frame is made of.
+ */
+export const createRenderStats = () => ({ layers: 0, lut: 0, hsl: 0, overlay: 0 });
+
+/**
  * Draw one layer into `dest`, exactly as renderProject does.
  *
  * Extracted from renderProject's loop so sandwich.js can re-blend a single live
@@ -137,6 +151,11 @@ function textPixelsAt(layer, width, height) {
  *   `onMissing` fires instead of the silent return when a layer yields no
  *   pixels, so export can make a vanished text layer fatal while leaving a
  *   pixel-less raster the same silent skip the preview gives it.
+ *   `scratch` is the destination buffer the adjustment pass writes into --
+ *   defaults to the shared preview one. Export passes its own, so a
+ *   full-resolution buffer is not left alive by the editor afterwards.
+ *   `stats` is a createRenderStats() object; when present, the counters are
+ *   incremented for the passes THIS call actually ran.
  */
 export function drawLayerInto(dest, layer, scale = 1, options = {}) {
   if (!layer.visible || layer.opacity <= 0) return;
@@ -177,22 +196,60 @@ export function drawLayerInto(dest, layer, scale = 1, options = {}) {
     return;
   }
 
+  if (options.stats) options.stats.layers++;
+
+  // Adjustments are a property of THIS layer, evaluated on its own pixels,
+  // after resampling and before blending. They never see the backdrop, never
+  // see a neighbour, and never produce a new entry in the layer stack -- which
+  // is what lets the one-layer-at-a-time export walk serve them with no second
+  // implementation, and what keeps every operation tile-independent.
+  //
+  // AFTER resample, not before. Pointwise operations do not commute with
+  // bilinear interpolation, so the order is a decision: the GPU forces it (a
+  // fragment shader samples uSource and only THEN has a value to adjust), it
+  // makes the pass cost proportional to the DESTINATION rect, and on the
+  // default preview path the two orders coincide anyway because resample()
+  // identity-returns and there is no interpolation to commute with.
+  if (layer.adjust && !isNeutralAdjust(layer.adjust)) {
+    // NEVER IN PLACE. resample() above returns its INPUT OBJECT when the
+    // dimensions already match -- the default preview path -- and
+    // textPixelsAt() returns layer.rendered itself. Adjusting in place would
+    // overwrite the layer's original pixels permanently and compound on every
+    // frame of a drag. applyAdjustments throws if this ever aliases; the
+    // scratch is what stops it having to.
+    const out = acquireScratch(options.scratch || DEFAULT_SCRATCH, rect.width, rect.height);
+    applyAdjustments(pixels, layer.adjust, out, lutFor(layer));
+    pixels = out;
+
+    if (options.stats) {
+      const cost = adjustCostOf(layer.adjust);
+      if (cost.lut) options.stats.lut++;
+      if (cost.hsl) options.stats.hsl++;
+      if (cost.overlay) options.stats.overlay++;
+    }
+  }
+
   blendInto(dest, pixels.data, rect, layer.opacity, layer.blendMode);
 }
 
 /**
  * @param {object} project
- * @param {{scale?: number}} [options]
+ * @param {{scale?: number, stats?: object|null, scratch?: object|null}} [options]
  *   `scale` 1 renders at document resolution; lower values are for interactive preview.
+ *   `stats` counts the adjustment passes this frame actually ran.
+ *   `scratch` overrides the shared adjustment destination buffer.
  * @returns {{width:number,height:number,data:Uint8ClampedArray}}
  */
 export function renderProject(project, options = {}) {
-  const { scale = 1 } = options;
+  const { scale = 1, stats = null, scratch = null } = options;
   const width = Math.max(1, Math.round(project.width * scale));
   const height = Math.max(1, Math.round(project.height * scale));
   const dest = createBuffer(width, height);
 
-  for (const layer of project.layers) drawLayerInto(dest, layer, scale); // bottom to top
+  // bottom to top. `pixels` is deliberately ABSENT from the options object --
+  // drawLayerInto reads it with `in`, so passing it as undefined would replace
+  // every layer's pixels with nothing.
+  for (const layer of project.layers) drawLayerInto(dest, layer, scale, { stats, scratch });
 
   return dest;
 }

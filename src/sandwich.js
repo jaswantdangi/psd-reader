@@ -91,14 +91,14 @@ function rebuild(cache, project, selectionIndex, scale, key) {
  * @param {object} cache  from createSandwichCache(); reused across frames
  * @param {object} project
  * @param {number} selectionIndex  index into project.layers; 0 is the bottom
- * @param {{scale?: number}} [options]
+ * @param {{scale?: number, stats?: object|null}} [options]
  * @returns {{width:number,height:number,data:Uint8ClampedArray}}
  */
 export function renderSandwiched(cache, project, selectionIndex, options = {}) {
-  const { scale = 1 } = options;
+  const { scale = 1, stats = null } = options;
 
   if (!Number.isInteger(selectionIndex) || selectionIndex < 0 || selectionIndex >= project.layers.length)
-    return renderProject(project, { scale });
+    return renderProject(project, { scale, stats });
 
   // `revision` is bumped by commit, undo, redo and applyProjectJson, and NOT by
   // the coalesced frames of a drag -- which is what lets one gesture reuse a
@@ -110,7 +110,7 @@ export function renderSandwiched(cache, project, selectionIndex, options = {}) {
   const frame = createBuffer(cache.below.width, cache.below.height);
   frame.data.set(cache.below.data);   // copy: `below` has to survive the next frame
 
-  drawLayerInto(frame, project.layers[selectionIndex], scale);
+  drawLayerInto(frame, project.layers[selectionIndex], scale, { stats });
 
   if (cache.state === SANDWICH_FLAT_ABOVE) {
     if (cache.above)
@@ -118,7 +118,7 @@ export function renderSandwiched(cache, project, selectionIndex, options = {}) {
         { left: 0, top: 0, width: frame.width, height: frame.height }, 1, 'normal');
   } else {
     for (let i = selectionIndex + 1; i < project.layers.length; i++)
-      drawLayerInto(frame, project.layers[i], scale);
+      drawLayerInto(frame, project.layers[i], scale, { stats });
   }
 
   return frame;

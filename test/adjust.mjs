@@ -9,6 +9,7 @@ import {
   PRESETS, PRESET_IDS, presetAdjust,
   createProject, setAdjust, undo, nextGestureKey, discardTo,
   toProjectJson, applyProjectJson,
+  resample, renderProject, createRenderStats, createSandwichCache, renderSandwiched,
 } from '../src/index.js';
 
 let passed = 0;
@@ -785,6 +786,90 @@ test('the derived LUT is not persisted and is rebuilt from parameters', () => {
   const target = twoLayerProject();
   applyProjectJson(target, JSON.parse(JSON.stringify(toProjectJson(p))));
   assert.deepEqual([...lutFor(target.layers[0])], [...lutFor(p.layers[0])]);
+});
+
+console.log('\nthe render hook\n');
+
+test('resample() identity-returns its input when the dimensions already match', () => {
+  // The PRECONDITION of the whole aliasing hazard, pinned so nobody removes the
+  // early return and quietly deletes the reason applyAdjustments guards itself.
+  // 1B's finding 4: this is the DEFAULT preview path, not an edge case --
+  // downscaleImage produces round(w * proxyScale) and renderProject at
+  // scale = proxyScale asks for the same expression.
+  const src = { width: 8, height: 8, data: new Uint8ClampedArray(8 * 8 * 4) };
+  assert.equal(resample(src, 8, 8), src, 'same object, not a copy');
+});
+
+test('a render NEVER writes into layer.pixels', () => {
+  // THE assertion the non-destructive claim stands on. Applied in place, a
+  // brightness adjustment would overwrite the layer's originals permanently --
+  // and because the next frame reads the same buffer it would compound, so a
+  // held slider runs away to white with nothing on screen to say so.
+  const p = twoLayerProject();
+  setAdjust(p, p.layers[0].id, { brightness: 90, contrast: 60 });
+  const before = new Uint8ClampedArray(p.layers[0].pixels.data);
+  renderProject(p, { scale: 1 });
+  assert.deepEqual([...p.layers[0].pixels.data], [...before], 'the source was mutated');
+});
+
+test('rendering the same project twice produces identical frames', () => {
+  // The compounding half. One frame proves the buffer was not aliased; two
+  // prove it cannot accumulate, which is what a drag actually does.
+  const p = twoLayerProject();
+  setAdjust(p, p.layers[0].id, { brightness: 90, contrast: 60 });
+  const first = renderProject(p, { scale: 1 });
+  const second = renderProject(p, { scale: 1 });
+  assert.deepEqual([...first.data], [...second.data]);
+});
+
+test('an adjustment changes the layer it is on and nothing else', () => {
+  const p = twoLayerProject();
+  p.layers[1].visible = false;                          // isolate the bottom layer
+  const plain = renderProject(p, { scale: 1 });
+  setAdjust(p, p.layers[1].id, { brightness: 100 });    // adjust the HIDDEN one
+  assert.deepEqual([...renderProject(p, { scale: 1 }).data], [...plain.data],
+    'an adjustment on a hidden layer must change nothing');
+  setAdjust(p, p.layers[0].id, { brightness: 100 });
+  assert.notDeepEqual([...renderProject(p, { scale: 1 }).data], [...plain.data]);
+});
+
+test('a layer with no adjustment renders byte-identically to before this phase', () => {
+  // The one-branch guarantee. A document with no adjustments must cost exactly
+  // what it cost yesterday, and produce exactly the same pixels.
+  const p = twoLayerProject();
+  const plain = renderProject(p, { scale: 1 });
+  setAdjust(p, p.layers[0].id, { brightness: 0 });      // neutral -> stored as null
+  assert.equal(p.layers[0].adjust, null);
+  assert.deepEqual([...renderProject(p, { scale: 1 }).data], [...plain.data]);
+});
+
+test('the two cost terms are counted separately, per frame', () => {
+  const p = twoLayerProject();
+  setAdjust(p, p.layers[0].id, { contrast: 20 });
+  setAdjust(p, p.layers[1].id, {
+    hsl: { bands: NEUTRAL_BANDS(), saturation: -50 },
+  });
+  const stats = createRenderStats();
+  renderProject(p, { scale: 1, stats });
+  assert.equal(stats.layers, 2);
+  assert.equal(stats.lut, 1, 'one layer carried a class-A table');
+  assert.equal(stats.hsl, 1, 'one layer carried the expensive pass');
+  assert.equal(stats.overlay, 0);
+});
+
+test('a cached sandwich frame counts only the live layer, because only it ran', () => {
+  // Reporting what a frame WOULD have cost rather than what it DID cost is the
+  // same lie the measured ladder exists to replace. During a drag, `below` and
+  // `above` are cached composites that already contain their layers'
+  // adjustments, computed once at cache build.
+  const p = twoLayerProject();
+  setAdjust(p, p.layers[0].id, { contrast: 20 });
+  setAdjust(p, p.layers[1].id, { contrast: 20 });
+  const cache = createSandwichCache();
+  renderSandwiched(cache, p, 1, { scale: 1 });          // build
+  const stats = createRenderStats();
+  renderSandwiched(cache, p, 1, { scale: 1, stats });   // cached
+  assert.equal(stats.lut, 1, 'only the live layer re-adjusted');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
