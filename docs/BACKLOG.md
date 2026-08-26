@@ -117,6 +117,15 @@ place they survive.
   drift into producing a plausible-looking wrong image with a green suite. If either
   side is ever refactored, check that assertion still compares what it claims to.
 
+  **Measured limit of that pin.** Mutation-tested during Task 9. Forcing `planSpill`'s
+  match to never fire was caught immediately. But mutating the match comparison from
+  `===` to `<=` was an **equivalent mutant on the current fixture and passed
+  undetected** — the fixture's `need` sequence is contiguous, so the two comparisons
+  cannot diverge on it. The pin therefore catches structural divergence but not an
+  off-by-one in the match condition. A fixture whose wanted `sourceIndex` values are
+  non-contiguous (a reorder combined with a hidden or zero-opacity layer that
+  `wantLayer` skips) would close that hole.
+
 ## App (`app/`)
 
 **Nothing under `app/` has automated coverage.** That was a deliberate design
