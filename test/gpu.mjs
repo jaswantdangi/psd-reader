@@ -5,6 +5,7 @@ import {
   VERTEX_SHADER, fragmentShaderFor,
   create2dSurface, measureText, rasteriseTextAt,
   createBuffer, createProject, setLayer, undo, redo, toProjectJson, applyProjectJson, renderProject, drawLayerInto,
+  compareBuffers, flattenOnto, createSandwichCache, renderSandwiched, sandwichStateFor, SANDWICH_FLAT_ABOVE, SANDWICH_BELOW_ONLY,
 } from '../src/index.js';
 
 let passed = 0;
@@ -326,6 +327,131 @@ test('applyProjectJson bumps it', () => {
   const before = project.revision;
   applyProjectJson(project, JSON.parse(JSON.stringify(toProjectJson(project))));
   assert.ok(project.revision > before, 'every layer was just replaced');
+});
+
+console.log('\nsandwich cache\n');
+
+test('the degraded path is byte-for-byte identical to a full render', () => {
+  // Nothing is cached above the selection, so the same layers are blended onto
+  // the same accumulator in the same order. There is no room for divergence.
+  const project = syntheticProject([{}, { left: 2 }, { mode: 'multiply' }, { mode: 'difference' }]);
+  assert.equal(sandwichStateFor(project, 1), SANDWICH_BELOW_ONLY);
+  const frame = renderSandwiched(createSandwichCache(), project, 1, { scale: 1 });
+  assert.deepEqual(Array.from(frame.data), Array.from(renderProject(project, { scale: 1 }).data));
+});
+
+test('the cached path matches a full render everywhere at tolerance 2', () => {
+  // `above` is composited onto a transparent buffer and then source-over'd, so
+  // it quantises to 8 bits twice where the direct path quantises once. That is
+  // the entire cost of the cache, and it is measured here rather than assumed.
+  //
+  // alphaFloor on the two layers above the selection is not decoration: `above`
+  // stores straight-alpha RGB divided by its own accumulated alpha, so a
+  // near-transparent stack up there amplifies half-LSB storage error by 1/ao
+  // before flattenOnto damps it again.
+  //
+  // The bound is 2, not 1. An earlier draft of this test asserted 1 and said
+  // ao > ~0.6 guaranteed it; that was wrong, and the measured truth is 7 of 576
+  // pixels at exactly 2 LSB on this fixture. Raising 1 -> 2 here is NOT the
+  // usual "relax the tolerance until it goes green": the cache is exact in real
+  // arithmetic (source-over is associative), the residue is 8-bit double
+  // quantisation, and this path only ever draws drag previews — the frame that
+  // survives the gesture comes from a full re-render. If this ever exceeds 2,
+  // that IS a real defect and must not be papered over the same way.
+  const project = syntheticProject([
+    {}, { left: 2 },
+    { opacity: 0.55, alphaFloor: 200 },
+    { top: 4, opacity: 0.8, alphaFloor: 200 },
+  ]);
+  assert.equal(sandwichStateFor(project, 1), SANDWICH_FLAT_ABOVE);
+  const frame = renderSandwiched(createSandwichCache(), project, 1, { scale: 1 });
+  // flattenOnto both first, and read percentReal — the same rule the rest of
+  // this repo compares by. A failure here is a real defect in the cache, not a
+  // tolerance to raise.
+  const stat = compareBuffers(flattenOnto(frame), flattenOnto(renderProject(project, { scale: 1 })), 2);
+  assert.equal(stat.percentReal, 0,
+    `beyond rounding on ${stat.beyondRounding} px, maxDelta ${stat.maxDelta}, meanDelta ${stat.meanDelta}`);
+  // Pin the ceiling: if the algorithm regresses, maxDelta climbs and this
+  // catches it even though percentReal stays 0 at the wider tolerance.
+  assert.ok(stat.maxDelta <= 2, `cache drifted to ${stat.maxDelta} LSB, above the measured bound of 2`);
+});
+
+test('state is exact when every layer above the selection is normal', () => {
+  const project = syntheticProject([{ mode: 'multiply' }, {}, { opacity: 0.3 }, {}]);
+  // A non-normal mode BELOW the selection is irrelevant — `below` is a real
+  // composite of those layers, not an approximation of them.
+  assert.equal(sandwichStateFor(project, 1), SANDWICH_FLAT_ABOVE);
+});
+
+test('a visible non-normal layer above degrades it', () => {
+  const project = syntheticProject([{}, {}, { mode: 'hard mix' }]);
+  assert.equal(sandwichStateFor(project, 1), SANDWICH_BELOW_ONLY);
+});
+
+test('a hidden or zero-opacity non-normal layer above does not', () => {
+  // renderProject skips these entirely, so they cannot make the cache wrong.
+  assert.equal(sandwichStateFor(syntheticProject([{}, {}, { mode: 'difference', hidden: true }]), 1),
+    SANDWICH_FLAT_ABOVE);
+  assert.equal(sandwichStateFor(syntheticProject([{}, {}, { mode: 'difference', opacity: 0 }]), 1),
+    SANDWICH_FLAT_ABOVE);
+});
+
+test('the cache survives the frames of one drag', () => {
+  // The load-bearing test. If this fails the feature does nothing at all.
+  const project = syntheticProject([{}, {}, {}, {}]);
+  const cache = createSandwichCache();
+  const id = project.layers[1].id;
+
+  renderSandwiched(cache, project, 1, { scale: 1 });
+  assert.equal(cache.builds, 1);
+  renderSandwiched(cache, project, 1, { scale: 1 });
+  assert.equal(cache.builds, 1, 'a second frame with nothing changed must reuse the cache');
+
+  setLayer(project, id, { x: 1 }, 'drag');           // first frame of a gesture -> commit
+  renderSandwiched(cache, project, 1, { scale: 1 });
+  assert.equal(cache.builds, 2);
+
+  for (let f = 2; f <= 12; f++) {
+    setLayer(project, id, { x: f }, 'drag');         // coalesced -> no bump
+    renderSandwiched(cache, project, 1, { scale: 1 });
+  }
+  assert.equal(cache.builds, 2, 'eleven more frames of one gesture must not rebuild it');
+});
+
+test('a commit rebuilds it', () => {
+  const project = syntheticProject([{}, {}, {}]);
+  const cache = createSandwichCache();
+  renderSandwiched(cache, project, 1, { scale: 1 });
+  setLayer(project, project.layers[2].id, { opacity: 0.5 });
+  renderSandwiched(cache, project, 1, { scale: 1 });
+  assert.equal(cache.builds, 2, 'a layer above the selection changed');
+});
+
+test('an undo rebuilds it', () => {
+  const project = syntheticProject([{}, {}, {}]);
+  const cache = createSandwichCache();
+  setLayer(project, project.layers[2].id, { opacity: 0.5 });
+  renderSandwiched(cache, project, 1, { scale: 1 });
+  undo(project);
+  renderSandwiched(cache, project, 1, { scale: 1 });
+  assert.equal(cache.builds, 2);
+});
+
+test('selecting the top layer needs no above buffer', () => {
+  const project = syntheticProject([{}, {}, {}]);
+  const cache = createSandwichCache();
+  const frame = renderSandwiched(cache, project, 2, { scale: 1 });
+  assert.equal(cache.above, null, 'an empty slice must not allocate a full-canvas buffer');
+  assert.deepEqual(Array.from(frame.data), Array.from(renderProject(project, { scale: 1 }).data));
+});
+
+test('an out-of-range selection falls back to the full render', () => {
+  const project = syntheticProject([{}, {}]);
+  const cache = createSandwichCache();
+  const full = Array.from(renderProject(project, { scale: 1 }).data);
+  for (const index of [-1, 2, null, undefined, 1.5])
+    assert.deepEqual(Array.from(renderSandwiched(cache, project, index, { scale: 1 }).data), full);
+  assert.equal(cache.builds, 0, 'nothing should have been cached');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

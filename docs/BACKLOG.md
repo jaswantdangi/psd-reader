@@ -49,6 +49,15 @@ place they survive.
 
 ## Engine (`src/`)
 
+- **The sandwich cache's flattened-`above` path costs up to 2 LSB.** Measured: 7 of
+  576 pixels on the `test/gpu.mjs` fixture. The algorithm is exact in real
+  arithmetic — source-over is associative — but `above` is quantised to 8 bits when
+  flattened and again when blended, and un-premultiplying by its alpha amplifies
+  that by `1/ao`. Storing `above` as `Float32Array` (or 16-bit) would restore
+  bit-exactness at 4x (or 2x) the buffer cost. Not done: this path only draws drag
+  previews and the frame surviving a gesture comes from a full re-render. Revisit if
+  the cache is ever reused for anything durable — an export, a thumbnail, a save.
+
 - **`applyProjectJson` had a stale-cache bug** — fixed 2026-08-25 in the Phase 1A
   final-review pass (`src/edit.js`), but the *pattern* is worth watching: any new
   code that clears `layer.rendered` must clear `layer.renderedKey` in the same
