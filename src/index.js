@@ -53,4 +53,5 @@ export {
 export {
   HANDLES, HANDLE_HIT_CSS_PX, TAP_SLOP_CSS_PX, MIN_LAYER_SIZE,
   handleAt, arbitrate, anchorFor, resizeFrom, moveBy, isTap,
+  chooseRenderMode, FRAME_BUDGET_MS, REDUCED_INTERACTION_SCALE,
 } from './gesture.js';

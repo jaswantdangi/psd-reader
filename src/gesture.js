@@ -123,3 +123,57 @@ export const moveBy = (rect, dx, dy) => ({
 
 /** Movement under the slop is a tap -- select, or deselect on a miss. */
 export const isTap = (dx, dy, slop = TAP_SLOP_CSS_PX) => Math.hypot(dx, dy) < slop;
+
+/**
+ * Frame budget for one drag frame, in ms.
+ *
+ * A CHOSEN threshold, not a measurement: roughly where a drag stops reading as
+ * direct manipulation and starts reading as a sequence of jumps. It is a
+ * constant so a device report can move it.
+ */
+export const FRAME_BUDGET_MS = 100;
+
+/** Composite at proxyScale * this during gestures on the bottom rung only. */
+export const REDUCED_INTERACTION_SCALE = 0.5;
+
+/**
+ * Pick a rung of the degradation ladder, ONCE, at pointer-down.
+ *
+ *   Live     full recomposite per frame                          exact
+ *   Sandwich 1B's cache: below + live layer + above              see sandwichStateFor
+ *   Ghost    freeze below/above at pointer-down, overlay the layer
+ *   Reduced  as Ghost, composited at REDUCED_INTERACTION_SCALE
+ *
+ * Held for the whole gesture: escalating mid-drag makes the image jump at the
+ * worst possible moment. A rung with no measurement yet (`null`) is TRIED, not
+ * skipped -- otherwise the first gesture on any device would fall to the bottom
+ * and stay there.
+ *
+ * `pill` is what the selection HUD must show. `null` means nothing to disclose;
+ * `'ghost'` means fidelity is reduced but the composite is right; `'preview'`
+ * means the canvas is showing where the layer WILL be, not what it will look
+ * like. The sandwich's own <=2 LSB quantisation is disclosed separately, by
+ * 1B's `sandwichStateFor` -- it is not this function's to report.
+ *
+ * NOTHING IN THIS LADDER HAS BEEN MEASURED ON A PHONE.
+ */
+export function chooseRenderMode(measured = {}, context = {}) {
+  const { liveMs = null, sandwichMs = null, ghostMs = null, budgetMs = FRAME_BUDGET_MS } = measured;
+  const { aboveAllNormal = true, liveModeIsNormal = true } = context;
+
+  const over = (ms) => ms !== null && ms > budgetMs;
+
+  if (!over(liveMs)) return { mode: 'live', scale: 1, pill: null };
+  if (!over(sandwichMs)) return { mode: 'sandwich', scale: 1, pill: null };
+  if (!over(ghostMs))
+    return {
+      mode: 'ghost',
+      scale: 1,
+      // Ghost composites the live layer over frozen halves. That is exact only
+      // when the layer blends `normal` AND nothing non-`normal` sits above it;
+      // otherwise it is a position preview and has to say so.
+      pill: aboveAllNormal && liveModeIsNormal ? 'ghost' : 'preview',
+    };
+
+  return { mode: 'reduced', scale: REDUCED_INTERACTION_SCALE, pill: 'preview' };
+}

@@ -10,6 +10,7 @@ import {
   renderScaleFor, cssZoomFor, maxDocScale, isPreviewQuality,
   HANDLES, HANDLE_HIT_CSS_PX, TAP_SLOP_CSS_PX, MIN_LAYER_SIZE,
   handleAt, arbitrate, anchorFor, resizeFrom, moveBy, isTap,
+  chooseRenderMode, FRAME_BUDGET_MS, REDUCED_INTERACTION_SCALE,
 } from '../src/index.js';
 
 let passed = 0;
@@ -614,6 +615,47 @@ test('moveBy rounds to whole document pixels and never changes size', () => {
 test('isTap is true only below the slop', () => {
   assert.equal(isTap(2, 2, TAP_SLOP_CSS_PX), true);
   assert.equal(isTap(0, 9, TAP_SLOP_CSS_PX), false);
+});
+
+test('a gesture that fits the budget renders live and exactly', () => {
+  const r = chooseRenderMode({ liveMs: 40 });
+  assert.equal(r.mode, 'live');
+  assert.equal(r.scale, 1);
+  assert.equal(r.pill, null);
+});
+
+test('over budget, the gesture drops to the sandwich cache', () => {
+  assert.equal(chooseRenderMode({ liveMs: 400, sandwichMs: 60 }).mode, 'sandwich');
+});
+
+test('a sandwich that is also over budget drops to ghost', () => {
+  assert.equal(chooseRenderMode({ liveMs: 900, sandwichMs: 300, ghostMs: 20 }).mode, 'ghost');
+});
+
+test('a ghost that is still over budget drops to a reduced interaction scale', () => {
+  // The bottom rung. There is nothing below it: refusing to let the user drag
+  // would be worse than a blurry drag.
+  const r = chooseRenderMode({ liveMs: 3000, sandwichMs: 2000, ghostMs: 400 });
+  assert.equal(r.mode, 'reduced');
+  assert.equal(r.scale, REDUCED_INTERACTION_SCALE);
+  assert.equal(r.pill, 'preview');
+});
+
+test('ghost is a position preview unless the stack lets it be exact', () => {
+  const exact = chooseRenderMode({ liveMs: 900, sandwichMs: 300, ghostMs: 20 },
+    { aboveAllNormal: true, liveModeIsNormal: true });
+  const approximate = chooseRenderMode({ liveMs: 900, sandwichMs: 300, ghostMs: 20 },
+    { aboveAllNormal: false, liveModeIsNormal: true });
+  assert.equal(exact.pill, 'ghost', 'fidelity is reduced but the composite is right');
+  assert.equal(approximate.pill, 'preview', 'this one only shows where the layer WILL be');
+});
+
+test('a rung that has never been measured is tried once rather than skipped', () => {
+  // Self-tuning: the first gesture on a device measures the rung it lands on,
+  // and the next one uses that number. Skipping unmeasured rungs would pin
+  // every device to the bottom of the ladder forever.
+  assert.equal(chooseRenderMode({}).mode, 'live');
+  assert.equal(chooseRenderMode({ liveMs: 400 }).mode, 'sandwich');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
