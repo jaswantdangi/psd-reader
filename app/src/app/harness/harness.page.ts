@@ -86,8 +86,14 @@ export class HarnessPage {
     const canvas = this.cv().nativeElement;
     canvas.width = buffer.width;
     canvas.height = buffer.height;
-    canvas.getContext('2d')!.putImageData(
-      new ImageData(buffer.data, buffer.width, buffer.height), 0, 0,
-    );
+
+    // Go through createImageData rather than `new ImageData(buffer.data, …)`.
+    // The engine is untyped JS, so its buffer types as Uint8ClampedArray<
+    // ArrayBufferLike>, which the ImageData constructor rejects. Copying into
+    // the context's own allocation keeps this type-safe without an assertion.
+    const ctx = canvas.getContext('2d')!;
+    const image = ctx.createImageData(buffer.width, buffer.height);
+    image.data.set(buffer.data);
+    ctx.putImageData(image, 0, 0);
   }
 }

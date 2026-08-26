@@ -13,7 +13,10 @@
     "importHelpers": true,
     "target": "ES2022",
     "module": "preserve",
-    "baseUrl": ".",
+    /* No `baseUrl`: TypeScript 6 deprecates it to a hard error. Without it,
+       `paths` resolves relative to this file, so `../src/*` still reaches the
+       engine at the repo root. `allowJs` is required — the engine is plain
+       ESM JavaScript, not TypeScript. */
     "paths": {
       "@engine/*": ["../src/*"]
     },

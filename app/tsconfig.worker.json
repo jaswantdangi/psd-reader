@@ -2,7 +2,10 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "outDir": "./out-tsc/worker",
+    /* No `outDir`, matching tsconfig.app.json. An outDir makes TypeScript infer
+       rootDir as app/, which then rejects the engine at ../src as "not under
+       rootDir". Nothing emits from this config anyway — Angular's application
+       builder bundles workers through esbuild. */
     "lib": ["es2018", "webworker"],
     "types": []
   },
