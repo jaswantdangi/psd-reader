@@ -146,4 +146,49 @@ test('the vertex shader needs no attribute buffers and lands on texel centres', 
     'vDstPx must be a linear function of position so it interpolates to pixel centres');
 });
 
+console.log('\nnon-separable modes\n');
+
+test('the six non-separable modes get the colour-space prelude', () => {
+  for (const mode of Object.keys(NON_SEPARABLE_GLSL)) {
+    const src = code(fragmentShaderFor(mode));
+    assert.ok(src.includes('float lum(vec3 c)'), `${mode}: missing lum`);
+    assert.ok(src.includes('float sat(vec3 c)'), `${mode}: missing sat`);
+    assert.ok(src.includes('vec3 setLum(vec3 c, float l)'), `${mode}: missing setLum`);
+    assert.ok(src.includes('vec3 setSat(vec3 c, float s)'), `${mode}: missing setSat`);
+    assert.ok(src.includes('vec3 clipColor(vec3 c)'), `${mode}: missing clipColor`);
+    assert.ok(src.includes(NON_SEPARABLE_GLSL[mode]), `${mode}: body not emitted`);
+  }
+  assert.ok(code(fragmentShaderFor('hue')).includes('LUM_W = vec3(0.3, 0.59, 0.11)'),
+    'the luminance weights must match composite.js exactly');
+});
+
+test('setSat is the branch-free closed form, with no dynamic vector indexing', () => {
+  const src = code(fragmentShaderFor('hue'));
+  assert.ok(src.includes('(mx > mn) ? (c - mn) * (s / (mx - mn)) : vec3(0.0)'));
+  // composite.js sorts three channel indices and writes back by index. GLSL ES
+  // 3.00 permits that and compiles it to conditional moves or scratch memory,
+  // with a history of driver bugs. The sort is an implementation artifact.
+  assert.ok(!/\bc\s*\[/.test(src), 'dynamic vector indexing must not appear');
+  assert.ok(!/\bsort\b/.test(src));
+});
+
+test('clipColor computes l, n and x once, before either branch', () => {
+  const src = code(fragmentShaderFor('color'));
+  const xAt = src.indexOf('float x = max(');
+  const branchAt = src.indexOf('if (n < 0.0)');
+  assert.ok(xAt > -1 && branchAt > -1, 'clipColor is not shaped as expected');
+  assert.ok(xAt < branchAt,
+    'x must be computed BEFORE the branch that mutates c. composite.js tests the ' +
+    'STALE x; recomputing it would be tidier and would diverge from the oracle.');
+});
+
+test('both non-separable divides carry the NaN guard', () => {
+  // In JS a 0/0 yields NaN, which Uint8ClampedArray stores as 0. In GLSL a NaN
+  // written to a unorm8 target is undefined and has been observed as garbage.
+  const src = code(fragmentShaderFor('saturation'));
+  assert.ok(src.includes('max(l - n, EPS)'));
+  assert.ok(src.includes('max(x - l, EPS)'));
+  assert.ok(src.includes('const float EPS   = 1e-6;'));
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
