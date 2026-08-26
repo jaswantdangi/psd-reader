@@ -7,7 +7,7 @@ import {
   HSL_BANDS, NEUTRAL_HSL, normaliseHsl, isNeutralHsl, bandWeights, applyHsl,
   SUPPORTED_BLEND_MODES, normaliseOverlay, isNeutralOverlay,
   PRESETS, PRESET_IDS, presetAdjust,
-  createProject, setAdjust, undo, nextGestureKey,
+  createProject, setAdjust, undo, nextGestureKey, discardTo,
 } from '../src/index.js';
 
 let passed = 0;
@@ -675,6 +675,51 @@ test('an adjustment pulled back to neutral is stored as null', () => {
   setAdjust(p, id, { brightness: 30 });
   setAdjust(p, id, { brightness: 0 });
   assert.equal(p.layers[0].adjust, null);
+});
+
+test('discardTo returns the layer to its pre-sheet state in one call', () => {
+  const p = twoLayerProject();
+  const id = p.layers[0].id;
+  setAdjust(p, id, presetAdjust('ember'));
+  const mark = p.history.length;                 // the sheet opens here
+  setAdjust(p, id, { brightness: 40 }, nextGestureKey('adjust'));
+  setAdjust(p, id, { contrast: -30 }, nextGestureKey('adjust'));
+  setAdjust(p, id, { temperature: 90 }, nextGestureKey('adjust'));
+  assert.equal(discardTo(p, mark), 3);
+  assert.equal(p.layers[0].adjust.preset, 'ember');
+  assert.equal(p.layers[0].adjust.brightness, presetAdjust('ember').brightness);
+  assert.equal(p.history.length, mark);
+});
+
+test('discardTo leaves `future` empty rather than stashing the experiment on redo', () => {
+  // A discarded experiment sitting on the redo stack is something the user
+  // finds again by accident and cannot explain.
+  const p = twoLayerProject();
+  const id = p.layers[0].id;
+  const mark = p.history.length;
+  setAdjust(p, id, { brightness: 40 });
+  discardTo(p, mark);
+  assert.equal(p.future.length, 0);
+});
+
+test('discardTo bumps revision once, not once per pop', () => {
+  const p = twoLayerProject();
+  const id = p.layers[0].id;
+  const mark = p.history.length;
+  for (const v of [10, 20, 30, 40]) setAdjust(p, id, { brightness: v }, nextGestureKey('adjust'));
+  const before = p.revision;
+  discardTo(p, mark);
+  assert.equal(p.revision, before + 1, 'one user action, one structural change');
+});
+
+test('discardTo past the current length, or below zero, is a no-op', () => {
+  const p = twoLayerProject();
+  setAdjust(p, p.layers[0].id, { brightness: 12 });
+  const before = p.revision;
+  assert.equal(discardTo(p, 99), 0);
+  assert.equal(discardTo(p, -5), 1, 'a negative target clamps to zero and empties the history');
+  assert.equal(p.layers[0].adjust, null);
+  assert.equal(p.revision, before + 1);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

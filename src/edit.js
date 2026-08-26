@@ -477,6 +477,44 @@ export function redo(project) {
   return true;
 }
 
+/**
+ * Roll the history back to a recorded length, discarding what was popped.
+ *
+ * What `X` on a tool sheet does. PixelPerfect's X/tick mean cancel/apply
+ * because it BAKES; nothing bakes here, so the tick is just "close" and needs
+ * no code, and the X has to mean "discard this whole session, however many
+ * sliders were touched, in one action".
+ *
+ * Pops WITHOUT pushing to `future`, deliberately: a discarded experiment left
+ * on the redo stack is something the user finds again by accident three actions
+ * later and cannot explain.
+ *
+ * `revision` bumps ONCE for the whole rollback rather than once per pop. The
+ * caches keyed on it only need to know that something structural changed, and
+ * describing one user action with eight keys is eight keys nobody reads.
+ *
+ * @param {object} project
+ * @param {number} historyLength  project.history.length as it was when the sheet opened
+ * @returns {number} commands popped
+ */
+export function discardTo(project, historyLength) {
+  const target = Math.max(0, Number(historyLength) || 0);
+  let popped = 0;
+
+  while (project.history.length > target) {
+    const command = project.history.pop();
+    if (!command) break;
+    applyCommand(project, invert(command));
+    popped++;
+  }
+
+  if (popped) {
+    project.future.length = 0;
+    project.revision = (project.revision ?? 0) + 1;
+  }
+  return popped;
+}
+
 // ---------------------------------------------------------------- hit testing
 
 /**

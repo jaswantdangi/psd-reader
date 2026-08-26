@@ -6,7 +6,7 @@ export { installPlainPixelBackend } from './canvas.js';
 export { compositeDocument, compareBuffers, differenceBuffer, createBuffer, flattenOnto, SUPPORTED_BLEND_MODES } from './composite.js';
 export { layerRect, pixelRect, projectMask, downscaleMask, resampleMask } from './mask.js';
 export {
-  createProject, findLayer, commit, setLayer, setAdjust, reorderLayer, undo, redo,
+  createProject, findLayer, commit, setLayer, setAdjust, reorderLayer, undo, redo, discardTo,
   hitTest, toProjectJson, applyProjectJson, nextGestureKey, BLEND_MODES, FONT_STACKS,
 } from './edit.js';
 export { renderProject, resample, rasteriseTextAt, measureText, drawLayerInto } from './render.js';
