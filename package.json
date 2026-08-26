@@ -4,13 +4,14 @@
   "description": "",
   "main": "src/index.js",
   "scripts": {
-    "test": "node test/shim.mjs && node test/run.mjs && node test/composite.mjs && node test/edit.mjs && node --max-old-space-size=6144 test/proxy.mjs",
+    "test": "node test/shim.mjs && node test/run.mjs && node test/composite.mjs && node test/edit.mjs && node --max-old-space-size=6144 test/proxy.mjs && node test/gpu.mjs",
     "serve": "node serve.mjs",
     "test:shim": "node test/shim.mjs",
     "test:read": "node test/run.mjs",
     "test:composite": "node test/composite.mjs",
     "test:edit": "node test/edit.mjs",
-    "test:proxy": "node --max-old-space-size=6144 test/proxy.mjs"
+    "test:proxy": "node --max-old-space-size=6144 test/proxy.mjs",
+    "test:gpu": "node test/gpu.mjs"
   },
   "keywords": [],
   "author": "",
