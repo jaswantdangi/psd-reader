@@ -464,6 +464,17 @@ export function toProjectJson(project) {
       visible: l.visible, opacity: l.opacity, blendMode: l.blendMode,
       x: l.x, y: l.y, w: l.w, h: l.h,
       rerendered: l.rerendered,
+      // Carried so a reopened session does not silently lose the clipping
+      // disclosure -- the chip, the filter and the document warning all read
+      // these, and a saved project that drops them is a saved project that
+      // stops telling the truth.
+      clipping: l.clipping,
+      groupPath: l.groupPath,
+      /**
+       * ONLY the toggle. The mask raster is rebuilt from the PSD on every load;
+       * writing it here would store a second copy of the document.
+       */
+      maskDisabled: l.mask ? l.mask.disabled : null,
       text: l.text ? { ...l.text } : null,
     })),
   };
@@ -486,6 +497,10 @@ export function applyProjectJson(project, json) {
       x: saved.x, y: saved.y, w: saved.w, h: saved.h, rerendered: saved.rerendered,
     });
     if (saved.text && layer.text) Object.assign(layer.text, saved.text);
+    if (typeof saved.clipping === 'boolean') layer.clipping = saved.clipping;
+    if (typeof saved.groupPath === 'string') layer.groupPath = saved.groupPath;
+    // The raster is whatever this load produced; only the toggle is restored.
+    if (layer.mask && typeof saved.maskDisabled === 'boolean') layer.mask.disabled = saved.maskDisabled;
     // Drop the cache KEY as well as the pixels. Clearing only `rendered` lets
     // the next lookup hit a still-matching key, get null back, and the layer
     // disappears — the same trap `setLayer` guards against above.

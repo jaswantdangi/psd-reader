@@ -5,6 +5,7 @@ import {
   readDocument, createProject, loadProjectProxy,
   renderProject, compositeDocument, compareBuffers, flattenOnto,
   setLayer, undo, redo, nextGestureKey,
+  toProjectJson, applyProjectJson,
 } from '../src/index.js';
 
 let passed = 0;
@@ -432,6 +433,35 @@ test('undo restores the previous rerendered state', () => {
   setLayer(project, layer.id, { w: layer.w * 3 }, nextGestureKey('xform'));
   undo(project);
   assert.equal(layer.rerendered, false, 'undo must return the layer to Photoshop pixels');
+});
+
+test('toProjectJson carries the disclosure fields and the mask toggle', () => {
+  const project = createProject(grouped(), 'grouped.psd');
+  project.layers[0].mask = { data: new Uint8Array(4), width: 2, height: 2, disabled: true };
+  const json = toProjectJson(project);
+  assert.equal(json.layers[1].clipping, true);
+  assert.equal(json.layers[0].groupPath, 'Backgrounds');
+  assert.equal(json.layers[0].maskDisabled, true);
+  assert.equal(json.layers[1].maskDisabled, null, 'a layer with no mask has no toggle to save');
+});
+
+test('the mask raster itself is never written into the session file', () => {
+  // It is rebuilt from the PSD on every load. Persisting it would put a second
+  // copy of the document inside the project file.
+  const project = createProject(grouped(), 'grouped.psd');
+  project.layers[0].mask = { data: new Uint8Array(4), width: 2, height: 2, disabled: false };
+  assert.equal(JSON.stringify(toProjectJson(project)).includes('"data"'), false);
+});
+
+test('applyProjectJson restores the mask toggle without touching the raster', () => {
+  const project = createProject(grouped(), 'grouped.psd');
+  const data = new Uint8Array([1, 2, 3, 4]);
+  project.layers[0].mask = { data, width: 2, height: 2, disabled: false };
+  const json = toProjectJson(project);
+  json.layers[0].maskDisabled = true;
+  applyProjectJson(project, json);
+  assert.equal(project.layers[0].mask.disabled, true);
+  assert.equal(project.layers[0].mask.data, data, 'the raster must survive untouched');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
