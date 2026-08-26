@@ -4,6 +4,7 @@ import {
   SEPARABLE_GLSL, NON_SEPARABLE_GLSL, GPU_BLEND_MODES, programNameFor, isNonSeparableMode,
   VERTEX_SHADER, fragmentShaderFor,
   create2dSurface, measureText, rasteriseTextAt,
+  createBuffer, createProject, setLayer, undo, redo, toProjectJson, applyProjectJson, renderProject, drawLayerInto,
 } from '../src/index.js';
 
 let passed = 0;
@@ -230,6 +231,101 @@ test('measureText returns null where there is no surface', () => {
 test('rasteriseTextAt returns null where there is no surface', () => {
   const layer = { text: { content: 'x', fontSize: 12, fontFamily: 'Arial', color: '#000', align: 'left' } };
   assert.equal(rasteriseTextAt(layer, 10, 10), null);
+});
+
+console.log('\nrenderer extraction and revisions\n');
+
+/**
+ * Deterministic non-flat pixels: flat colour hides rounding differences.
+ *
+ * `alphaFloor` raises the alpha ramp's bottom end. Full-range alpha is the
+ * better default, but the sandwich cache's `above` half divides by its own
+ * accumulated alpha, so a near-transparent stack there amplifies quantisation
+ * error out of the range the exactness test can bound. One test raises the
+ * floor for exactly that reason and says so.
+ */
+const gradient = (w, h, seed, alphaFloor = 0) => {
+  const buffer = createBuffer(w, h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    buffer.data[i]     = (x * 11 + seed * 37) & 255;
+    buffer.data[i + 1] = (y * 13 + seed * 61) & 255;
+    buffer.data[i + 2] = (x * y + seed * 17) & 255;
+    const a = (x * 9 + y * 5 + seed * 23) & 255;
+    buffer.data[i + 3] = alphaFloor + Math.round((a * (255 - alphaFloor)) / 255);
+  }
+  return buffer;
+};
+
+const SIZE = 24;
+
+/**
+ * @param {{mode?:string, opacity?:number, hidden?:boolean,
+ *          left?:number, top?:number, alphaFloor?:number}[]} specs
+ */
+const syntheticProject = (specs) => createProject({
+  width: SIZE, height: SIZE,
+  children: specs.map((s, i) => {
+    const left = s.left ?? 0, top = s.top ?? 0;
+    const w = SIZE - left, h = SIZE - top;
+    return {
+      name: `L${i}`, left, top, right: left + w, bottom: top + h,
+      blendMode: s.mode ?? 'normal', opacity: s.opacity ?? 1, hidden: s.hidden === true,
+      proxyData: gradient(w, h, i + 1, s.alphaFloor ?? 0),
+    };
+  }),
+}, 'synthetic.psd');
+
+test('renderProject is exactly a fold of drawLayerInto over the layer list', () => {
+  const project = syntheticProject([{}, { mode: 'multiply' }, { left: 3, top: 5, opacity: 0.4 }]);
+  const folded = createBuffer(SIZE, SIZE);
+  for (const layer of project.layers) drawLayerInto(folded, layer, 1);
+  assert.deepEqual(Array.from(folded.data), Array.from(renderProject(project, { scale: 1 }).data));
+});
+
+test('drawLayerInto skips hidden and zero-opacity layers', () => {
+  const project = syntheticProject([{ hidden: true }, { opacity: 0 }]);
+  const dest = createBuffer(SIZE, SIZE);
+  for (const layer of project.layers) drawLayerInto(dest, layer, 1);
+  assert.ok(dest.data.every((v) => v === 0), 'nothing visible should have been drawn');
+});
+
+test('commit bumps the project revision', () => {
+  const project = syntheticProject([{}, {}]);
+  assert.equal(project.revision, 0, 'a fresh project starts at 0');
+  setLayer(project, project.layers[0].id, { x: 4 });
+  assert.equal(project.revision, 1);
+});
+
+test('undo and redo bump it too — commit() alone does not cover them', () => {
+  // undo() and redo() call applyCommand directly (src/edit.js:240-254). A cache
+  // keyed on a commit-only counter would serve stale pixels after every undo.
+  const project = syntheticProject([{}, {}]);
+  setLayer(project, project.layers[0].id, { x: 4 });
+  const after = project.revision;
+  undo(project);
+  assert.equal(project.revision, after + 1, 'undo must invalidate caches');
+  redo(project);
+  assert.equal(project.revision, after + 2, 'redo must invalidate caches');
+});
+
+test('the coalesced frames of a drag do not bump it', () => {
+  // This asymmetry IS the sandwich cache. The first frame commits (one bump);
+  // every frame after extends that entry through applyCommand and must leave
+  // the counter alone, or the cache rebuilds 60 times a second.
+  const project = syntheticProject([{}, {}]);
+  const id = project.layers[0].id;
+  setLayer(project, id, { x: 1 }, 'drag');
+  const afterFirst = project.revision;
+  for (let i = 2; i <= 10; i++) setLayer(project, id, { x: i }, 'drag');
+  assert.equal(project.revision, afterFirst, 'a gesture is one bump, not ten');
+});
+
+test('applyProjectJson bumps it', () => {
+  const project = syntheticProject([{}, {}]);
+  const before = project.revision;
+  applyProjectJson(project, JSON.parse(JSON.stringify(toProjectJson(project))));
+  assert.ok(project.revision > before, 'every layer was just replaced');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

@@ -160,6 +160,13 @@ export function createProject(doc, fileName = 'untitled.psd', options = {}) {
     source,
     layers,                       // index 0 = bottom, matching the file
     warnings: [...warnings],
+    /**
+     * Bumped by every mutation, so caches keyed on it drop on any commit, undo
+     * or redo — but NOT on the coalesced frames of a drag, which take
+     * applyCommand directly and leave it alone. That asymmetry is the whole
+     * reason the sandwich cache survives a gesture.
+     */
+    revision: 0,
     history: [],
     future: [],
   };
@@ -200,6 +207,7 @@ export function commit(project, command) {
   applyCommand(project, command);
   project.history.push(command);
   project.future.length = 0;
+  project.revision = (project.revision ?? 0) + 1;
   return project;
 }
 
@@ -242,6 +250,9 @@ export function undo(project) {
   if (!command) return false;
   applyCommand(project, invert(command));
   project.future.push(command);
+  // undo() and redo() call applyCommand directly, NOT commit — so each has to
+  // bump this itself or a cache keyed on it serves stale pixels afterwards.
+  project.revision = (project.revision ?? 0) + 1;
   return true;
 }
 
@@ -250,6 +261,7 @@ export function redo(project) {
   if (!command) return false;
   applyCommand(project, command);
   project.history.push(command);
+  project.revision = (project.revision ?? 0) + 1;
   return true;
 }
 
@@ -323,5 +335,6 @@ export function applyProjectJson(project, json) {
 
   project.history.length = 0;
   project.future.length = 0;
+  project.revision = (project.revision ?? 0) + 1;
   return project;
 }

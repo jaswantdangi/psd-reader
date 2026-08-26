@@ -115,8 +115,48 @@ function textPixelsAt(layer, width, height) {
 }
 
 /**
+ * Draw one layer into `dest`, exactly as renderProject does.
+ *
+ * Extracted from renderProject's loop so sandwich.js can re-blend a single live
+ * layer per drag frame. The alternative -- copying the text-versus-resample
+ * branch into a second file -- is precisely how text ends up going through
+ * resample(), which is the one thing this renderer must never do.
+ *
+ * @param {{width:number,height:number,data:Uint8ClampedArray}} dest
+ * @param {object} layer
+ * @param {number} [scale]  1 renders at document resolution.
+ */
+export function drawLayerInto(dest, layer, scale = 1) {
+  if (!layer.visible || layer.opacity <= 0) return;
+
+  const rect = {
+    left: Math.round(layer.x * scale),
+    top: Math.round(layer.y * scale),
+    width: Math.max(1, Math.round(layer.w * scale)),
+    height: Math.max(1, Math.round(layer.h * scale)),
+  };
+  if (rect.left >= dest.width || rect.top >= dest.height) return;
+  if (rect.left + rect.width <= 0 || rect.top + rect.height <= 0) return;
+
+  let pixels;
+  if (layer.kind === 'text' && layer.rerendered) {
+    // Draw the glyphs at their final size. Rasterising once and resampling the
+    // bitmap is what made scaled text look pixelated.
+    pixels = textPixelsAt(layer, rect.width, rect.height);
+  } else {
+    // Raster layers really are bitmaps — resampling is all there is.
+    const source = layer.pixels;
+    if (!source || !source.width || !source.height) return;
+    pixels = resample(source, rect.width, rect.height);
+  }
+  if (!pixels) return;
+
+  blendInto(dest, pixels.data, rect, layer.opacity, layer.blendMode);
+}
+
+/**
  * @param {object} project
- * @param {{scale?: number, skipHidden?: boolean}} [options]
+ * @param {{scale?: number}} [options]
  *   `scale` 1 renders at document resolution; lower values are for interactive preview.
  * @returns {{width:number,height:number,data:Uint8ClampedArray}}
  */
@@ -126,33 +166,7 @@ export function renderProject(project, options = {}) {
   const height = Math.max(1, Math.round(project.height * scale));
   const dest = createBuffer(width, height);
 
-  for (const layer of project.layers) { // bottom to top
-    if (!layer.visible || layer.opacity <= 0) continue;
-
-    const rect = {
-      left: Math.round(layer.x * scale),
-      top: Math.round(layer.y * scale),
-      width: Math.max(1, Math.round(layer.w * scale)),
-      height: Math.max(1, Math.round(layer.h * scale)),
-    };
-    if (rect.left >= width || rect.top >= height) continue;
-    if (rect.left + rect.width <= 0 || rect.top + rect.height <= 0) continue;
-
-    let pixels;
-    if (layer.kind === 'text' && layer.rerendered) {
-      // Draw the glyphs at their final size. Rasterising once and resampling
-      // the bitmap is what made scaled text look pixelated.
-      pixels = textPixelsAt(layer, rect.width, rect.height);
-    } else {
-      // Raster layers really are bitmaps — resampling is all there is.
-      const source = layer.pixels;
-      if (!source || !source.width || !source.height) continue;
-      pixels = resample(source, rect.width, rect.height);
-    }
-    if (!pixels) continue;
-
-    blendInto(dest, pixels.data, rect, layer.opacity, layer.blendMode);
-  }
+  for (const layer of project.layers) drawLayerInto(dest, layer, scale); // bottom to top
 
   return dest;
 }

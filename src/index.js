@@ -8,7 +8,7 @@ export {
   createProject, findLayer, commit, setLayer, reorderLayer, undo, redo,
   hitTest, toProjectJson, applyProjectJson, BLEND_MODES, FONT_STACKS,
 } from './edit.js';
-export { renderProject, resample, rasteriseTextAt, measureText } from './render.js';
+export { renderProject, resample, rasteriseTextAt, measureText, drawLayerInto } from './render.js';
 export { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE } from './proxy.js';
 export { memoryBudgetBytes, estimatePeakBytes, guardFileSize, HARD_FILE_CAP_BYTES } from './budget.js';
 export { loadProjectProxy } from './load.js';
