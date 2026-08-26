@@ -122,3 +122,46 @@ export function downscaleMask(data, source, target) {
 
   return { width: w, height: h, data: out };
 }
+
+/**
+ * Bilinear resize of a coverage plane, to the exact dimensions the layer's
+ * pixels are being resampled to.
+ *
+ * Deliberately not `resample()` from render.js: that is RGBA and would cost 4x
+ * the memory and 4x the arithmetic for three channels holding the same value.
+ * The identity early-return matches resample()'s (render.js:20) so the default
+ * preview path -- rect already at proxy dimensions -- does no work.
+ *
+ * @returns {Uint8Array} `mask.data` itself when the dimensions already match.
+ */
+export function resampleMask(mask, width, height) {
+  if (mask.width === width && mask.height === height) return mask.data;
+
+  const out = new Uint8Array(width * height);
+  const xRatio = mask.width / width;
+  const yRatio = mask.height / height;
+
+  for (let y = 0; y < height; y++) {
+    const sy = Math.min(mask.height - 1, (y + 0.5) * yRatio - 0.5);
+    const y0 = Math.max(0, Math.floor(sy));
+    const y1 = Math.min(mask.height - 1, y0 + 1);
+    const fy = sy - y0;
+
+    for (let x = 0; x < width; x++) {
+      const sx = Math.min(mask.width - 1, (x + 0.5) * xRatio - 0.5);
+      const x0 = Math.max(0, Math.floor(sx));
+      const x1 = Math.min(mask.width - 1, x0 + 1);
+      const fx = sx - x0;
+
+      const a = mask.data[y0 * mask.width + x0];
+      const b = mask.data[y0 * mask.width + x1];
+      const c = mask.data[y1 * mask.width + x0];
+      const d = mask.data[y1 * mask.width + x1];
+
+      const top = a + (b - a) * fx;
+      const bottom = c + (d - c) * fx;
+      out[y * width + x] = Math.round(top + (bottom - top) * fy);
+    }
+  }
+  return out;
+}

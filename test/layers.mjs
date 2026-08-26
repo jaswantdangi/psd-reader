@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import {
-  layerRect, pixelRect, projectMask, downscaleMask,
+  layerRect, pixelRect, projectMask, downscaleMask, resampleMask,
 } from '../src/index.js';
 
 let passed = 0;
@@ -118,6 +118,28 @@ test('downscaleMask returns the source array untouched when nothing shrinks', ()
   const data = new Uint8Array([1, 2, 3, 4]);
   const out = downscaleMask(data, { width: 2, height: 2 }, { width: 2, height: 2 });
   assert.equal(out.data, data, 'a same-size "downscale" must not allocate');
+});
+
+test('resampleMask returns the source array itself when nothing changes size', () => {
+  // The common case by a wide margin: a preview renders at proxyScale, where
+  // rect.width/height already equal the proxy buffer's. Allocating a copy of
+  // every mask on every frame would be pure waste.
+  const mask = { width: 3, height: 2, data: new Uint8Array([0, 1, 2, 3, 4, 5]) };
+  assert.equal(resampleMask(mask, 3, 2), mask.data);
+});
+
+test('resampleMask halves a mask without producing NaN or overflow', () => {
+  const mask = { width: 4, height: 4, data: new Uint8Array(16).fill(120) };
+  const out = resampleMask(mask, 2, 2);
+  assert.equal(out.length, 4);
+  for (const v of out) assert.equal(v, 120);
+});
+
+test('resampleMask upscales without leaving the 0..255 range', () => {
+  const mask = { width: 2, height: 2, data: new Uint8Array([0, 255, 255, 0]) };
+  const out = resampleMask(mask, 8, 8);
+  assert.equal(out.length, 64);
+  for (const v of out) assert.ok(Number.isFinite(v) && v >= 0 && v <= 255, `out of range: ${v}`);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
