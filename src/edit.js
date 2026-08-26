@@ -79,6 +79,14 @@ function toLayer(source) {
     /** Actual dimensions of whatever is in `pixels` — equal to sourceW/H on a full load. */
     proxyW: pixelSource?.width ?? w,
     proxyH: pixelSource?.height ?? h,
+    /**
+     * This layer's position among the file's leaf nodes, stamped by reader.js
+     * during a streamed read. Full-resolution export matches arriving layers to
+     * project layers on this and nothing else -- array position is wrong,
+     * because flatten() below drops pixel-less leaves. `null` after an eager
+     * read, which never streams and therefore has nothing to match.
+     */
+    sourceIndex: source.sourceIndex ?? null,
     /** Set when we have re-drawn the layer ourselves instead of using Photoshop's pixels. */
     rerendered: false,
     /** Cache of our own render, invalidated whenever `text` changes. */

@@ -121,8 +121,17 @@ export async function readDocument(source, options = {}) {
     // caller can size its proxies without parsing the file a second time.
     if (typeof onStart === 'function') await onStart({ width: psd.width, height: psd.height });
 
+    // Identity for every leaf the file contains, assigned before any decision
+    // about whether to decode it. edit.js's flatten() drops leaves with neither
+    // pixels nor text, so project order and decode order have the same ORDER but
+    // different MEMBERSHIP -- matching them by array position misaligns every
+    // layer after the first gap, and the result looks like a plausible image.
+    // This counter is the only thing both sides can agree on.
+    let sourceIndex = 0;
+
     for (const layer of layers) {
       if (layer.children) continue; // groups carry no pixels of their own
+      layer.sourceIndex = sourceIndex++;
       decodeLayerPixels(layer, true);
       await onLayer(layer, layer.imageData);
       layer.imageData = undefined;
