@@ -3,6 +3,7 @@ import {
   SUPPORTED_BLEND_MODES,
   SEPARABLE_GLSL, NON_SEPARABLE_GLSL, GPU_BLEND_MODES, programNameFor, isNonSeparableMode,
   VERTEX_SHADER, fragmentShaderFor,
+  create2dSurface, measureText, rasteriseTextAt,
 } from '../src/index.js';
 
 let passed = 0;
@@ -189,6 +190,46 @@ test('both non-separable divides carry the NaN guard', () => {
   assert.ok(src.includes('max(l - n, EPS)'));
   assert.ok(src.includes('max(x - l, EPS)'));
   assert.ok(src.includes('const float EPS   = 1e-6;'));
+});
+
+console.log('\n2d surface\n');
+
+test('Node has no 2D surface at all', () => {
+  // Neither global exists here, and pretending otherwise would make
+  // rasteriseTextAt return a buffer of nothing.
+  assert.equal(create2dSurface(8, 8), null);
+});
+
+test('falls back to document when there is no OffscreenCanvas', () => {
+  globalThis.document = { createElement: (tag) => ({ tag, width: 0, height: 0 }) };
+  try {
+    const surface = create2dSurface(7, 3);
+    assert.equal(surface.tag, 'canvas');
+    assert.equal(surface.width, 7);
+    assert.equal(surface.height, 3);
+  } finally { delete globalThis.document; }
+});
+
+test('prefers OffscreenCanvas over document', () => {
+  // Order is load-bearing, in both directions. Reversing it would put a worker
+  // on the document path -- the bug this file exists to fix. And checking
+  // document first would break test/edit.mjs, which stubs globalThis.document
+  // to observe setTransform/fillText and relies on that stub winning in Node.
+  globalThis.OffscreenCanvas = class { constructor(w, h) { this.width = w; this.height = h; this.offscreen = true; } };
+  globalThis.document = { createElement: () => ({ tag: 'canvas', width: 0, height: 0 }) };
+  try {
+    const surface = create2dSurface(5, 5);
+    assert.equal(surface.offscreen, true, 'a worker must get the OffscreenCanvas, not a DOM canvas');
+  } finally { delete globalThis.OffscreenCanvas; delete globalThis.document; }
+});
+
+test('measureText returns null where there is no surface', () => {
+  assert.equal(measureText({ content: 'x', fontSize: 12, fontFamily: 'Arial' }), null);
+});
+
+test('rasteriseTextAt returns null where there is no surface', () => {
+  const layer = { text: { content: 'x', fontSize: 12, fontFamily: 'Arial', color: '#000', align: 'left' } };
+  assert.equal(rasteriseTextAt(layer, 10, 10), null);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

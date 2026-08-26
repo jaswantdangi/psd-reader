@@ -16,3 +16,4 @@ export {
   SEPARABLE_GLSL, NON_SEPARABLE_GLSL, GPU_BLEND_MODES, programNameFor, isNonSeparableMode,
 } from './gpu/modes.js';
 export { VERTEX_SHADER, fragmentShaderFor } from './gpu/glsl.js';
+export { create2dSurface } from './surface.js';

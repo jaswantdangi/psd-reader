@@ -10,6 +10,7 @@
  * full resolution would not keep up.
  */
 import { createBuffer, blendInto } from './composite.js';
+import { create2dSurface } from './surface.js';
 
 /**
  * Bilinear resample. Written by hand rather than going through Canvas
@@ -59,8 +60,9 @@ const fontSpec = (text, scale = 1) =>
  * Returns null outside a browser — Node has no text rasteriser.
  */
 export function measureText(text) {
-  if (typeof document === 'undefined') return null;
-  const ctx = document.createElement('canvas').getContext('2d');
+  const surface = create2dSurface(1, 1);
+  if (!surface) return null;
+  const ctx = surface.getContext('2d');
   ctx.font = fontSpec(text);
   const lines = String(text.content ?? '').split('\n');
   const lineHeight = Math.round(text.fontSize * 1.25);
@@ -78,17 +80,14 @@ export function measureText(text) {
  * at any scale — including a non-uniform one, since sx and sy are independent.
  */
 export function rasteriseTextAt(layer, width, height) {
-  if (typeof document === 'undefined') return null;
-
   const natural = measureText(layer.text);
   if (!natural || !natural.width || !natural.height) return null;
 
   const w = Math.max(1, Math.round(width));
   const h = Math.max(1, Math.round(height));
 
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
+  const canvas = create2dSurface(w, h);
+  if (!canvas) return null;
 
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.setTransform(w / natural.width, 0, 0, h / natural.height, 0, 0);
