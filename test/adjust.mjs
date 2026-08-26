@@ -8,6 +8,7 @@ import {
   SUPPORTED_BLEND_MODES, normaliseOverlay, isNeutralOverlay,
   PRESETS, PRESET_IDS, presetAdjust,
   createProject, setAdjust, undo, nextGestureKey, discardTo,
+  toProjectJson, applyProjectJson,
 } from '../src/index.js';
 
 let passed = 0;
@@ -720,6 +721,70 @@ test('discardTo past the current length, or below zero, is a no-op', () => {
   assert.equal(discardTo(p, -5), 1, 'a negative target clamps to zero and empties the history');
   assert.equal(p.layers[0].adjust, null);
   assert.equal(p.revision, before + 1);
+});
+
+test('toProjectJson carries every parameter, including hsl bands and overlay stops', () => {
+  const p = twoLayerProject();
+  const bands = NEUTRAL_BANDS();
+  bands[5] = { h: -40, s: 55, l: -12 };
+  setAdjust(p, p.layers[0].id, {
+    brightness: 14, contrast: -22, exposure: 9, temperature: 31, tint: -7,
+    hsl: { bands, saturation: 18 },
+    overlay: { kind: 'radial', cx: 0.3, cy: 0.7, radius: 0.42, mode: 'soft light', opacity: 0.65,
+               stops: [{ t: 0, r: 12, g: 34, b: 56, a: 0.9 }, { t: 1, r: 200, g: 10, b: 5, a: 0.2 }] },
+  });
+
+  const json = toProjectJson(p);
+  const saved = json.layers[0].adjust;
+  assert.equal(saved.brightness, 14);
+  assert.equal(saved.hsl.bands[5].s, 55);
+  assert.equal(saved.overlay.stops[1].r, 200);
+  assert.equal(json.layers[1].adjust, null, 'an unadjusted layer saves null, not an object');
+});
+
+test('applyProjectJson restores every parameter, re-frozen', () => {
+  const source = twoLayerProject();
+  setAdjust(source, source.layers[0].id, {
+    brightness: 14, hsl: { bands: NEUTRAL_BANDS(), saturation: 18 },
+    overlay: { kind: 'radial', mode: 'soft light', opacity: 0.65,
+               stops: [{ t: 0, r: 12, g: 34, b: 56, a: 0.9 }, { t: 1, r: 200, g: 10, b: 5, a: 0.2 }] },
+  });
+  const json = JSON.parse(JSON.stringify(toProjectJson(source)));   // a real round trip through text
+
+  const target = twoLayerProject();
+  applyProjectJson(target, json);
+  const a = target.layers[0].adjust;
+  assert.equal(a.brightness, 14);
+  assert.equal(a.hsl.saturation, 18);
+  assert.equal(a.overlay.kind, 'radial');
+  assert.equal(a.overlay.mode, 'soft light');
+  assert.equal(a.overlay.stops[1].r, 200);
+  assert.ok(Object.isFrozen(a) && Object.isFrozen(a.hsl) && Object.isFrozen(a.overlay));
+  assert.equal(target.layers[1].adjust, null);
+});
+
+test('applyProjectJson clamps a hand-edited out-of-range parameter', () => {
+  // The save file is text on a device. It reaches an evaluator only through
+  // createAdjust, so an absurd number becomes the boundary rather than a table
+  // full of clipped values that looks deliberate.
+  const target = twoLayerProject();
+  const json = toProjectJson(twoLayerProject());
+  json.layers[0].adjust = { brightness: 9e9, contrast: -9e9 };
+  applyProjectJson(target, json);
+  assert.equal(target.layers[0].adjust.brightness, 100);
+  assert.equal(target.layers[0].adjust.contrast, -100);
+});
+
+test('the derived LUT is not persisted and is rebuilt from parameters', () => {
+  const p = twoLayerProject();
+  setAdjust(p, p.layers[0].id, { contrast: 44 });
+  lutFor(p.layers[0]);                                   // populate the cache
+  assert.equal(toProjectJson(p).layers[0].lut, undefined);
+  assert.equal(toProjectJson(p).layers[0].lutKey, undefined);
+
+  const target = twoLayerProject();
+  applyProjectJson(target, JSON.parse(JSON.stringify(toProjectJson(p))));
+  assert.deepEqual([...lutFor(target.layers[0])], [...lutFor(p.layers[0])]);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

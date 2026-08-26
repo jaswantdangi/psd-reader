@@ -565,6 +565,13 @@ export function toProjectJson(project) {
        * writing it here would store a second copy of the document.
        */
       maskDisabled: l.mask ? l.mask.disabled : null,
+      /**
+       * The adjustment PARAMETERS. Not the table they build: lutFor rebuilds
+       * that from these, keyed on exactly the values it reads, so writing it
+       * here would be storing a cache that can only ever disagree with its
+       * input. The object is already frozen and JSON-shaped.
+       */
+      adjust: l.adjust ?? null,
       text: l.text ? { ...l.text } : null,
     })),
   };
@@ -591,6 +598,15 @@ export function applyProjectJson(project, json) {
     if (typeof saved.groupPath === 'string') layer.groupPath = saved.groupPath;
     // The raster is whatever this load produced; only the toggle is restored.
     if (layer.mask && typeof saved.maskDisabled === 'boolean') layer.mask.disabled = saved.maskDisabled;
+    // Through createAdjust rather than Object.assign: the save file is text on
+    // a device, so an out-of-range or half-built object has to be clamped and
+    // completed before it can reach an evaluator -- and the result has to be
+    // frozen for the same reason every other one is.
+    layer.adjust = saved.adjust ? createAdjust(saved.adjust) : null;
+    // The derived table is keyed on the parameters, so it re-derives itself on
+    // the next lutFor. Dropping the key anyway keeps the pair honest.
+    layer.lutKey = null;
+    layer.lut = null;
     // Drop the cache KEY as well as the pixels. Clearing only `rendered` lets
     // the next lookup hit a still-matching key, get null back, and the layer
     // disappears — the same trap `setLayer` guards against above.
