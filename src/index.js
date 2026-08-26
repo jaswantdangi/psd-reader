@@ -37,3 +37,4 @@ export {
   spillHeader, encodeSpill, decodeSpill, createMemorySpill,
   SPILL_MAGIC, SPILL_VERSION, SPILL_HEADER_BYTES,
 } from './export/spill.js';
+export { EXPORT_PHASES, phaseFraction, isDeterminate } from './export/progress.js';

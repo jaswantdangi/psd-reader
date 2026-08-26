@@ -5,6 +5,7 @@ import {
   ExportError, isSelfRendering, buildExportOrder, wantedIndices, assertIdentifiable, isFastPath, planSpill,
   spillHeader, encodeSpill, decodeSpill, createMemorySpill, SPILL_MAGIC, SPILL_VERSION, SPILL_HEADER_BYTES,
   createBuffer, drawLayerInto,
+  EXPORT_PHASES, phaseFraction, isDeterminate,
 } from '../src/index.js';
 
 let passed = 0;
@@ -347,6 +348,42 @@ test('a layer entirely off the canvas is not a missing layer', () => {
   const missed = [];
   drawLayerInto(dest, rasterLayer({ x: 100, y: 100 }), 1, { pixels: null, onMissing: (l, why) => missed.push(why) });
   assert.deepEqual(missed, [], 'off-canvas culling happens before pixels are ever looked for');
+});
+
+
+console.log('\nprogress phases\n');
+
+test('the phases tile 0 to 100 with no gap and no overlap', () => {
+  assert.equal(EXPORT_PHASES[0].from, 0);
+  assert.equal(EXPORT_PHASES[EXPORT_PHASES.length - 1].to, 100);
+  for (let i = 0; i < EXPORT_PHASES.length - 1; i++)
+    assert.equal(EXPORT_PHASES[i].to, EXPORT_PHASES[i + 1].from,
+      `${EXPORT_PHASES[i].name} ends at ${EXPORT_PHASES[i].to} but ${EXPORT_PHASES[i + 1].name} starts at ${EXPORT_PHASES[i + 1].from}`);
+});
+
+test('decoding layers spans 15% to 85%, exactly', () => {
+  assert.equal(phaseFraction('layers', 0, 10), 0.15);
+  assert.equal(phaseFraction('layers', 5, 10), 0.5);
+  assert.equal(phaseFraction('layers', 10, 10), 0.85);
+});
+
+test('progress never runs past the end of its own phase', () => {
+  assert.equal(phaseFraction('layers', 40, 10), 0.85);
+});
+
+test('a phase with no known total sits at its own start', () => {
+  assert.equal(phaseFraction('parse', 0, 0), 0.10);
+});
+
+test('an unknown phase throws rather than sending the bar backwards', () => {
+  assert.throws(() => phaseFraction('polish', 1, 1), /unknown export phase/i);
+});
+
+test('parse and encode are honest about having no interior progress', () => {
+  assert.equal(isDeterminate('parse'), false);
+  assert.equal(isDeterminate('encode'), false);
+  assert.equal(isDeterminate('layers'), true);
+  assert.equal(isDeterminate('write'), true);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
