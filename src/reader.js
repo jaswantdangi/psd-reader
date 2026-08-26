@@ -128,6 +128,25 @@ export async function readDocument(source, options = {}) {
       layer.imageData = undefined;
       layer.canvas = undefined;
       layer.rawData = undefined; // the retained compressed channels — the big one
+
+      // `decodeLayerPixels` also fills in the mask, and releasing only the three
+      // fields above left those pixels resident for the life of the document —
+      // measured at 104 KB on a 200x200 fixture, and it scales with layer area,
+      // so a poster-sized masked layer held tens of MB. That silently broke the
+      // memory guarantee this whole streaming path exists to provide.
+      //
+      // The mask is released here, not kept, for the same reason `imageData` is:
+      // a caller that wants it downscales inside `onLayer` above, while the
+      // full-resolution original is still in scope. That is how proxy pixels
+      // already work, and it keeps one rule instead of two.
+      if (layer.mask) {
+        layer.mask.imageData = undefined;
+        layer.mask.canvas = undefined;
+      }
+      if (layer.realMask) {
+        layer.realMask.imageData = undefined;
+        layer.realMask.canvas = undefined;
+      }
     }
   }
 

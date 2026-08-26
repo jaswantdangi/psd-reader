@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE, createProject, estimatePeakBytes, memoryBudgetBytes, guardFileSize, HARD_FILE_CAP_BYTES, loadProjectProxy } from '../src/index.js';
+import { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE, createProject, estimatePeakBytes, memoryBudgetBytes, guardFileSize, HARD_FILE_CAP_BYTES, loadProjectProxy, readDocument } from '../src/index.js';
 import fs from 'fs';
 let progressCalls = 0;
 
@@ -197,6 +197,34 @@ test('the source handle survives onto the project', () => {
 
 test('progress is reported once per decoded layer', () => {
   assert.ok(progressCalls > 0, 'onProgress was never called');
+});
+
+// Streamed load of a fixture that actually HAS masks. The synthetic documents
+// the memory spike used had none, which is exactly why it reported zero retained
+// pixels while mask rasters were quietly surviving the release.
+let retainedMaskBytes = 0;
+let layersCarryingMask = 0;
+{
+  const maskDoc = await readDocument(
+    new Uint8Array(fs.readFileSync('fixtures/masks.src.psd')),
+    { pixels: 'stream', metadata: false, onLayer: () => {} },
+  );
+  for (const l of maskDoc.layers || []) {
+    if (l.mask) layersCarryingMask++;
+    for (const m of [l.mask, l.realMask]) {
+      if (m && m.imageData && m.imageData.data) retainedMaskBytes += m.imageData.data.length;
+    }
+  }
+}
+
+test('the fixture really does carry masks, so the next test can fail', () => {
+  assert.ok(layersCarryingMask > 0, 'masks.src.psd must contain masked layers');
+});
+
+test('streaming releases mask pixels, not just layer pixels', () => {
+  assert.equal(retainedMaskBytes, 0,
+    `${retainedMaskBytes} bytes of mask pixels survived the release — the same leak that ` +
+    'made the streamed-load memory guarantee untrue for any document containing a mask');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
