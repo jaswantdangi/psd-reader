@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, effect, inject, signal } from '@angular/core';
-import { NEUTRAL_ADJUST } from '@engine/adjust/ops.js';
+import { NEUTRAL_ADJUST, isNeutralHsl, isNeutralOverlay } from '@engine/adjust/ops.js';
 import { PRESETS, presetAdjust } from '@engine/adjust/presets.js';
 import { ProjectService } from '../services/project.service';
 import { LayerThumb } from './layer-thumb';
@@ -26,6 +26,18 @@ const NEUTRAL = NEUTRAL_ADJUST as Record<string, any>;
   template: `
     @if (svc.selected(); as layer) {
       <div class="space-y-4 py-4">
+        <!-- presetAdjust returns a COMPLETE adjustment: createAdjust fills hsl
+             and overlay with null when the preset does not define them, so
+             applying one replaces whatever the HSL and Overlay sheets put
+             there. That was invisible while those sheets did not exist. It is
+             not a silent loss if it is said before the tap. -->
+        @if (replaces()) {
+          <p class="mx-4 rounded-lg bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-300">
+            Choosing a filter here — or None — replaces this layer's
+            {{ replaces() }} settings. Undo restores them.
+          </p>
+        }
+
         <div class="flex gap-3 overflow-x-auto px-4 pb-1">
           <button
             type="button"
@@ -108,6 +120,17 @@ export class FilterSheet {
       this.intensityPercent.set(100);
     });
   }
+
+  /** What a preset would overwrite, named. Empty when there is nothing to lose. */
+  protected readonly replaces = computed(() => {
+    this.svc.version();
+    const adjust = this.svc.selected()?.adjust;
+    if (!adjust) return '';
+    const parts: string[] = [];
+    if (adjust.hsl && !isNeutralHsl(adjust.hsl)) parts.push('HSL');
+    if (adjust.overlay && !isNeutralOverlay(adjust.overlay)) parts.push('overlay');
+    return parts.join(' and ');
+  });
 
   /** The chip to light up. `null` means the parameters have drifted from any preset. */
   protected readonly highlight = computed<string | null>(() => {
