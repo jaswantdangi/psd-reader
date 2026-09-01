@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'fs';
 import {
   CLASS_A_ORDER, OPS, NEUTRAL_ADJUST, createAdjust,
   buildLut, lutDigest, lutFor, isNeutralAdjust, adjustCostOf,
@@ -10,11 +11,17 @@ import {
   createProject, setAdjust, undo, nextGestureKey, discardTo,
   toProjectJson, applyProjectJson,
   resample, renderProject, createRenderStats, createSandwichCache, renderSandwiched,
+  loadProjectProxy, exportFullRes, createJsExportTarget, createMemorySpill,
 } from '../src/index.js';
 
 let passed = 0;
 const test = (name, fn) => {
   try { fn(); console.log('  ok   ' + name); passed++; }
+  catch (e) { console.log('  FAIL ' + name + '\n       ' + e.message); process.exitCode = 1; }
+};
+/** Async sibling of `test`. Every call site must `await` it, or failures escape. */
+const atest = async (name, fn) => {
+  try { await fn(); console.log('  ok   ' + name); passed++; }
   catch (e) { console.log('  FAIL ' + name + '\n       ' + e.message); process.exitCode = 1; }
 };
 
@@ -870,6 +877,105 @@ test('a cached sandwich frame counts only the live layer, because only it ran', 
   const stats = createRenderStats();
   renderSandwiched(cache, p, 1, { scale: 1, stats });   // cached
   assert.equal(stats.lut, 1, 'only the live layer re-adjusted');
+});
+
+console.log('\nexport parity\n');
+
+const bytesOf = (path) => new Uint8Array(fs.readFileSync(path));
+const FIXTURE = 'fixtures/vectors.src.psd';
+const FIXTURE_SIZE = fs.statSync(FIXTURE).size;
+
+const openProxy = () => loadProjectProxy(bytesOf(FIXTURE), {
+  fileName: 'vectors.src.psd',
+  proxyEdge: 256,
+  source: { uri: FIXTURE, name: 'vectors.src.psd', size: FIXTURE_SIZE, kind: 'blob' },
+});
+
+const runExport = (project, spill) => exportFullRes({
+  project, readSource: async () => bytesOf(FIXTURE), spill, createTarget: createJsExportTarget,
+});
+
+await atest('the JS export target and renderProject produce the identical buffer', async () => {
+  // Both go through drawLayerInto, so this is the assertion that the hook has
+  // exactly one implementation rather than two that happen to agree today.
+  const p = twoLayerProject();
+  setAdjust(p, p.layers[0].id, { brightness: 40, contrast: -25 });
+  setAdjust(p, p.layers[1].id, {
+    overlay: { kind: 'linear', angle: 45, mode: 'multiply', opacity: 0.7,
+               stops: [{ t: 0, r: 255, g: 200, b: 0, a: 1 }, { t: 1, r: 0, g: 30, b: 120, a: 1 }] },
+  });
+
+  const target = createJsExportTarget(p.width, p.height);
+  for (const layer of p.layers) target.blend(layer, layer.pixels);
+  const exported = await target.finish();
+
+  assert.deepEqual([...exported.data], [...renderProject(p, { scale: 1 }).data]);
+});
+
+await atest('a full-resolution streamed export carries the adjustment', async () => {
+  // End to end, through the real walk on a real fixture -- the file is re-read
+  // and re-decoded, so these are the FULL-RESOLUTION pixels, not the proxy the
+  // editor is holding.
+  const plainProject = await openProxy();
+  const plain = await runExport(plainProject, createMemorySpill());
+
+  const adjusted = await openProxy();
+  // DARKEN, not brighten. Layer 0 of this fixture is "Background", which is
+  // pure white (255,255,255) across all 65536 pixels -- verified, not assumed.
+  // `brightness: +60` clamps to 255 and changes nothing, so the original form
+  // of this test failed while the export was working perfectly: it had picked
+  // an input that cannot discriminate. A negative delta moves white and makes
+  // the assertion mean what its name says.
+  setAdjust(adjusted, adjusted.layers[0].id, { brightness: -60 });
+  const out = await runExport(adjusted, createMemorySpill());
+
+  assert.equal(out.width, plain.width);
+  assert.notDeepEqual([...out.data], [...plain.data], 'the adjustment never reached the export');
+});
+
+await atest('for a single opaque layer the export equals the LUT applied to the plain export', async () => {
+  // The exact parity claim, not an approximation of it. With one visible layer
+  // blending `normal` onto a transparent backdrop, blendInto reduces to
+  // dest = src, so the exported byte IS the adjusted source byte -- and the
+  // adjusted source byte is, by construction, lut[plain byte].
+  const plainProject = await openProxy();
+  for (let i = 1; i < plainProject.layers.length; i++) plainProject.layers[i].visible = false;
+  const plain = await runExport(plainProject, createMemorySpill());
+
+  const adjustedProject = await openProxy();
+  for (let i = 1; i < adjustedProject.layers.length; i++) adjustedProject.layers[i].visible = false;
+  setAdjust(adjustedProject, adjustedProject.layers[0].id, { contrast: 45, temperature: -20 });
+  const out = await runExport(adjustedProject, createMemorySpill());
+
+  const lut = buildLut(adjustedProject.layers[0].adjust);
+  let checked = 0;
+  for (let i = 0; i < plain.data.length; i += 4) {
+    if (plain.data[i + 3] === 0) continue;               // blendInto skipped it in both
+    assert.equal(out.data[i], lut[plain.data[i]], `pixel ${i / 4} red`);
+    assert.equal(out.data[i + 1], lut[256 + plain.data[i + 1]], `pixel ${i / 4} green`);
+    assert.equal(out.data[i + 2], lut[512 + plain.data[i + 2]], `pixel ${i / 4} blue`);
+    checked++;
+  }
+  assert.ok(checked > 1000, `only ${checked} opaque pixels checked`);
+});
+
+await atest('the export target owns its scratch and releases it before the encode peak', async () => {
+  // At scale 1 the scratch has grown to the largest layer in the document --
+  // +66.4 MB for the measured poster. It must not still be resident while the
+  // PNG encoder allocates, which is the same place 1C already drops the file
+  // bytes.
+  const p = twoLayerProject();
+  setAdjust(p, p.layers[0].id, { brightness: 40 });
+  const target = createJsExportTarget(p.width, p.height);
+  for (const layer of p.layers) target.blend(layer, layer.pixels);
+  assert.ok(target.scratch.data, 'the scratch was never acquired');
+  await target.finish();
+  assert.equal(target.scratch.data, null, 'finish() must drop it');
+
+  const second = createJsExportTarget(p.width, p.height);
+  second.blend(p.layers[0], p.layers[0].pixels);
+  second.dispose();
+  assert.equal(second.scratch.data, null, 'dispose() must drop it too');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

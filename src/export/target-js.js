@@ -11,9 +11,24 @@
 import { createBuffer } from '../composite.js';
 import { drawLayerInto } from '../render.js';
 import { ExportError } from './errors.js';
+import { createScratch, releaseScratch } from '../adjust/scratch.js';
 
 export function createJsExportTarget(width, height) {
   const dest = createBuffer(width, height);
+
+  /**
+   * Export owns its OWN adjustment scratch rather than sharing the editor's
+   * module-level one, for a memory reason. At scale 1 the buffer grows to the
+   * largest DESTINATION RECT in the document -- +66.4 MB for the measured
+   * 4961x3508 poster, derived from 1C's peak arithmetic -- and it has to be
+   * droppable before the PNG encode peak, which is the same place 1C already
+   * drops the file bytes. Sharing the editor's would leave a full-resolution
+   * buffer alive for the rest of the session.
+   *
+   * ONE term, not N: every layer reuses it, and it is only ever allocated when
+   * some layer actually carries a non-neutral adjustment.
+   */
+  const scratch = createScratch();
 
   return {
     /**
@@ -24,6 +39,7 @@ export function createJsExportTarget(width, height) {
     blend(layer, pixels) {
       drawLayerInto(dest, layer, 1, {
         pixels,
+        scratch,
         onMissing: (missing, reason) => {
           if (reason === 'text')
             throw new ExportError(
@@ -37,8 +53,11 @@ export function createJsExportTarget(width, height) {
       });
     },
 
-    async finish() { return dest; },
+    async finish() { releaseScratch(scratch); return dest; },
 
-    dispose() {},
+    dispose() { releaseScratch(scratch); },
+
+    /** Diagnostic seam. exportFullRes never reads it; the memory test does. */
+    scratch,
   };
 }
