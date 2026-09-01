@@ -4,7 +4,7 @@
   "description": "",
   "main": "src/index.js",
   "scripts": {
-    "test": "node test/shim.mjs && node test/run.mjs && node test/composite.mjs && node test/edit.mjs && node --max-old-space-size=6144 test/proxy.mjs && node test/gpu.mjs && node --max-old-space-size=6144 test/export.mjs && node --max-old-space-size=6144 test/layers.mjs && node --max-old-space-size=6144 test/adjust.mjs && node --max-old-space-size=6144 test/creative.mjs",
+    "test": "node test/shim.mjs && node test/run.mjs && node test/composite.mjs && node test/edit.mjs && node --max-old-space-size=6144 test/proxy.mjs && node test/gpu.mjs && node --max-old-space-size=6144 test/export.mjs && node --max-old-space-size=6144 test/layers.mjs && node --max-old-space-size=6144 test/adjust.mjs && node --max-old-space-size=6144 test/creative.mjs && node --max-old-space-size=6144 test/frame.mjs",
     "serve": "node serve.mjs",
     "test:shim": "node test/shim.mjs",
     "test:read": "node test/run.mjs",
@@ -15,7 +15,8 @@
     "test:export": "node --max-old-space-size=6144 test/export.mjs",
     "test:layers": "node --max-old-space-size=6144 test/layers.mjs",
     "test:adjust": "node --max-old-space-size=6144 test/adjust.mjs",
-    "test:creative": "node --max-old-space-size=6144 test/creative.mjs"
+    "test:creative": "node --max-old-space-size=6144 test/creative.mjs",
+    "test:frame": "node --max-old-space-size=6144 test/frame.mjs"
   },
   "keywords": [],
   "author": "",
