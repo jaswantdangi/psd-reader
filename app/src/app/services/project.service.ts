@@ -11,7 +11,7 @@ import {
   hitTest as engineHitTest,
   nextGestureKey as engineNextGestureKey,
 } from '@engine/edit.js';
-import { insertTextLayer, retypeText } from '@engine/creative/index.js';
+import { insertTextLayer, retypeText, resizeTextBox } from '@engine/creative/index.js';
 import { createView } from '@engine/view.js';
 
 /**
@@ -230,6 +230,33 @@ export class ProjectService {
     if (!project) return null;
     try {
       retypeText(project, id, changes, coalesceKey);
+    } catch (error: any) {
+      return error?.message ?? String(error);
+    }
+    this.version.update((v) => v + 1);
+    return null;
+  }
+
+  /**
+   * Resize a PARAGRAPH layer's own box: the author's width becomes `rect.w`,
+   * the text re-wraps to it, and the type size does not move.
+   *
+   * The OTHER half of what a handle drag used to do. A drag on point text still
+   * goes through `setLayer` and scales, because point text has no author width;
+   * the engine refuses this call for it rather than guessing, and the caller
+   * decides which one to make with `wrapsInBox`.
+   *
+   * @returns the engine's message when it refused, otherwise null
+   */
+  resizeTextBox(
+    id: number,
+    rect: { x?: number; y?: number; w: number },
+    coalesceKey?: string,
+  ): string | null {
+    const project = this.project();
+    if (!project) return null;
+    try {
+      resizeTextBox(project, id, rect, coalesceKey);
     } catch (error: any) {
       return error?.message ?? String(error);
     }

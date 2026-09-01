@@ -142,6 +142,26 @@ const BASE_MAX_SIZE = 200;
             <p class="-mt-3 text-[11px] leading-relaxed text-neutral-500">{{ note }}</p>
           }
 
+          <!-- The one place either operation is named. Neither is discoverable
+               from a corner handle alone, and a text box has two of them. -->
+          @if (boxWidth(layer.text); as width) {
+            <p class="-mt-2 rounded-lg bg-white/5 px-3 py-2 text-[11px] leading-relaxed text-neutral-400">
+              <b class="text-neutral-200">Paragraph text.</b> Photoshop wrapped this layer
+              to a box {{ width }} px wide, and so does this app — most of its line breaks
+              were computed, not typed.
+              <b class="text-neutral-200">Drag a corner on the canvas</b> to change that
+              width: the text re-flows into the new box and the type size does not move.
+              <b class="text-neutral-200">Size, above,</b> scales the type and the box
+              together, so the same words stay on the same lines, larger. The height is
+              never dragged — it is however tall the wrap comes out.
+            </p>
+          } @else {
+            <p class="-mt-2 text-[11px] leading-relaxed text-neutral-500">
+              Point text: it breaks only where you press Return, and its box is the
+              glyphs' own. Dragging a corner scales it.
+            </p>
+          }
+
           <div class="flex flex-wrap items-center gap-2">
             <span class="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wider text-neutral-400">
               Style
@@ -362,6 +382,24 @@ export class TextSheet {
     if (typeof stored !== 'number' || Math.abs(scale - 1) < 0.005) return '';
     return `Photoshop stores ${Math.round(stored * 10) / 10} px scaled to `
       + `${Math.round(scale * 100)}%, which is the ${text.fontSize} px drawn here.`;
+  }
+
+  /**
+   * The author's own wrap width, rounded, or 0 for point text.
+   *
+   * 0 rather than null so the template's `@if` falls through to the point-text
+   * branch on both of the ways this can be absent — `shapeType: 'point'`, and a
+   * paragraph layer whose boxBounds could not be read. The second is a
+   * paragraph we cannot wrap, and it is not wrapped on screen either
+   * (`wrapsInBox`), so promising a box here would be the one description that
+   * does not match what is drawn.
+   */
+  protected boxWidth(text: any): number {
+    if (text?.shapeType !== 'box') return 0;
+    const width = text?.boxWidth;
+    return typeof width === 'number' && Number.isFinite(width) && width > 0
+      ? Math.round(width)
+      : 0;
   }
 
   protected lineCount(content: string): number {

@@ -9,7 +9,7 @@ import {
   signal,
   viewChild,
 } from '@angular/core';
-import { renderProject } from '@engine/render.js';
+import { renderProject, wrapsInBox } from '@engine/render.js';
 import { createSandwichCache, renderSandwiched, sandwichStateFor, SANDWICH_FLAT_ABOVE } from '@engine/sandwich.js';
 import {
   clampView,
@@ -50,6 +50,8 @@ type Gesture = {
   startView: { docScale: number; panX: number; panY: number };
   layerId: number | null;
   moved: boolean;
+  /** A handle drag on PARAGRAPH text reflows its box instead of scaling it. */
+  reflow: boolean;
 };
 
 /**
@@ -349,9 +351,19 @@ export class CanvasStage implements OnDestroy {
     const startRect =
       decision.kind === 'scale' ? liveTextRect(layer) ?? selection : selection;
 
+    // A text box has TWO operations and a handle drag can only be one of them.
+    // It is this one: the author's width changes and the paragraph re-wraps,
+    // exactly as dragging a text box does in Photoshop, Figma and InDesign.
+    // Scaling the TYPE is the Size slider in the text sheet, which carries the
+    // box along by the same factor -- so both are one-fingered and neither
+    // needs a modifier key, which a phone does not have. Point text has no
+    // author width, so its drag scales as it always has.
+    const reflow = decision.kind === 'scale' && wrapsInBox(layer?.text);
+
     this.gesture = {
       kind: decision.kind,
       handle: decision.handle,
+      reflow,
       key: this.svc.gestureKey('xform'),
       startDoc: docPoint,
       startClient: { x: event.clientX, y: event.clientY },
@@ -407,11 +419,25 @@ export class CanvasStage implements OnDestroy {
       this.svc.setLayer(gesture.layerId, { x: next.x, y: next.y }, gesture.key);
     } else if (gesture.kind === 'scale') {
       const next = resizeFrom(gesture.startRect, gesture.handle, doc.x, doc.y);
-      this.svc.setLayer(
-        gesture.layerId,
-        { x: next.x, y: next.y, w: next.w, h: next.h },
-        gesture.key,
-      );
+      if (gesture.reflow) {
+        // Width only. A paragraph's height is however tall the new wrap turns
+        // out to be, so the drag's vertical component is ignored rather than
+        // fought with -- and the TOP is held, because that is where the engine
+        // grows text from (rasteriseTextAt puts the first baseline a fixed
+        // ascent below it). Dragging a top handle therefore re-flows without
+        // sliding the first line out from under the finger.
+        this.svc.resizeTextBox(
+          gesture.layerId,
+          { x: next.x, y: gesture.startRect.y, w: next.w },
+          gesture.key,
+        );
+      } else {
+        this.svc.setLayer(
+          gesture.layerId,
+          { x: next.x, y: next.y, w: next.w, h: next.h },
+          gesture.key,
+        );
+      }
     }
   }
 
