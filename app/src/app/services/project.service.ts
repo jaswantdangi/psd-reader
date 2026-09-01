@@ -58,6 +58,19 @@ export class ProjectService {
    */
   readonly version = signal(0);
 
+  /**
+   * The file the picker handed us, kept so a full-resolution export can re-read
+   * it. `project.source.uri` is a synthetic `file://<name>` that nothing can
+   * open, so the handle is the only way back to the bytes.
+   *
+   * A `File` is a Blob HANDLE, not the bytes: holding it costs a reference, and
+   * the file stays on disk. `file.arrayBuffer()` materialises a full copy, but
+   * only inside the export worker, only for the duration of the parse, and
+   * `exportFullRes` drops its own reference before the encode peak. Nothing is
+   * resident between exports.
+   */
+  readonly sourceFile = signal<File | null>(null);
+
   readonly selectedId = signal<number | null>(null);
   readonly state = signal<EditorState>('empty');
   readonly message = signal('');
@@ -122,6 +135,7 @@ export class ProjectService {
     this.fileName.set(file.name);
     this.project.set(null);
     this.selectedId.set(null);
+    this.sourceFile.set(file);
 
     let bytes: Uint8Array;
     try {
@@ -153,6 +167,7 @@ export class ProjectService {
   close(): void {
     this.project.set(null);
     this.selectedId.set(null);
+    this.sourceFile.set(null);
     this.state.set('empty');
     this.message.set('');
     this.fileName.set('');
