@@ -150,6 +150,17 @@ export class ExportService {
    * failure `stream.js` names as the worst available: a full-size image quietly
    * upscaled from the proxy, which looks like it worked. Dropping it turns that
    * into a layer that is visibly absent.
+   *
+   * `layer.adjust` IS KEPT WHOLE, PIXELS INCLUDED, AND THAT IS DELIBERATE. An
+   * image overlay carries its texture inside the adjustment, and the worker's
+   * own context is where `drawLayerInto` applies the adjust stack at full
+   * resolution — so stripping it "for symmetry" with the line above would give
+   * a preview that shows the leak and a PNG that does not, which is precisely
+   * the font failure repeated. The two cases are not symmetric: `layer.pixels`
+   * is the whole document and has a full-resolution replacement waiting, while
+   * a texture is capped at `OVERLAY_IMAGE_EDGE` (4 MB at the very worst) and
+   * has no other route across. Structured clone also preserves shared
+   * references, so one texture applied to twelve layers crosses once.
    */
   private payloadFor(project: any): any {
     return {

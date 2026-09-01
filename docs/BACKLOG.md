@@ -678,3 +678,69 @@ Noticed while building the PSD-plus-fonts zip import; deliberately not fixed.
   guard) and `bundle.status() === 'refused'` render similar-looking but separate
   markup with different escape hatches. They should converge before a third one
   appears.
+
+## Noticed while building the image overlay (2026-09-01)
+
+Deliberately not fixed. The feature that shipped is `kind: 'image'` with
+`stretch` and `cover`, capped at `OVERLAY_IMAGE_EDGE` and carried into the
+export worker inside `layer.adjust`.
+
+- **`tile` is not implemented, and the reason is a real constraint rather than
+  time.** A grain tile locked to SOURCE pixels is the one fit rule that is not
+  scale-invariant — its frequency would double between the proxy and the export,
+  which is precisely the class of bug `overlaySourceWindow` exists to make
+  impossible. A tile expressed as "repeat N times across the rect" IS
+  scale-invariant, but it needs a repeat count in the model, a control for it,
+  and a texture stored well above the 1024 cap to be worth having: grain
+  resampled up from a 1024-edge proxy is mush. That is a different storage
+  decision, not a third `case` in the sampler.
+
+- **The bilinear sampler aliases under heavy minification.** `applyOverlay`
+  samples bilinearly (matching `resample`, so the overlay is filtered like the
+  layer under it) and the anti-alias budget is spent once, on import. A texture
+  at 1024 drawn into a 200 px layer rect at proxy scale is a 5x reduction that
+  four neighbours cannot band-limit. Smooth light leaks are unaffected; a
+  high-frequency texture will sparkle, and it will sparkle DIFFERENTLY at proxy
+  and at export. The honest fix is a per-destination-pixel box average, which is
+  scale-dependent by construction and therefore needs its own argument about why
+  proxy and export may legitimately differ.
+
+- **The app does not deduplicate textures across layers.** `normaliseOverlay`
+  keeps the caller's array rather than copying, and structured clone preserves
+  shared references — so ONE object applied to twelve layers is one buffer,
+  end to end. But the sheet decodes on every pick, so picking the same file for
+  twelve layers is twelve decodes and twelve 4 MB buffers. A cache keyed on
+  `name + size + lastModified` in a service would collapse them; it was left out
+  because it is a Map that outlives every project in the tab.
+
+- **The undo stack retains every texture it has ever held.** `setLayer` captures
+  the previous `adjust` object in the command's `from`, and `project.history` is
+  unbounded — no cap anywhere in `src/edit.js`. So replacing a layer's overlay
+  picture five times leaves five 4 MB textures resident until the history is
+  discarded. Real on a phone, invisible everywhere, and it is a property of the
+  history rather than of this feature — but this is the first field big enough
+  for it to matter.
+
+- **Switching an image overlay back to `linear` keeps the pixels.** Deliberate:
+  toggling kinds should not make the user find the file again. The cost is up to
+  4 MB held by an overlay that is not using it, until Remove.
+
+- **A reopened project asks for the picture once per layer.** The save stores
+  `source` (the file name) and drops the pixels, and `overlayNeedsImage` makes
+  the sheet say so — but there is no "re-link this file everywhere it is named"
+  action, so a texture used on twelve layers is twelve trips through the OS
+  picker. The font loader already solved the same shape of problem with
+  `applyLoaded()`; an overlay equivalent has nowhere to live yet because there
+  is no overlay service.
+
+- **The sheet shows no thumbnail of the picked texture.** The file name, its
+  dimensions and its megabytes are shown; the picture itself is not, so a user
+  with `leak-01.png` through `leak-08.png` cannot tell them apart without
+  applying each. The pixels are right there in the model, so this is a
+  `<canvas>` and a `putImageData`, not a decode.
+
+- **The overlay still pins its layer to the JS tier, and the image kind makes
+  the deferral worse.** `OPS.overlay.gpuDeferred` already records the 26x26
+  program-matrix problem; a texture adds a second per-layer sampler and its own
+  upload on top. Nothing regresses today because `selectTier` returns TIER_JS
+  for everything, but 1B-2 now has more to resolve than it did.

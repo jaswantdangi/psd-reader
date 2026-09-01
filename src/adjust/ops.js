@@ -365,11 +365,16 @@ export const OVERLAY_FITS = ['stretch', 'cover'];
  * exactly one more proxy layer -- 4 MB at the very worst, 1024x1024x4 -- and a
  * device that could afford the document can afford the texture on top of it.
  *
- * The reduction happens ONCE, on import, in the app layer, with
- * `downscaleImage` (alpha-weighted box -- the correct downscale filter). That
- * is where the whole anti-alias budget for this feature is spent. The sampler
- * in apply.js is then plain bilinear, matching `resample`, so the overlay is
- * filtered exactly the way the layer pixels underneath it are.
+ * The reduction happens ONCE, on import, in the app layer: the picked file is
+ * decoded and drawn STRAIGHT INTO A CANVAS OF THE CAPPED SIZE, so a
+ * 24-megapixel JPEG never becomes 96 MB of JS heap on its way in. The size
+ * itself comes from `proxyScaleFor(w, h, OVERLAY_IMAGE_EDGE)` -- the engine's
+ * own rule, not a second copy of it -- and `downscaleImage` is the in-engine
+ * equivalent the cap test reduces through to prove the bound holds.
+ *
+ * That import is where the whole anti-alias budget for this feature is spent.
+ * The sampler in apply.js is then plain bilinear, matching `resample`, so the
+ * overlay is filtered exactly the way the layer pixels underneath it are.
  */
 export const OVERLAY_IMAGE_EDGE = DEFAULT_PROXY_EDGE;
 
