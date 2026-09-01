@@ -1,0 +1,19 @@
+# Angular emits content-hashed filenames for JS and CSS, so those are safe to
+# cache forever. index.html must never be cached, or a deploy leaves browsers
+# pointing at chunk names that no longer exist.
+/index.html
+  Cache-Control: no-cache
+
+/*.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/*.css
+  Cache-Control: public, max-age=31536000, immutable
+
+# Deliberately NOT setting Cross-Origin-Opener-Policy / Embedder-Policy.
+# Those are only needed for SharedArrayBuffer, which this app does not use —
+# the workers pass data by transfer, not shared memory. Enabling isolation
+# would break any future third-party embed for no benefit.
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin

@@ -1,0 +1,4 @@
+# SPA fallback. The app routes /editor and /harness client-side, so a hard
+# refresh or a shared link on either path must still be served index.html
+# rather than a 404. Status 200 keeps the URL intact.
+/*    /index.html   200
