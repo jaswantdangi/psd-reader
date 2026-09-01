@@ -340,10 +340,12 @@ export class CanvasStage implements OnDestroy {
 
     // A scale drag re-draws a text layer, and a text layer still showing
     // Photoshop's own pixels is bounded by the FILE's box -- the ink extent of
-    // the glyphs, which our renderer would read as a line box and fit ~1.4x too
-    // small. So the drag starts from the box that layer is ABOUT to have, and
-    // the first frame both re-fits and resizes, in one history entry. Null for
-    // every other layer, and for a text layer already re-drawn.
+    // the glyphs in the FILE's typeface, which is not the one we substitute for
+    // it. Our own ink extent of the same string is therefore a different
+    // rectangle, mostly in width. So the drag starts from the box that layer is
+    // ABOUT to have, and the first frame both re-fits and resizes, in one
+    // history entry. Null for every other layer, and for a text layer already
+    // re-drawn.
     const startRect =
       decision.kind === 'scale' ? liveTextRect(layer) ?? selection : selection;
 

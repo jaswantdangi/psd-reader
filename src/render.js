@@ -92,20 +92,122 @@ export const splitTextLines = (content) => String(content ?? '').split(LINE_BREA
 export const normaliseLineBreaks = (content) =>
   String(content ?? '').split(LINE_BREAK).join('\n');
 
+/** A TextMetrics field, or null where the platform does not report it. */
+const finite = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+/**
+ * Line advance where `fontBoundingBox*` is unavailable, as a multiple of the
+ * font size.
+ *
+ * 1.2 is not invented: it is CSS `normal` for Latin faces, and it is
+ * Photoshop's own auto-leading — fixtures/text.src.psd carries
+ * `paragraphStyle.autoLeading: 1.2`. The 1.25 it replaces was a convention
+ * with no such source. This is still only a fallback: every current browser
+ * reports the real font box, and the real font box is what should be used.
+ *
+ * ASCENT_SHARE splits that fallback box either side of the baseline. Under it
+ * a block measures exactly `lines * 1.2em` — the OLD line-box behaviour —
+ * which is the right degradation: a platform that reports no glyph bounds
+ * cannot be given an ink extent, only the box the glyphs are drawn in.
+ */
+const FALLBACK_LINE_HEIGHT = 1.2;
+const FALLBACK_ASCENT_SHARE = 0.8;
+
 /**
  * Measure re-drawn text so the layer box can follow the string as it's typed.
  * Returns null outside a browser — Node has no text rasteriser.
+ *
+ * ## What this returns is the INK, not a line box
+ *
+ * It used to return the widest advance by `lines * round(fontSize * 1.25)`.
+ * That 1.25 was an invented convention and the result was a LINE BOX, while
+ * Photoshop's layer bounds are the INK EXTENT of the glyphs. Measured on
+ * fixtures/text.src.psd, "TEST" at fontSize 30: Photoshop's box is 60 x 21,
+ * ours reported 77 x 38. The two HEIGHTS are close in reality — 21 is about
+ * Arial's cap height at 30px — and were 1.8x apart only because they were
+ * different quantities. So the first edit, which re-fits the box to our
+ * measurement, made the text visibly jump in size: "size changes from the
+ * exact". `actualBoundingBox{Left,Right,Ascent,Descent}` are the true inked
+ * bounds and are directly comparable to what Photoshop stored, so that jump
+ * becomes continuous.
+ *
+ * The WIDTH barely moves for this string — a left-aligned run's ink right edge
+ * is its advance less one side bearing — and it does not become 60 either. It
+ * cannot: `toLayer` substitutes FONT_STACKS[0] for the file's typeface, so we
+ * are measuring different glyphs. That residue is a font problem, not a
+ * metrics one, and it is in docs/BACKLOG.md rather than fixed here.
+ *
+ * ## Ink is not spacing
+ *
+ * The ink extent says nothing about the distance between baselines — two lines
+ * of capitals would collide 0.7em apart. `fontBoundingBoxAscent/Descent` is
+ * the font's own line advance and is what separates them, with the documented
+ * FALLBACK_LINE_HEIGHT above where a platform does not report it.
+ *
+ * ## Where the box starts
+ *
+ * `left` is clamped at 0, so a glyph whose ink starts to the RIGHT of the pen
+ * — nearly all Latin text — leaves the box starting at the pen, which is the
+ * convention Photoshop's own bounds use (in the fixture, `bounds.left` and the
+ * text transform's x are both 36). A glyph that inks to the LEFT of the pen,
+ * an italic f or a swash J, grows the box leftwards instead of being clipped.
+ *
+ * @returns {{width:number,height:number,lineHeight:number,lines:string[],
+ *            ascent:number,offsetX:number} | null}
+ *   `ascent` is the first baseline's distance below the top of the box and
+ *   `offsetX` the pen's distance right of its left edge — the two numbers
+ *   `rasteriseTextAt` needs to place the glyphs back inside it.
  */
 export function measureText(text) {
   const surface = create2dSurface(1, 1);
   if (!surface) return null;
   const ctx = surface.getContext('2d');
   ctx.font = fontSpec(text);
+
   const lines = splitTextLines(text.content);
-  const lineHeight = Math.round(text.fontSize * 1.25);
-  let width = 0;
-  for (const line of lines) width = Math.max(width, ctx.measureText(line).width);
-  return { width: Math.ceil(width) || 1, height: lines.length * lineHeight || 1, lineHeight, lines };
+  const metrics = lines.map((line) => ctx.measureText(line));
+
+  // Font-box metrics are a property of the FONT, so any line reports them.
+  const fontAscent = finite(metrics[0].fontBoundingBoxAscent);
+  const fontDescent = finite(metrics[0].fontBoundingBoxDescent);
+  const lineHeight = Math.max(1, Math.round(fontAscent !== null && fontDescent !== null
+    ? fontAscent + fontDescent
+    : text.fontSize * FALLBACK_LINE_HEIGHT));
+
+  let left = 0, right = 0, advance = 0, ascent = 0, descent = 0;
+  metrics.forEach((m, i) => {
+    advance = Math.max(advance, finite(m.width) ?? 0);
+
+    const inkRight = finite(m.actualBoundingBoxRight);
+    // No glyph bounds on this platform: the advance is the only width there is.
+    if (inkRight === null) right = Math.max(right, finite(m.width) ?? 0);
+    else {
+      right = Math.max(right, inkRight);
+      left = Math.max(left, finite(m.actualBoundingBoxLeft) ?? 0);
+    }
+
+    // A blank line inks nothing, so it contributes no ascent or descent — only
+    // the advance to the next baseline.
+    if (lines[i] === '') return;
+    const a = finite(m.actualBoundingBoxAscent) ?? fontAscent
+      ?? text.fontSize * FALLBACK_LINE_HEIGHT * FALLBACK_ASCENT_SHARE;
+    const d = finite(m.actualBoundingBoxDescent) ?? fontDescent
+      ?? text.fontSize * FALLBACK_LINE_HEIGHT * (1 - FALLBACK_ASCENT_SHARE);
+    if (i === 0) ascent = a;
+    if (i === lines.length - 1) descent = d;
+  });
+
+  return {
+    // A string that inks nothing — empty, or nothing but spaces — still has to
+    // have a box the caret can live in, so it falls back to the advance and
+    // then to one line.
+    width: Math.ceil(left + right) || Math.ceil(advance) || 1,
+    height: Math.ceil(ascent + (lines.length - 1) * lineHeight + descent) || lineHeight,
+    lineHeight,
+    lines,
+    ascent,
+    offsetX: left,
+  };
 }
 
 /**
@@ -118,13 +220,19 @@ export function measureText(text) {
  *
  * ONE scale, on both axes. sx and sy used to be independent, and that is not a
  * feature anyone asked for: it is what squashed every text layer read from a
- * PSD. Photoshop's bounds are the INK extent of the glyphs; `natural` below is
- * a LINE BOX — the widest advance by lines * round(fontSize * 1.25). Two
- * different quantities, so w/natural.width and h/natural.height differ by
- * ~1.4x on a layer nobody has touched, and treating their ratio as a scale is
- * a units error rather than a resize. The smaller ratio wins, so the glyphs
- * always FIT the rect: the larger one would overflow and the canvas edge would
- * clip it. Whatever rectangle this is handed, glyph shape survives.
+ * PSD. `natural` used to be a LINE BOX while Photoshop's bounds are the INK
+ * extent of the glyphs, so w/natural.width and h/natural.height differed by
+ * ~1.4x on a layer nobody had touched, and treating their ratio as a scale was
+ * a units error rather than a resize. measureText now returns the ink extent,
+ * so the two rects are the same quantity — but the smaller ratio still wins,
+ * because a box the user dragged non-uniformly is still a box the glyphs have
+ * to FIT: the larger one would overflow and the canvas edge would clip it.
+ * Whatever rectangle this is handed, glyph shape survives.
+ *
+ * The draw is anchored to the BASELINE, because that is what the ink metrics
+ * are measured from: the first baseline sits `natural.ascent` below the top of
+ * the box, and each later one one `lineHeight` below that. textBaseline 'top'
+ * with an ink-extent box would sit the glyphs a whole ascent too low.
  */
 export function rasteriseTextAt(layer, width, height) {
   const natural = measureText(layer.text);
@@ -149,12 +257,17 @@ export function rasteriseTextAt(layer, width, height) {
   ctx.setTransform(scale, 0, 0, scale, offsetX, 0);
   ctx.font = fontSpec(layer.text, 1);
   ctx.fillStyle = layer.text.color;
-  ctx.textBaseline = 'top';
+  ctx.textBaseline = 'alphabetic';
   ctx.textAlign = layer.text.align;
 
+  // Left-aligned, the pen sits `offsetX` right of the box's left edge, which is
+  // 0 for anything that inks to the right of its own origin. Centred and
+  // right-aligned the canvas places each line itself, against the block's
+  // measured width; the side bearings it does not know about are sub-pixel.
   const originX = layer.text.align === 'center' ? natural.width / 2
-    : layer.text.align === 'right' ? natural.width : 0;
-  natural.lines.forEach((line, i) => ctx.fillText(line, originX, i * natural.lineHeight));
+    : layer.text.align === 'right' ? natural.width : natural.offsetX;
+  natural.lines.forEach((line, i) =>
+    ctx.fillText(line, originX, natural.ascent + i * natural.lineHeight));
 
   return { width: w, height: h, data: ctx.getImageData(0, 0, w, h).data };
 }

@@ -164,16 +164,48 @@ test('rejects a project file from a different document', () => {
 console.log('\ntext scaling\n');
 
 const calls = [];
+
+/**
+ * A stubbed text engine, modelling a plausible Latin face:
+ *
+ *   advance     10px per character, whatever the size, so the width arithmetic
+ *               in these assertions stays legible
+ *   cap height  0.70em -- the INK ascent of capitals, and zero ink below the
+ *               baseline, which is what "TEST" actually looks like
+ *   font box    0.90em above the baseline plus 0.20em below it, so one line
+ *               advance is 1.10em
+ *
+ * These proportions are an ASSUMPTION about what a browser returns, not a
+ * measurement of one: Node has no text engine, and nothing here proves Chrome
+ * agrees with any of these numbers. What it does prove is that measureText
+ * reads the ink fields AT ALL and composes them into a box the way it claims
+ * to -- which is the part that was wrong. The real-browser numbers need a
+ * browser.
+ */
+const CHAR_ADVANCE = 10, CAP_HEIGHT = 0.7, FONT_ASCENT = 0.9, FONT_DESCENT = 0.2;
+const stubMetrics = (s, size) => ({
+  width: s.length * CHAR_ADVANCE,
+  actualBoundingBoxLeft: 0,
+  actualBoundingBoxRight: s.length * CHAR_ADVANCE,
+  actualBoundingBoxAscent: s === '' ? 0 : size * CAP_HEIGHT,
+  actualBoundingBoxDescent: 0,
+  fontBoundingBoxAscent: size * FONT_ASCENT,
+  fontBoundingBoxDescent: size * FONT_DESCENT,
+});
+
 globalThis.document = {
   createElement() {
     const el = { width: 0, height: 0 };
     el.getContext = () => ({
-      set font(v) { calls.push(['font', v]); this._size = parseFloat(v) || 10; },
+      set font(v) { calls.push(['font', v]); this._size = parseFloat(/([\d.]+)px/.exec(v)?.[1]) || 10; },
       get font() { return ''; },
-      fillStyle: '', textBaseline: '', textAlign: '',
+      fillStyle: '',
+      set textBaseline(v) { calls.push(['textBaseline', v]); },
+      get textBaseline() { return ''; },
+      textAlign: '',
       setTransform: (...a) => calls.push(['setTransform', ...a]),
       fillText: (...a) => calls.push(['fillText', ...a]),
-      measureText: (s) => ({ width: s.length * 10 }),   // 10px per character
+      measureText(s) { return stubMetrics(s, this._size); },
       getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
     });
     return el;
@@ -212,9 +244,10 @@ test('scales the canvas transform instead of resampling a bitmap', () => {
 test('a box of the wrong aspect fits the glyphs inside it rather than squashing them', () => {
   // sx and sy were independent here -- w/natural.width by h/natural.height --
   // and that is what squashed a PSD text layer the moment it went live: the
-  // box is Photoshop's INK extent, our measurement is a LINE BOX, and the two
-  // ratios differ by ~1.4x with nothing resized at all. One scale, the smaller
-  // of the two, keeps glyph shape whatever rectangle this is handed.
+  // box was Photoshop's INK extent and our measurement a LINE BOX, so the two
+  // ratios differed by ~1.4x with nothing resized at all. Both are ink extents
+  // now, but a corner drag still does not lock aspect, so one scale -- the
+  // smaller of the two -- is what keeps glyph shape in any rectangle.
   calls.length = 0;
   const natural = measure(textLayer.text);
   rasteriseTextAt(textLayer, natural.width * 10, natural.height * 4);
@@ -248,6 +281,72 @@ test('a 10x scale-up re-shapes glyphs rather than enlarging pixels', () => {
   // the same small render. Re-shaping produces its own buffer at full size.
   assert.equal(large.data.length, small.data.length * 100);
   assert.equal(large.width, natural.width * 10);
+});
+
+test('measureText reports the ink extent, not an invented line box', () => {
+  // round(fontSize * 1.25) was a convention, not a font metric. Photoshop's
+  // layer bounds are the INK extent of the glyphs, so measuring a LINE BOX
+  // meant the first edit re-fitted the layer to a different quantity and the
+  // text visibly changed size -- "size changes from the exact".
+  const m = measure(textLayer.text);                    // 'ABCD' at 20px
+  assert.equal(m.width, 40, 'four characters at 10px');
+  assert.equal(m.height, 14, 'cap height at 20px -- not round(20 * 1.25) = 25');
+  assert.equal(m.ascent, 14, 'ink top to first baseline');
+  assert.equal(m.offsetX, 0, 'this face has no ink left of the pen');
+});
+
+test('line spacing comes from the font box, not from the ink height', () => {
+  // Ink extent gives the glyphs' bounds, never the distance between baselines:
+  // "AB" over "CD" would collide at 14px apart. fontBoundingBoxAscent +
+  // Descent is the font's own line advance and is what separates them.
+  const one = measure({ ...textLayer.text, content: 'AB' });
+  const two = measure({ ...textLayer.text, content: 'AB\nCD' });
+
+  assert.equal(two.lineHeight, 22, '(0.9 + 0.2) * 20, the font box -- not 0.7 * 20 of ink');
+  assert.equal(one.height, 14, 'one line is its ink and nothing more');
+  assert.equal(two.height, 36, 'ink ascent of the first line plus one line advance');
+  assert.equal(two.height - one.height, two.lineHeight, 'each extra line costs exactly one advance');
+});
+
+test('a font box the platform does not report falls back to 1.2em, and says so', () => {
+  // 1.2 is Photoshop's OWN autoLeading -- fixtures/text.src.psd carries
+  // paragraphStyle.autoLeading: 1.2 -- and CSS 'normal' for Latin faces. It is
+  // still a fallback: every current browser reports fontBoundingBox*, and this
+  // branch exists for the ones that do not.
+  const full = globalThis.document;
+  globalThis.document = {
+    createElement: () => ({
+      width: 0, height: 0,
+      getContext: () => ({
+        font: '', fillStyle: '', textBaseline: '', textAlign: '',
+        setTransform() {}, fillText() {},
+        measureText: (str) => ({ width: str.length * 10 }),   // advance only
+        getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+      }),
+    }),
+  };
+  try {
+    const m = measure({ ...textLayer.text, content: 'AB\nCD' });
+    assert.equal(m.lineHeight, 24, 'round(20 * 1.2)');
+    assert.equal(m.width, 20, 'the advance is the only width on offer');
+    assert.equal(m.height, 48, 'exactly two fallback line boxes -- the old behaviour, at 1.2 rather than an invented 1.25');
+  } finally { globalThis.document = full; }
+});
+
+test('glyphs are drawn from the baseline, at the ink ascent', () => {
+  // textBaseline 'top' plus a line box is what made the box and the glyphs
+  // disagree. The ink box has its own reference point: the first baseline sits
+  // exactly `ascent` below the top of the box, and every later one one line
+  // advance below that.
+  calls.length = 0;
+  const two = { ...textLayer, text: { ...textLayer.text, content: 'AB\nCD' } };
+  const natural = measure(two.text);
+  rasteriseTextAt(two, natural.width, natural.height);
+
+  assert.ok(calls.some((c) => c[0] === 'textBaseline' && c[1] === 'alphabetic'),
+    'ink metrics are measured from the baseline, so the draw has to use it');
+  const ys = calls.filter((c) => c[0] === 'fillText').map((c) => c[3]);
+  assert.deepEqual(ys, [14, 36], 'ascent, then ascent + one line advance');
 });
 
 test('a Photoshop line break is a line break', () => {

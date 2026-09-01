@@ -353,17 +353,39 @@ test('an explicit box lets text be created anywhere, surface or not', () => {
 
 // ---------------------------------------------------------------------------
 // Everything below needs a text measurer. Node has none, so stub the same
-// minimal canvas test/edit.mjs uses: 10px per character, 1.25 line height.
+// minimal canvas test/edit.mjs uses, modelling a plausible Latin face:
+//
+//   advance     10px per character, whatever the size
+//   cap height  0.70em of INK above the baseline, and none below it
+//   font box    0.90em above the baseline + 0.20em below = 1.10em of leading
+//
+// Those proportions are an ASSUMPTION about what a browser reports, not a
+// measurement of one. They keep the arithmetic in these assertions legible;
+// they do not prove any real font agrees.
+//
 // This measures GEOMETRY only — getImageData returns transparent pixels, so no
 // assertion below reads a glyph.
 // ---------------------------------------------------------------------------
+const CHAR_ADVANCE = 10, CAP_HEIGHT = 0.7, FONT_ASCENT = 0.9, FONT_DESCENT = 0.2;
 globalThis.document = {
   createElement() {
     const el = { width: 0, height: 0 };
     el.getContext = () => ({
-      font: '', fillStyle: '', textBaseline: '', textAlign: '',
+      set font(v) { this._size = parseFloat(/([\d.]+)px/.exec(v)?.[1]) || 10; },
+      get font() { return ''; },
+      fillStyle: '', textBaseline: '', textAlign: '',
       setTransform() {}, fillText() {},
-      measureText: (s) => ({ width: s.length * 10 }),
+      measureText(str) {
+        return {
+          width: str.length * CHAR_ADVANCE,
+          actualBoundingBoxLeft: 0,
+          actualBoundingBoxRight: str.length * CHAR_ADVANCE,
+          actualBoundingBoxAscent: str === '' ? 0 : this._size * CAP_HEIGHT,
+          actualBoundingBoxDescent: 0,
+          fontBoundingBoxAscent: this._size * FONT_ASCENT,
+          fontBoundingBoxDescent: this._size * FONT_DESCENT,
+        };
+      },
       getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
     });
     return el;
@@ -386,16 +408,16 @@ test('a created text layer is sized from the measurer and centred', () => {
   const project = synth();                       // 20x20 document
   const layer = insertTextLayer(project, { content: 'ABCD', fontSize: 20 });
   assert.equal(layer.w, 40, 'four characters at 10px each');
-  assert.equal(layer.h, 25, 'one line at 1.25 * 20px');
-  assert.deepEqual([layer.x, layer.y], [-10, -2]);
+  assert.equal(layer.h, 14, 'the INK of one line -- 0.7 * 20 -- not a 1.25 line box');
+  assert.deepEqual([layer.x, layer.y], [-10, 3]);
   assert.equal(layer.pixels, null, 'created text has no Photoshop bitmap');
-  assert.deepEqual([layer.sourceW, layer.sourceH], [40, 25]);
+  assert.deepEqual([layer.sourceW, layer.sourceH], [40, 14]);
 });
 
 test('a two-line string measures as two lines', () => {
   const layer = insertTextLayer(synth(), { content: 'AB\nCDE', fontSize: 20 });
   assert.equal(layer.w, 30, 'the widest line');
-  assert.equal(layer.h, 50);
+  assert.equal(layer.h, 36, 'ink of the first line (14) plus one font-box advance (22)');
 });
 
 test('a PSD line break is normalised to LF on the way in', () => {
@@ -463,18 +485,18 @@ test('centred text grows about its centre; right-aligned about its right edge', 
 test('retyping preserves a box the user has resized by hand', () => {
   const project = synth();
   const layer = insertTextLayer(project, { content: 'AB', x: 0, y: 0, fontSize: 20 });
-  setLayer(project, layer.id, { w: layer.w * 3, h: layer.h * 3 });   // 60 x 75
+  setLayer(project, layer.id, { w: layer.w * 3, h: layer.h * 3 });   // 60 x 42
   retypeText(project, layer.id, { content: 'ABCD' });
   assert.equal(layer.w, 120, 'still 3x the natural width');
-  assert.equal(layer.h, 75, 'height unchanged — still one line');
+  assert.equal(layer.h, 42, 'height unchanged — still one line');
 });
 
 test('a style change reflows the box too', () => {
   const project = synth();
   const layer = insertTextLayer(project, { content: 'AB', fontSize: 20 });
-  assert.deepEqual([layer.w, layer.h], [20, 25]);
+  assert.deepEqual([layer.w, layer.h], [20, 14]);
   retypeText(project, layer.id, { fontSize: 40 });
-  assert.equal(layer.h, 50, 'line height follows the font size');
+  assert.equal(layer.h, 28, 'the ink scales with the font size');
 });
 
 test('retyping is one undo step, and coalesces across a typing burst', () => {
@@ -515,30 +537,49 @@ test('retyping a PSD text layer switches it off Photoshop pixels', () => {
   assert.equal(layer.rerendered, false, 'undo returns it to Photoshop pixels');
 });
 
-console.log('\nPhotoshop bounds are not our bounds\n');
+console.log('\nPhotoshop bounds against ours\n');
 
 /**
- * The distortion bug, in numbers.
+ * The two bugs, in numbers.
  *
  * Photoshop bounds "TEST" at 30px as 60 x 21 -- the INK extent of the caps.
- * Our own measurement of the same string is a LINE BOX: the widest advance by
+ * We used to answer with a LINE BOX: the widest advance by
  * lines * round(fontSize * 1.25) = 38 tall. Two different quantities, so the
- * ratio between them is a units error and not a scale, and applying it as one
- * squashed the glyphs 1.4x harder vertically than horizontally.
+ * ratio between them was a units error and not a scale -- it squashed the
+ * glyphs 1.4x harder vertically than horizontally -- and once the first edit
+ * stopped applying that ratio and re-fitted the box instead, the same 38
+ * became a visible jump in SIZE on the first keystroke.
  *
- * (Under the stub the width is 4 chars * 10px = 40 rather than the ~77 real
- * Arial gives; the HEIGHT, where the distortion comes from, is the real number.)
+ * measureText now reports the ink extent, so both boxes are the same quantity
+ * and the height stops moving: 21 in the file, 21 from us. The WIDTH still
+ * moves -- 60 in the file, 40 under this stub -- and that is not a units
+ * problem but a font one: toLayer() substitutes FONT_STACKS[0] for whatever
+ * the file used, so we are honestly measuring a different typeface.
  */
-test('editing a PSD text layer re-fits the box to our metrics, not to Photoshop\'s', () => {
+test('editing a PSD text layer re-fits the box to metrics that agree with the file', () => {
   const project = createProject(textDoc, 'text.src.psd');
   const layer = project.layers.find((l) => l.kind === 'text');
   assert.deepEqual([layer.x, layer.y, layer.w, layer.h], [36, 45, 60, 21], 'the bounds the file carried');
 
   retypeText(project, layer.id, { content: 'TEST!' });
 
-  assert.deepEqual([layer.w, layer.h], [50, 38], 'our natural size at scale 1, not 60/40 x 21/38 of it');
+  assert.equal(layer.h, 21, "the file's own height -- both are the ink extent now");
+  assert.equal(layer.y, 45, 'so the re-centre has nothing to correct and the top does not move');
+  assert.equal(layer.w, 50, "five characters at the stub's 10px, at scale 1");
   assert.equal(layer.x, 36, 'left-aligned, so the left edge is the anchor');
-  assert.equal(layer.y, 37, 're-centred on the old box, so the visible glyphs do not jump');
+});
+
+test('the first edit does not resize a PSD text layer vertically', () => {
+  // "size changes from the exact": re-fitting the box to a LINE BOX resized a
+  // layer nobody had resized. Retyping "TEST" to "TEST" has to leave the
+  // geometry alone. Width is excluded on purpose -- see above: we substitute
+  // the font, so the string's own width legitimately differs.
+  const project = createProject(textDoc, 'text.src.psd');
+  const layer = project.layers.find((l) => l.kind === 'text');
+  const before = [layer.x, layer.y, layer.h];
+
+  retypeText(project, layer.id, { content: 'TEST' });
+  assert.deepEqual([layer.x, layer.y, layer.h], before, 'no jump on the first keystroke');
 });
 
 test('a second edit grows the box to fit the string, never re-applying a stale stretch', () => {
@@ -548,7 +589,7 @@ test('a second edit grows the box to fit the string, never re-applying a stale s
   const y = layer.y;
 
   retypeText(project, layer.id, { content: 'TE' });
-  assert.deepEqual([layer.w, layer.h], [20, 38], 'still scale 1 on both axes');
+  assert.deepEqual([layer.w, layer.h], [20, 21], 'still scale 1 on both axes');
   assert.equal(layer.y, y, 'the top is ours now and stays put');
 });
 
@@ -569,7 +610,7 @@ test('liveTextRect is the rect a resize drag on a PSD text layer must start from
   // a corner drag reads it at pointer-down so the drag scales OUR rectangle
   // rather than the file's, which the renderer would otherwise read as a 1.4x
   // vertical squash on the very first frame.
-  assert.deepEqual(liveTextRect(layer), { x: 36, y: 37, w: 40, h: 38 });
+  assert.deepEqual(liveTextRect(layer), { x: 36, y: 45, w: 40, h: 21 });
 
   retypeText(project, layer.id, { content: 'TEST' });
   assert.equal(liveTextRect(layer), null, 'the box is already ours; there is nothing to re-fit');
@@ -579,16 +620,16 @@ test('liveTextRect is the rect a resize drag on a PSD text layer must start from
 test('a hand resize survives typing as ONE uniform scale, not an X/Y stretch', () => {
   const project = synth();
   const layer = insertTextLayer(project, { content: 'AB', x: 0, y: 0, fontSize: 20 });
-  setLayer(project, layer.id, { w: 60, h: 75 });            // 3x, uniform
+  setLayer(project, layer.id, { w: 60, h: 42 });            // 3x, uniform
   retypeText(project, layer.id, { content: 'ABCD' });
-  assert.deepEqual([layer.w, layer.h], [120, 75], 'still 3x natural');
+  assert.deepEqual([layer.w, layer.h], [120, 42], 'still 3x natural');
 
   // A corner drag does not lock aspect, so a box CAN end up non-uniform. The
   // glyphs are fitted inside it undistorted, and the next edit normalises the
   // box back to one scale rather than carrying the stretch forward forever.
-  setLayer(project, layer.id, { w: 200, h: 75 });
+  setLayer(project, layer.id, { w: 200, h: 42 });
   retypeText(project, layer.id, { content: 'ABCD' });
-  assert.deepEqual([layer.w, layer.h], [120, 75], 'the extra width was empty space, not a stretch');
+  assert.deepEqual([layer.w, layer.h], [120, 42], 'the extra width was empty space, not a stretch');
 });
 
 test('retyping a raster layer is refused', () => {

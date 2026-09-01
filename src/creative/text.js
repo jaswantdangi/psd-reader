@@ -11,20 +11,26 @@
  *      old box, because `rasteriseTextAt` scales the transform to fit whatever
  *      rectangle it is handed.
  *
- * ## Photoshop's bounds are not bounds in our units
+ * ## Photoshop's bounds are the same quantity as ours — but not the same font
  *
  * A text layer read from a PSD arrives with the FILE's box, and that box is the
  * INK extent of the glyphs — 60 x 21 for "TEST" at 30px in
- * fixtures/text.src.psd. Our own `measureText` reports a LINE BOX: the widest
- * advance by lines * round(fontSize * 1.25), which is 38 tall for the same
- * string. Two different quantities. Dividing one by the other does not give a
- * scale, it gives a units error — and one that is ~1.4x worse vertically than
- * horizontally, which is exactly what "editing a PSD text layer squashes it"
- * looked like on screen.
+ * fixtures/text.src.psd. `measureText` used to answer with a LINE BOX instead:
+ * the widest advance by lines * round(fontSize * 1.25), 38 tall for the same
+ * string. Two different quantities, so dividing one by the other gave a units
+ * error rather than a scale — ~1.4x worse vertically than horizontally, which
+ * is what "editing a PSD text layer squashes it" looked like on screen, and
+ * then a visible jump in SIZE once the first edit re-fitted the box to that 38
+ * instead. It now reports the ink extent as well, so the heights agree (21
+ * against 21) and the first edit no longer moves the box vertically.
  *
- * So the file's box positions the layer and never scales it. The first edit
- * re-fits the box to our own measurement; every edit after that measures
- * against a box already in our units.
+ * The WIDTH can still differ, because `toLayer` substitutes FONT_STACKS[0] for
+ * whatever typeface the file used: our box is right for the glyphs we draw and
+ * cannot be right for glyphs we never had.
+ *
+ * So the rule is unchanged: the file's box positions the layer and never
+ * scales it. The first edit re-fits the box to our own measurement; every edit
+ * after that measures against a box already in our font.
  *
  * ## Measurement is a platform capability, not a fallback
  *
@@ -135,8 +141,8 @@ export function insertTextLayer(project, options = {}) {
  * number — the same one `rasteriseTextAt` derives from the same two rects.
  *
  * 1 for a layer still on Photoshop's pixels, whatever its box says: those are
- * the file's bounds in the file's units (see the note at the top of this file),
- * and reading a resize out of them is where the stretch was minted.
+ * the file's bounds for the file's own typeface (see the note at the top of
+ * this file), and reading a resize out of them is where the stretch was minted.
  *
  * One number rather than two, on purpose. A corner drag does not lock aspect,
  * so a box CAN end up non-uniform — but the glyphs are fitted inside it
@@ -158,13 +164,15 @@ function glyphScaleOf(layer, natural) {
  * Horizontally the anchor is the alignment: left-aligned text grows rightwards,
  * centred text about its centre, right-aligned text keeps its right edge.
  *
- * Vertically the top is fixed, because `rasteriseTextAt` draws from
- * `textBaseline: 'top'` downwards and a second line has to grow DOWN rather
- * than shove the first one upwards. `recentre` is the single exception: on the
- * switch off Photoshop's pixels the two boxes are not the same quantity, and
- * ours is the taller of the two, so holding the top would drop the visible
- * glyphs by the whole difference. Centring the new box on the old one keeps the
- * ink where the user is looking at it.
+ * Vertically the top is fixed, because `rasteriseTextAt` puts the first
+ * baseline a fixed ascent below the top of the box, so a second line has to
+ * grow DOWN rather than shove the first one upwards. `recentre` is the single exception: on the
+ * switch off Photoshop's pixels the two boxes are measured from different
+ * typefaces, so their ink heights need not match. They usually now do — both
+ * are ink extents — which is what makes the first edit continuous; where the
+ * substituted face is taller or shorter, centring the new box on the old one
+ * keeps the ink where the user is looking at it instead of dropping it by the
+ * whole difference.
  */
 const anchorBox = (layer, w, h, align, recentre) => ({
   x: align === 'center' ? layer.x + Math.round((layer.w - w) / 2)
