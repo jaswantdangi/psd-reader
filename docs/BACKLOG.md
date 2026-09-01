@@ -173,25 +173,32 @@ anything but reading. The user's first build and first device run settle them.
 
 ## Creative tools (Phase 4)
 
-- **Inserted and replaced image layers break full-resolution export.** Created
-  layers carry `sourceIndex: null` and `replaceImage` clears it, which is correct
-  -- a number there would claim another layer's pixels at export. But
-  `assertIdentifiable` (`src/export/order.js`) then refuses the WHOLE export with
-  `NO_IDENTITY` as soon as one such layer is present. Safe, never a wrong image,
-  and a hard stop. Fix: widen `isSelfRendering(layer)` to also cover
-  `layer.pixels && layer.sourceIndex === null`, and make
-  `createJsExportTarget.blend` fall back to `layer.pixels` when the streamed
-  `pixels` argument is null for such a layer. `planSpill`, `isFastPath` and
-  `stream.js`'s walk all branch on the same predicate and follow for free. Note
-  the resolution trap: a replaced image must be inserted at FULL document
-  resolution, or export upscales a proxy-sized bitmap into a correctly-sized,
-  blurred layer -- the failure `stream.js` exists to prevent.
-- **Adding and removing a layer is not undoable.** `applyCommand` in
-  `src/edit.js` knows only `set` and `reorder`, so `src/creative/layers.js` makes
-  insert/remove structural (both counters bumped, `future` cleared) rather than
-  pushing a command type that would undo to nothing. Closing it is an `insert`
-  command type and its inverse, ~10 lines in `edit.js`. Until then a UI must not
-  put "Add sticker" next to an undo button that will not undo it.
+- ~~**Inserted and replaced image layers break full-resolution export.**~~
+  **FIXED** 2026-09-01. `drawsOwnPixels(layer)` in `src/export/order.js` widens
+  `isSelfRendering` to a layer flagged `selfSupplied` that carries pixels;
+  `wantedIndices`, `assertIdentifiable`, `isFastPath`, `planSpill` and
+  `stream.js`'s walk all read it, and `createJsExportTarget.blend` falls back to
+  `layer.pixels` only for those layers.
+
+  **The suggested predicate in the original entry was wrong and was not used.**
+  `layer.pixels && layer.sourceIndex === null` also describes every layer of an
+  EAGERLY read project and would have silently un-refused those exports, and it
+  is one `sourceIndex` reset away from describing a proxy-loaded layer whose
+  256-edge buffer would then be blended at scale 1 -- exactly the blurred-but-
+  correctly-sized failure the entry warned about. Only the code that PUT
+  full-resolution pixels on a layer knows they are full resolution, so
+  `selfSupplied` is a stamped field on `toLayer`/`blankLayer`, set by
+  `insertImageLayer` and `replaceImage` and captured in the undo command's
+  `from` alongside `sourceIndex`.
+- ~~**Adding and removing a layer is not undoable.**~~ **FIXED** 2026-09-01.
+  `applyCommand` handles `insert` and `remove`; `invert` turns each into the
+  other; `insertLayer`/`removeLayer` route through `commit`. The command holds
+  the LAYER OBJECT, so ids are stable across an undo/redo cycle and undoing a
+  delete restores the pixel buffer. Note: `nextLayerId` reads the LIVE stack, so
+  a layer inserted after an undo REUSES the abandoned layer's id. Harmless --
+  history is linear, so the two can never be in the stack at once -- but a UI
+  holding a selected id across an undo will find the new layer rather than
+  nothing.
 - **A saved project cannot round-trip a created layer.** `applyProjectJson`
   matches by index and throws on a layer-count mismatch, and the JSON carries no
   pixels -- so a session with an inserted sticker reopens as a count mismatch,
@@ -213,31 +220,27 @@ Noticed while building `src/frame/**` (2026-09-01). None of these is a bug in th
 framing engine itself; all of them are code the framing engine does not own that
 has to learn the frame exists.
 
-- **A saved project silently loses its crop.** `toProjectJson` writes `width` and
-  `height` and every layer's geometry, and `applyProjectJson` restores them —
-  neither knows `project.frame`. Reopen a session and the crop is simply gone,
-  with nothing said. The fix is two lines in `edit.js` (write `frame`, restore it
-  through `normaliseRect` for the same reason `adjust` goes through
-  `createAdjust`), plus deciding what `applyProjectJson` does with a frame saved
-  against a document of a different size. Blocked only on `edit.js` being free.
+- ~~**A saved project silently loses its crop.**~~ **FIXED** 2026-09-01.
+  `toProjectJson` writes `frame` (null included, so a pre-crop save un-crops the
+  project it is applied to) and `applyProjectJson` restores it through
+  `normaliseRect`, re-frozen. Three tests in `test/frame.mjs`. Still open inside
+  it: a frame saved against a document of a DIFFERENT size is normalised, not
+  rejected — `applyProjectJson` already refuses a layer-count mismatch and could
+  refuse this the same way.
 
-- **The frame is not a command `edit.js` understands.** `applyCommand` handles
-  `set` and `reorder` and nothing else, so `src/frame/frame.js` ships its own
-  `undo`/`redo`/`discardTo` wrappers over the SAME `project.history` array. They
-  intercept `type: 'frame'` and delegate everything else, so interleaving and
-  ordering are exact — but every caller must import those three from
-  `src/frame`, and one that imports `edit.js`'s directly will step over a crop
-  without applying its inverse. Six lines in `applyCommand` collapse the whole
-  seam.
+- ~~**The frame is not a command `edit.js` understands.**~~ **FIXED** 2026-09-01.
+  `applyCommand` handles `frame`, `setFrame` moved to `edit.js` beside the other
+  command constructors, and `src/frame` re-exports the REAL `undo`/`redo`/
+  `discardTo` rather than wrapping them. `test/frame.mjs` asserts
+  `undo === editUndo` so the seam cannot reappear unnoticed.
 
-- **`project.width`/`height` mean the SOURCE document after a crop, not the
-  canvas.** Anything that reads them for "how big is the canvas" is wrong the
-  moment a frame is set: `fitView` and `clampView` in `view.js` will fit the
-  uncropped document, and `hitTest` takes source-document coordinates while the
-  canvas is now showing frame coordinates. Callers must pass
-  `framedProject(project)` to the view helpers and add `frame.x`/`frame.y` back
-  before hit-testing. This is a naming trap, not a bug, and the only durable fix
-  is a `canvasSize(project)` accessor that everything reads instead.
+- ~~**`project.width`/`height` mean the SOURCE document after a crop, not the
+  canvas.**~~ **FIXED** 2026-09-01. `canvasSize(project)` in `edit.js` is the one
+  accessor for "how big is the thing on screen"; `fitView`, `clampView` and
+  `hitTest` all read it, and `hitTest`'s parameters are named `canvasX`/`canvasY`
+  to say which space they are in. Still open: `gesture.js` and any UI overlay
+  that positions handles from `project.width` — none does today, but the trap is
+  the same one.
 
 - **`src/index.js` does not re-export `src/frame/**`.** It is another task's
   file. Until it does, the import path is `src/frame/index.js` directly, and
@@ -263,3 +266,39 @@ has to learn the frame exists.
   (`rendered`, `renderedKey`, `lut`, `lutKey`) are accessor windows onto the real
   layer rather than copied values. Remove those windows and every frame
   re-rasterises every text layer into an object it throws away.
+
+## Noticed while closing the Phase 4 and Phase 5 gaps (2026-09-01)
+
+- **A self-supplied layer breaks `stream.js`'s peak-memory statement.** The
+  header promises `file bytes + one full-resolution layer + output buffer`,
+  which holds because exactly one streamed layer is resident at a time. An
+  inserted sticker's full-resolution buffer lives on `layer.pixels` for the
+  whole session, so a document with N of them costs N extra full-resolution
+  buffers through the export peak — and nothing bounds N. Harmless for one
+  sticker on a phone photo, not harmless for a collage. Either the header
+  should say so or `insertImageLayer` should take a `maxFraction`, which is
+  already backlogged above for a different reason.
+
+- **`src/index.js` re-exports neither `src/creative/**` nor `src/frame/**`, and
+  not `drawsOwnPixels`.** `test/creative.mjs`, `test/frame.mjs` and parts of
+  `test/export.mjs` import the modules directly to stay green while the barrel
+  file moves. That is a deliberate test decision, but it means the barrel is now
+  an incomplete description of the engine, and an app importing only from it
+  cannot add a sticker or crop a document.
+
+- **`hitTest`'s coordinate space changed and no caller was updated.** It now
+  takes CANVAS coordinates. Every current caller passes the output of
+  `viewToDoc`, which is canvas space, and every current project is uncropped, so
+  nothing moves — but `app/`'s editor page was not read as part of this change
+  and a caller that computes a document point by hand would now be off by the
+  crop offset.
+
+- **`applyProjectJson` normalises a frame saved against a differently-sized
+  document instead of refusing it.** It already refuses a layer-count mismatch
+  by name; a frame from a 4000px document applied to a 1000px one is the same
+  class of "this is not the same PSD" and gets silently clamped instead.
+
+- **No disclosure that layers fall outside the frame.** `framingReport` builds
+  the sentence and nothing calls it. `createProject` collects warnings for
+  flattened groups, unapplied clipping and vector masks; a crop that hides three
+  layers says nothing until some UI asks.
