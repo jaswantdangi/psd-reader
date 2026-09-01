@@ -206,3 +206,60 @@ anything but reading. The user's first build and first device run settle them.
 - **`originalContent` is `''` on a created text layer** -- it means "what Photoshop
   had", and Photoshop never had it. Any UI badging "edited" from
   `content !== originalContent` will badge every created layer.
+
+## Framing (Phase 5)
+
+Noticed while building `src/frame/**` (2026-09-01). None of these is a bug in the
+framing engine itself; all of them are code the framing engine does not own that
+has to learn the frame exists.
+
+- **A saved project silently loses its crop.** `toProjectJson` writes `width` and
+  `height` and every layer's geometry, and `applyProjectJson` restores them —
+  neither knows `project.frame`. Reopen a session and the crop is simply gone,
+  with nothing said. The fix is two lines in `edit.js` (write `frame`, restore it
+  through `normaliseRect` for the same reason `adjust` goes through
+  `createAdjust`), plus deciding what `applyProjectJson` does with a frame saved
+  against a document of a different size. Blocked only on `edit.js` being free.
+
+- **The frame is not a command `edit.js` understands.** `applyCommand` handles
+  `set` and `reorder` and nothing else, so `src/frame/frame.js` ships its own
+  `undo`/`redo`/`discardTo` wrappers over the SAME `project.history` array. They
+  intercept `type: 'frame'` and delegate everything else, so interleaving and
+  ordering are exact — but every caller must import those three from
+  `src/frame`, and one that imports `edit.js`'s directly will step over a crop
+  without applying its inverse. Six lines in `applyCommand` collapse the whole
+  seam.
+
+- **`project.width`/`height` mean the SOURCE document after a crop, not the
+  canvas.** Anything that reads them for "how big is the canvas" is wrong the
+  moment a frame is set: `fitView` and `clampView` in `view.js` will fit the
+  uncropped document, and `hitTest` takes source-document coordinates while the
+  canvas is now showing frame coordinates. Callers must pass
+  `framedProject(project)` to the view helpers and add `frame.x`/`frame.y` back
+  before hit-testing. This is a naming trap, not a bug, and the only durable fix
+  is a `canvasSize(project)` accessor that everything reads instead.
+
+- **`src/index.js` does not re-export `src/frame/**`.** It is another task's
+  file. Until it does, the import path is `src/frame/index.js` directly, and
+  `test/frame.mjs` imports it that way.
+
+- **`renderSandwiched`'s cache key does not include the frame.** The key is
+  `selectionIndex|revision|scale|layerCount`, and a crop drag coalesces, so
+  `revision` deliberately does not move during one — which means a gesture that
+  re-rendered a *framed* project through the sandwich would reuse a `below` and
+  `above` built at the previous frame origin. Harmless as long as the crop UI
+  moves an overlay rect in CSS and only commits the frame at gesture end, which
+  is what it should do anyway. It becomes a stale-backdrop bug the day someone
+  renders the framed project per crop frame.
+
+- **No rotation, no straighten, no flip.** The layer model has no angle field
+  (`gesture.js` says so explicitly, and `HANDLES` has four corners and no
+  rotation handle), so a straighten slider is not a framing change — it is a new
+  transform in the layer model and a resampling pass in `render.js`.
+
+- **`framedProject` allocates one shallow layer copy per layer per call.** At 20
+  layers that is 20 small objects per rendered frame, against a composite that
+  costs milliseconds — but it is not free, and it is why the render-time caches
+  (`rendered`, `renderedKey`, `lut`, `lutKey`) are accessor windows onto the real
+  layer rather than copied values. Remove those windows and every frame
+  re-rasterises every text layer into an object it throws away.
