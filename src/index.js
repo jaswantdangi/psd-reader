@@ -27,6 +27,7 @@ export {
 export {
   conformancePattern, conformanceProject, compareRenders, verdictFor,
   CONFORMANCE_MODES, CONFORMANCE_SIZE,
+  CONFORMANCE_ADJUSTMENTS, conformanceAdjustProject, CONFORMANCE_TABLE_D_NOTE,
 } from './conformance.js';
 export {
   selectTier, tierOverrideFrom, probeCapabilities, CONTEXT_ATTRIBUTES,

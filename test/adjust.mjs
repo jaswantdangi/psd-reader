@@ -14,6 +14,8 @@ import {
   loadProjectProxy, exportFullRes, createJsExportTarget, createMemorySpill,
   panelRows, PANEL_FILTERS,
   ADJUST_GLSL, GPU_BLEND_MODES, fragmentShaderFor,
+  CONFORMANCE_ADJUSTMENTS, conformanceAdjustProject, CONFORMANCE_TABLE_D_NOTE,
+  conformanceProject, compareRenders, CONFORMANCE_SIZE,
 } from '../src/index.js';
 
 let passed = 0;
@@ -1149,6 +1151,59 @@ test('the stage never writes alpha', () => {
   // the JS side, so a shader that raised alpha would show up as a conformance
   // failure nobody could attribute.
   assert.ok(fragmentShaderFor('normal').includes('return vec4(c, src.a);'));
+});
+
+console.log('\nconformance Table D\n');
+
+test('a NEUTRAL adjustment renders bit-identically to no adjustment', () => {
+  // The mandatory first row, and the one that catches "the pass runs and
+  // quantises even when it should do nothing" -- which is invisible in every
+  // other way.
+  const neutral = CONFORMANCE_ADJUSTMENTS.find((e) => e.id === 'neutral');
+  assert.ok(neutral, 'Table D must open with a neutral row');
+  const withRow = renderProject(conformanceAdjustProject(neutral), { scale: 1 });
+  const without = renderProject(conformanceProject('normal'), { scale: 1 });
+  const stat = compareRenders(withRow, without);
+  assert.equal(stat.beyondRounding, 0, `${stat.beyondRounding} of ${stat.total} pixels differ`);
+  assert.equal(stat.maxDelta, 0);
+});
+
+test('every Table D row builds and renders at the conformance size', () => {
+  for (const entry of CONFORMANCE_ADJUSTMENTS) {
+    const out = renderProject(conformanceAdjustProject(entry), { scale: 1 });
+    assert.equal(out.width, CONFORMANCE_SIZE, entry.id);
+    assert.equal(out.height, CONFORMANCE_SIZE, entry.id);
+  }
+});
+
+test('every non-neutral row actually changes the pixels it claims to', () => {
+  // A row that renders identically to the neutral one is a row that proves
+  // nothing while looking green.
+  const base = renderProject(conformanceProject('normal'), { scale: 1 });
+  for (const entry of CONFORMANCE_ADJUSTMENTS) {
+    if (entry.id === 'neutral') continue;
+    const out = renderProject(conformanceAdjustProject(entry), { scale: 1 });
+    assert.ok(compareRenders(out, base).beyondRounding > 0, `${entry.id} changed nothing`);
+  }
+});
+
+test('the transformed rows really do go through resample', () => {
+  // The amplification row only means something if the layer is actually
+  // interpolated. A "transformed" row whose w happens to equal its buffer width
+  // hits resample()'s identity return and tests the untransformed path under a
+  // misleading name.
+  const rows = CONFORMANCE_ADJUSTMENTS.filter((e) => e.transformed);
+  assert.ok(rows.length >= 1, 'Table D needs an adjusted + transformed row');
+  for (const entry of rows) {
+    const layer = conformanceAdjustProject(entry).layers[1];
+    assert.notEqual(layer.w, layer.pixels.width, `${entry.id} is not actually transformed`);
+  }
+});
+
+test('Table D declares that it has no GPU to compare against', () => {
+  // Until 1B-2 lands the route runs JS against itself. A green table that means
+  // nothing is worse than an absent one, so the note is not optional.
+  assert.match(CONFORMANCE_TABLE_D_NOTE, /no GPU|JS against itself|1B-2/i);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
