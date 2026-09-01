@@ -10,6 +10,7 @@
  * Nothing here touches WebGL, so it imports and runs in Node.
  */
 import { SEPARABLE_GLSL, NON_SEPARABLE_GLSL, programNameFor, isNonSeparableMode } from './modes.js';
+import { ADJUST_UNIFORMS, ADJUST_STAGE } from '../adjust/glsl.js';
 
 /**
  * One full-canvas triangle from gl_VertexID. No attributes, no VBO, no VAO
@@ -49,7 +50,7 @@ uniform float uOpacity;
 
 in  vec2 vDstPx;
 out vec4 fragColor;
-`;
+` + ADJUST_UNIFORMS;
 
 /**
  * Ported from composite.js's lum / sat / clipColor / setLum / setSat.
@@ -107,7 +108,7 @@ void main() {
     fragColor = dst; return;
   }
 
-  vec4 src = texture(uSource, uv);
+  vec4 src = applyAdjust(texture(uSource, uv));
 
   float as = src.a * uOpacity;
   // Not an optimisation. Without it a transparent source fragment would run the
@@ -140,12 +141,12 @@ export function fragmentShaderFor(mode) {
   const name = programNameFor(mode);
 
   if (isNonSeparableMode(name)) {
-    return FRAGMENT_HEADER + NON_SEPARABLE_PRELUDE +
+    return FRAGMENT_HEADER + NON_SEPARABLE_PRELUDE + ADJUST_STAGE +
       `\nvec3 blendFn(vec3 b, vec3 s) {\n  ${NON_SEPARABLE_GLSL[name]}\n}\n` +
       FRAGMENT_MAIN;
   }
 
-  return FRAGMENT_HEADER +
+  return FRAGMENT_HEADER + ADJUST_STAGE +
     `\nfloat chan(float b, float s) {\n  ${SEPARABLE_GLSL[name]}\n}\n` +
     '\nvec3 blendFn(vec3 b, vec3 s) {\n' +
     '  return vec3(chan(b.r, s.r), chan(b.g, s.g), chan(b.b, s.b));\n}\n' +

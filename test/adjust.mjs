@@ -13,6 +13,7 @@ import {
   resample, renderProject, createRenderStats, createSandwichCache, renderSandwiched,
   loadProjectProxy, exportFullRes, createJsExportTarget, createMemorySpill,
   panelRows, PANEL_FILTERS,
+  ADJUST_GLSL, GPU_BLEND_MODES, fragmentShaderFor,
 } from '../src/index.js';
 
 let passed = 0;
@@ -1088,6 +1089,66 @@ test('PANEL_FILTERS and matchesFilter stay in step', () => {
     assert.ok(panelRows(p, { filters: [filter] }).shown <= p.layers.length, filter);
   assert.notEqual(panelRows(p, { filters: ['adjusted'] }).shown, p.layers.length,
     'the chip must actually narrow the list');
+});
+
+console.log('\nthe shader stage\n');
+
+test('every op declares exactly one of: LUT-carried, a shader body, or a named deferral', () => {
+  // A stronger assertion than "the key sets match", and the reason the overlay's
+  // absence from the shader is DECLARED rather than forgotten. An op that is
+  // none of the three is an op the GPU silently does nothing for.
+  for (const [id, op] of Object.entries(OPS)) {
+    const ways = [op.lut === true, typeof op.glsl === 'string' && op.glsl.length > 0,
+                  typeof op.gpuDeferred === 'string' && op.gpuDeferred.length > 0];
+    assert.equal(ways.filter(Boolean).length, 1,
+      `${id} declares ${ways.filter(Boolean).length} GPU strategies, must be exactly 1`);
+  }
+});
+
+test('ADJUST_GLSL is exactly the ops carrying a body, in both directions', () => {
+  const withBodies = Object.keys(OPS).filter((id) => typeof OPS[id].glsl === 'string' && OPS[id].glsl);
+  assert.deepEqual(Object.keys(ADJUST_GLSL).sort(), withBodies.sort());
+  for (const [id, body] of Object.entries(ADJUST_GLSL))
+    assert.ok(body.trim().length > 0, `${id} has an empty body`);
+});
+
+test('the overlay is deferred with a reason, not silently missing', () => {
+  assert.equal(OPS.overlay.glsl, null);
+  assert.match(OPS.overlay.gpuDeferred, /26x26|program/,
+    'the deferral has to say WHY, or it reads as an oversight');
+});
+
+test('all 26 fragment programs carry the adjustment stage exactly once', () => {
+  for (const mode of GPU_BLEND_MODES) {
+    const src = fragmentShaderFor(mode);
+    assert.equal(src.split('vec4 applyAdjust(').length - 1, 1, `${mode}: definition count`);
+    assert.equal(src.split('applyAdjust(texture(uSource, uv))').length - 1, 1, `${mode}: call count`);
+    assert.ok(src.includes('uniform sampler2D uLut;'), `${mode}: no LUT sampler`);
+  }
+});
+
+test('the LUT is read with texelFetch, at the exact index expression', () => {
+  // The bit-exactness argument, pinned as a string. floor(c * 255 + 0.5)
+  // recovers n for all n in 0..255 on a NEAREST unorm8 sample; anything else --
+  // a multiply without the half, a texture() lookup with filtering -- silently
+  // reintroduces the divergence the shared table exists to remove.
+  const src = fragmentShaderFor('normal');
+  assert.ok(src.includes('texelFetch(uLut'), 'texelFetch, never texture()');
+  assert.ok(src.includes('* 255.0 + 0.5'), 'the exact index conversion');
+});
+
+test('the stage returns the source untouched when no flag is set', () => {
+  // A neutral adjustment must be BIT-IDENTICAL to no adjustment on both tiers.
+  // The early return is what makes that true rather than "quantised twice and
+  // usually the same".
+  assert.ok(fragmentShaderFor('normal').includes('if (uAdjustFlags == 0) return src;'));
+});
+
+test('the stage never writes alpha', () => {
+  // Invariant A, in the shader. The four consumers that depend on it are all on
+  // the JS side, so a shader that raised alpha would show up as a conformance
+  // failure nobody could attribute.
+  assert.ok(fragmentShaderFor('normal').includes('return vec4(c, src.a);'));
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

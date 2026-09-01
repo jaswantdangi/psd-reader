@@ -135,10 +135,19 @@ test("both of blendInto's early-outs survive into the shader", () => {
 });
 
 test('hard mix compares in integer space, and nothing else does', () => {
-  assert.ok(code(fragmentShaderFor('hard mix')).includes('floor(b * 255.0 + 0.5)'));
+  // Task 15's adjustment stage legitimately reads `* 255.0 + 0.5` in its LUT
+  // fetch, in EVERY shader -- that is not what this test polices. Only the
+  // blend-MODE body has to stay in 0..1 space, so the check now starts where
+  // that body begins (`chan(`/`blendFn(`) rather than at the top of the file.
+  const modeBodyOf = (mode) => {
+    const src = code(fragmentShaderFor(mode));
+    const marker = isNonSeparableMode(programNameFor(mode)) ? 'vec3 blendFn(' : 'float chan(';
+    return src.slice(src.indexOf(marker));
+  };
+  assert.ok(modeBodyOf('hard mix').includes('floor(b * 255.0 + 0.5)'));
   for (const mode of GPU_BLEND_MODES) {
     if (mode === 'hard mix') continue;
-    assert.ok(!/255/.test(code(fragmentShaderFor(mode))),
+    assert.ok(!/255/.test(modeBodyOf(mode)),
       `${mode} carries a 0..255 constant into the shader`);
   }
 });
