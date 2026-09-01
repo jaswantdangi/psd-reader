@@ -390,3 +390,54 @@ rather than an invented line box. What that surfaced and did not fix:
   bounding-box metrics, which is a stronger assumption than the flat width they
   modelled before, and nothing in this repo verifies any of it against a real
   text engine. Every number in this change rests on that model.
+
+## Noticed while fixing the ignored text transform and the discarded typeface (2026-09-01)
+
+Both bugs are fixed: `toLayer` bakes the transform's vertical scale into
+`fontSize` and reads `style.font.name` into `text.sourceFont`, picking the
+nearest stack it can draw and disclosing the substitution. What that surfaced
+and did not fix:
+
+- **The spike this work started from was wrong on three of four files, and the
+  regex is still in `spike/font-probe.mjs`.** Read structurally (see
+  `src/engine-data.js`), `werps.src.psd` has `/EngineDict` bytes and NO live
+  text layer — no TySh block on any of its seven layer records — and
+  `text.src.psd` / `text-box.src.psd` name no font in their style runs at all;
+  the "MyriadPro-Regular" the spike reported came from ResourceDict's
+  document-level StyleSheetSet, 8000 characters past the layer's own runs.
+  Exactly ONE layer in the corpus names a real typeface. The probe is left in
+  place as a spike, but anyone re-running it will get the same wrong answers.
+
+- **`bold` and `italic` are still hardcoded false for every layer read from a
+  file.** ag-psd exposes `style.fauxBold` and `style.fauxItalic`, which are
+  precisely what our two flags mean, and a name like `AachenBTBold` carries the
+  weight as well. A bold PSD headline still arrives regular.
+
+- **Per-character style runs are read and discarded.** `text-box.src.psd`
+  carries two runs, one character then four (`test/text-engine.mjs` asserts it),
+  and ag-psd surfaces them as `text.styleRuns`. The model holds ONE style per
+  layer. Nothing in this change makes per-run styling harder to add later, but
+  nothing warns a user that a mixed-style layer will be flattened to its first
+  run's style either.
+
+- **Rotation and non-uniform scale are disclosed, not drawn.** A rotated text
+  layer renders upright and a stretched one renders undistorted; both raise a
+  project warning. No fixture in the corpus exercises either, so both paths are
+  tested only against synthetic layers built in `test/edit.mjs`.
+
+- **The transform's translation is still thrown away**, as the previous entry
+  already noted — `transform[4]`/`[5]` are the pen and first baseline. The scale
+  now being read makes that omission more conspicuous, not less: we read four
+  of the six numbers in the matrix.
+
+- **`effectiveFontSize` is rounded to an integer at ingest**, following the
+  model's existing convention. "outer glow" computes 16.601 and stores 17, a
+  2.4% error that then compounds with the box re-fit on the first edit.
+  `sourceFontSize` and `sourceScale` keep the exact pair, so nothing is lost —
+  but nothing uses them to render either.
+
+- **`src/engine-data.js`'s raw parser is used only by the test suite.** It is
+  the oracle that proves ag-psd's font resolution against the file's own bytes,
+  and deliberately not on the read path, where it would be a second decode of
+  something already in hand. If it ever drifts from ag-psd, the test says so —
+  which is the whole point — but no production path benefits from it.
