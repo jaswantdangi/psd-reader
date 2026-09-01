@@ -350,9 +350,7 @@ it exposed and this change did not touch:
 
 ## Noticed while fixing the CR line break and the ink-extent metrics (2026-09-01)
 
-Both bugs are fixed: `measureText` splits on `/
-||
-/` and every door
+Both bugs are fixed: `measureText` splits on `/\r\n|\r|\n/` and every door
 into the model normalises to LF; the box it returns is the glyphs' ink extent
 rather than an invented line box. What that surfaced and did not fix:
 
@@ -378,14 +376,13 @@ rather than an invented line box. What that surfaced and did not fix:
   them. Nothing detects or discloses that. The old 1.25 was wrong everywhere
   but at least wrong identically.
 
-- **A leading blank line contributes no ascent.** `"
-AB"` puts its first
-  baseline at the very top of the box, because an empty line inks nothing.
+- **A leading blank line contributes no ascent.** `"\nAB"` puts its first
+  baseline at the very top of the box, because an empty line inks
+  nothing.
   Geometrically right, and arguably not what someone pressing Enter first
   expects.
 
-- **`text-sheet.ts` still splits on `'
-'` by hand** for its "N line(s)"
+- **`text-sheet.ts` still splits on `'\n'` by hand** for its "N line(s)"
   readout. Correct today only because the model is normalised at every door; it
   is a second splitter that can drift from `splitTextLines`.
 
