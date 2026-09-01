@@ -11,6 +11,7 @@ import {
   hitTest as engineHitTest,
   nextGestureKey as engineNextGestureKey,
 } from '@engine/edit.js';
+import { insertTextLayer, retypeText } from '@engine/creative/index.js';
 import { createView } from '@engine/view.js';
 
 /**
@@ -207,6 +208,57 @@ export class ProjectService {
     if (!project) return;
     setAdjustCmd(project, id, changes, coalesceKey);
     this.version.update((v) => v + 1);
+  }
+
+  /**
+   * Retype or restyle a text layer, box included.
+   *
+   * `retypeText` is ONE `setLayer` carrying the text fields and the new bounds
+   * together, so the string and its box are a single undo step. Pass a gesture
+   * key from `gestureKey('type')` for a typing burst and the keystrokes
+   * coalesce into one history entry.
+   *
+   * It THROWS rather than guessing when there is no measurer — a made-up glyph
+   * width produces a box that is confidently the wrong size. There is always
+   * one on the main thread, so the catch is here to report the impossible case
+   * rather than to swallow it.
+   *
+   * @returns the engine's message when it refused, otherwise null
+   */
+  retypeText(id: number, changes: any, coalesceKey?: string): string | null {
+    const project = this.project();
+    if (!project) return null;
+    try {
+      retypeText(project, id, changes, coalesceKey);
+    } catch (error: any) {
+      return error?.message ?? String(error);
+    }
+    this.version.update((v) => v + 1);
+    return null;
+  }
+
+  /**
+   * Create a text layer on top of the stack and select it.
+   *
+   * Selecting is part of the command rather than the caller's job: only this
+   * knows the id the engine minted, and a layer you cannot then reach is a dead
+   * end. `insertLayer` goes through `commit`, so the insert is an ordinary undo
+   * step and `✕ Discard changes` removes it again.
+   *
+   * @returns the engine's message when it refused, otherwise null
+   */
+  insertText(options: any): string | null {
+    const project = this.project();
+    if (!project) return null;
+    let layer: any;
+    try {
+      layer = insertTextLayer(project, options);
+    } catch (error: any) {
+      return error?.message ?? String(error);
+    }
+    this.version.update((v) => v + 1);
+    this.selectedId.set(layer.id);
+    return null;
   }
 
   reorder(fromIndex: number, toIndex: number): void {
