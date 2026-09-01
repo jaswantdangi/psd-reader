@@ -978,4 +978,76 @@ await atest('the export target owns its scratch and releases it before the encod
   assert.equal(second.scratch.data, null, 'dispose() must drop it too');
 });
 
+console.log('\ncache invalidation\n');
+
+/** Three full-canvas layers, so there is something above AND below a selection. */
+const threeLayerProject = () => createProject({
+  width: 8, height: 8,
+  children: [0, 1, 2].map((i) => ({
+    name: `L${i}`, left: 0, top: 0, right: 8, bottom: 8,
+    proxyData: { width: 8, height: 8, data: new Uint8ClampedArray(8 * 8 * 4).fill(60 + i * 60) },
+  })),
+}, 'three.psd');
+
+test('a coalesced adjustment drag reuses ONE cache build while the frame keeps changing', () => {
+  // The whole reason src/sandwich.js exists. If revision moved on a coalesced
+  // frame, every drag frame would rebuild TWO full composites of the rest of
+  // the stack -- and it would fail silently, by being slow.
+  const p = threeLayerProject();
+  const cache = createSandwichCache();
+  const id = p.layers[1].id;
+  const key = nextGestureKey('adjust');
+
+  setAdjust(p, id, { brightness: 5 }, key);          // first frame: commit, revision moves
+  const firstFrame = renderSandwiched(cache, p, 1, { scale: 1 });
+  const builds = cache.builds;
+  assert.equal(builds, 1);
+
+  let lastFrame = firstFrame;
+  for (let v = 10; v <= 90; v += 10) {
+    setAdjust(p, id, { brightness: v }, key);
+    lastFrame = renderSandwiched(cache, p, 1, { scale: 1 });
+    assert.equal(cache.builds, builds, `frame at brightness ${v} rebuilt the cache`);
+  }
+  assert.notDeepEqual([...lastFrame.data], [...firstFrame.data],
+    'the cache held but the frame never changed -- the live layer is not re-adjusting');
+});
+
+test('the first frame of a drag rebuilds exactly once', () => {
+  const p = threeLayerProject();
+  const cache = createSandwichCache();
+  renderSandwiched(cache, p, 1, { scale: 1 });
+  assert.equal(cache.builds, 1);
+  setAdjust(p, p.layers[1].id, { brightness: 20 }, nextGestureKey('adjust'));
+  renderSandwiched(cache, p, 1, { scale: 1 });
+  assert.equal(cache.builds, 2, 'a commit must invalidate; `below` and `above` are stale');
+});
+
+test('an adjustment on a layer BELOW the selection rebuilds the cache', () => {
+  // `below` is a real composite of those layers, so it has to be redone. Same
+  // for above. Getting this wrong in the other direction is the failure that
+  // shows a stale backdrop for the rest of a gesture.
+  const p = threeLayerProject();
+  const cache = createSandwichCache();
+  renderSandwiched(cache, p, 1, { scale: 1 });
+  const builds = cache.builds;
+  setAdjust(p, p.layers[0].id, { brightness: 70 });
+  const after = renderSandwiched(cache, p, 1, { scale: 1 });
+  assert.equal(cache.builds, builds + 1);
+  assert.ok(after.data.some((v, i) => v !== 0 || i % 4 === 3));
+});
+
+test('a discarded sheet session invalidates the cache once', () => {
+  const p = threeLayerProject();
+  const cache = createSandwichCache();
+  renderSandwiched(cache, p, 1, { scale: 1 });
+  const mark = p.history.length;
+  const builds = cache.builds;
+  for (const v of [20, 40, 60]) setAdjust(p, p.layers[1].id, { brightness: v }, nextGestureKey('adjust'));
+  discardTo(p, mark);
+  renderSandwiched(cache, p, 1, { scale: 1 });
+  assert.ok(cache.builds > builds, 'the cache must not survive a rollback');
+  assert.equal(p.layers[1].adjust, null);
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
