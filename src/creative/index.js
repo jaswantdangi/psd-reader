@@ -15,5 +15,7 @@
  * so import from this file directly.
  */
 export { insertLayer, removeLayer, nextLayerId, blankLayer } from './layers.js';
-export { naturalTextSize, insertTextLayer, retypeText, liveTextRect } from './text.js';
+export {
+  naturalTextSize, insertTextLayer, retypeText, resizeTextBox, liveTextRect,
+} from './text.js';
 export { insertImageLayer, replaceImage, IMAGE_FITS } from './image.js';

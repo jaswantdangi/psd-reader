@@ -279,6 +279,102 @@ export function liveTextRect(layer) {
 }
 
 /**
+ * SCALE, expressed as a size change: the type moves and the box goes with it.
+ *
+ * The two operations a text box needs are not the same edit, and today's single
+ * handle drag only ever expressed one of them:
+ *
+ *   1. RESIZE THE BOX — the author's width changes, the paragraph re-wraps to
+ *      it, the type size does not move. `resizeTextBox` below.
+ *   2. SCALE — the type gets bigger or smaller and the box scales with it, so
+ *      the wrap is preserved proportionally. This function, applied to any
+ *      change that carries a `fontSize`.
+ *
+ * Where the line breaks fall depends on ONE quantity: the ratio of the box
+ * width to the font size. Both are in the text object's own pre-transform space
+ * (see `boxWidthOf` in src/edit.js), so scaling the two by the same factor
+ * moves neither the ratio nor a single break — the same words stay on the same
+ * lines, larger. Moving `fontSize` alone would instead re-wrap the paragraph,
+ * which is operation 1 with the wrong control.
+ *
+ * An explicit `boxWidth` in the same change WINS, and that is the third thing
+ * a user can want: a different type size inside the same column. It is the two
+ * operations issued as one command rather than a third operation.
+ *
+ * Point text is untouched — it has no author width to carry, its box has always
+ * been the glyphs' own ink, and a size change simply re-measures it.
+ */
+function withScaledBox(text, changes) {
+  if (!wrapsInBox(text)) return changes;
+  if (changes.fontSize === undefined || 'boxWidth' in changes) return changes;
+
+  const factor = changes.fontSize / text.fontSize;
+  if (!Number.isFinite(factor) || factor <= 0) return changes;
+  return { ...changes, boxWidth: text.boxWidth * factor };
+}
+
+/**
+ * RESIZE THE BOX: the author's width becomes `rect.w`, the paragraph re-wraps
+ * to it, and the type size does not move at all.
+ *
+ * This is what dragging a text box's handle does in Photoshop, Figma and
+ * InDesign, and it is the operation the canvas's corner handles now perform on
+ * a paragraph layer. Dragging used to SCALE, which for box text is the wrong
+ * verb — it is why resizing a paragraph read as distortion rather than reflow.
+ * Scaling is still reachable, one-fingered, from the Size slider in the text
+ * sheet; see `withScaledBox`.
+ *
+ * ## What follows what
+ *
+ * `w` is the input. `h` is not an input at all and is never read off the rect:
+ * a paragraph's height is however tall the new wrap turns out to be, so a
+ * corner drag's vertical component is ignored rather than fought with. That is
+ * the same behaviour an auto-height text frame has everywhere else, and it is
+ * what makes the operation honest — there is no height the user could drag to
+ * that the text would then obey.
+ *
+ * `x`/`y` come from the CALLER, unlike every other write in this file. A typed
+ * string grows the way the paragraph is set, so `retypeText` anchors on the
+ * ALIGNMENT; a drag has a corner standing still under the other hand, and
+ * `resizeFrom` has already worked out where that puts the rect. Re-deriving it
+ * from the alignment here would slide the layer out from under the finger.
+ *
+ * Point text is REFUSED rather than quietly scaled: it has no author width, so
+ * there is nothing here to reflow, and a caller that has not noticed the
+ * distinction should find out rather than get a silent type-size change.
+ *
+ * @param {object} project @param {number} id
+ * @param {{x?:number,y?:number,w:number}} rect  document coordinates
+ * @param {string} [coalesceKey]  one key for a whole drag -> one undo step
+ * @returns {object} the layer
+ */
+export function resizeTextBox(project, id, rect, coalesceKey) {
+  const layer = requireLayer(project, id);
+  if (layer.kind !== 'text' || !layer.text)
+    throw new Error(`Layer "${layer.name}" is not a text layer.`);
+  if (!wrapsInBox(layer.text))
+    throw new Error(
+      `Layer "${layer.name}" is point text: it has no box to resize, because its ` +
+      'bounds are the glyphs\' own. Scale it instead.',
+    );
+
+  const boxWidth = Math.max(1, rect.w);
+  const size = fittedSize({ ...layer.text, boxWidth });
+  if (!size) throw new Error(NO_MEASURER);
+
+  // ONE command, exactly as retypeText is: the author's width and the bounds it
+  // implies can never be undone apart.
+  setLayer(project, id, {
+    text: { boxWidth },
+    x: Math.round(rect.x ?? layer.x),
+    y: Math.round(rect.y ?? layer.y),
+    w: Math.max(1, Math.round(size.width)),
+    h: Math.max(1, Math.round(size.height)),
+  }, coalesceKey);
+  return layer;
+}
+
+/**
  * Change a text layer's content or style and move its box to match.
  *
  * The box is not reset to the natural size — that would throw away a resize the
@@ -311,6 +407,11 @@ export function retypeText(project, id, changes = {}, coalesceKey) {
   // A textarea normalises its own value to LF, but a programmatic caller or a
   // paste need not have. One convention reaches the model, always.
   if (changes.content !== undefined) changes = { ...changes, content: normaliseLineBreaks(changes.content) };
+
+  // A size change on box text is a SCALE, so the box comes too. Before the
+  // measurements below, because `after` has to be measured against the box the
+  // layer is about to have or the height would be one wrap out of date.
+  changes = withScaledBox(layer.text, changes);
 
   const before = fittedSize(layer.text);
   const after = fittedSize({ ...layer.text, ...changes });

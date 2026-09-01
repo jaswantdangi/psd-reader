@@ -25,7 +25,7 @@ import { renderProject, measureText } from '../src/render.js';
 import { buildExportOrder, assertIdentifiable, isSelfRendering, drawsOwnPixels, wantedIndices } from '../src/export/order.js';
 import {
   removeLayer, nextLayerId,
-  naturalTextSize, insertTextLayer, retypeText, liveTextRect,
+  naturalTextSize, insertTextLayer, retypeText, resizeTextBox, liveTextRect,
   insertImageLayer, replaceImage,
 } from '../src/creative/index.js';
 
@@ -787,6 +787,144 @@ test('the shape and the box width survive a save and reopen', () => {
   applyProjectJson(project, json);
   assert.equal(layer.text.shapeType, 'box');
   assert.equal(Math.round(layer.text.boxWidth), 129);
+});
+
+/**
+ * ## Two operations, and today's handle drag only expresses one
+ *
+ * A text box can be changed in two ways that are not the same operation, and
+ * conflating them is why resizing a paragraph read as distortion rather than
+ * reflow:
+ *
+ *   - **Resize the box.** The AUTHOR's width changes, the paragraph re-wraps to
+ *     the new width, and the type size does not move. This is what dragging a
+ *     text box's handle does in Photoshop, Figma and InDesign, and it is the one
+ *     a phone user reaches for.
+ *   - **Scale.** The TYPE gets bigger or smaller and the box goes with it, so
+ *     the wrap is preserved proportionally.
+ *
+ * They are expressed by two different affordances, both one-fingered: a handle
+ * drag on the canvas reflows, and the Size slider in the text sheet scales.
+ * Nothing is modal, and nothing needs a second finger or a modifier key.
+ *
+ * WHAT THE STUB CANNOT SHOW. Its advance is a flat 10px per character at every
+ * size (see the note above it), where a real face advances proportionally to
+ * the em. So doubling fontSize here does NOT double the measured ink, and the
+ * preserved-wrap half of "scale" cannot be observed through it — only the
+ * quantity that DETERMINES it. That quantity is the ratio of the box width to
+ * the font size: both live in the text object's own pre-transform space, so the
+ * line breaks depend on nothing else (see boxWidthOf in src/edit.js). The
+ * assertions below are on that ratio; a browser is what would show the breaks
+ * themselves landing in the same places.
+ */
+
+test('resizing the box re-wraps the paragraph and never touches the type size', () => {
+  const { project, layer } = boxLayerOf();
+  retypeText(project, layer.id, { content: 'ONE TWO THREE FOUR FIVE' });
+  assert.deepEqual(measureText(layer.text).lines, ['ONE TWO', 'THREE FOUR', 'FIVE']);
+  const size = layer.text.fontSize;
+
+  resizeTextBox(project, layer.id, { x: layer.x, y: layer.y, w: 70 });
+
+  assert.equal(layer.text.boxWidth, 70, "the drag sets the AUTHOR's width");
+  assert.equal(layer.text.fontSize, size, 'a reflow moves the box and nothing else');
+  assert.deepEqual(measureText(layer.text).lines, ['ONE TWO', 'THREE', 'FOUR', 'FIVE'],
+    'the same words, re-broken for the narrower box');
+  assert.equal(layer.w, 70, 'the layer is the box');
+  assert.equal(layer.h, 21 + 3 * 33, 'and only the height followed');
+});
+
+test('a reflow drag holds the corner it was anchored at, not the alignment', () => {
+  // retypeText anchors the box on the ALIGNMENT, because a string growing as it
+  // is typed has to grow the way the paragraph is set. A drag does not: the
+  // corner opposite the finger is standing still, and `resizeFrom` has already
+  // worked out where that puts the rect. Passing x/y through is what keeps the
+  // layer under the finger instead of jumping to its own centre.
+  const { project, layer } = boxLayerOf();
+  resizeTextBox(project, layer.id, { x: 10, y: 20, w: 70 });
+  assert.deepEqual([layer.x, layer.y], [10, 20]);
+});
+
+test('resizing the box of POINT text is refused rather than silently scaling it', () => {
+  // Point text has no author width — its box is the glyphs' own ink. There is
+  // nothing here to reflow, so the caller is told, and the canvas keeps sending
+  // point text down the scale path it has always used.
+  const project = createProject(textDoc, 'text.src.psd');
+  const layer = project.layers.find((l) => l.kind === 'text');
+  assert.throws(() => resizeTextBox(project, layer.id, { w: 40 }), /point text/i);
+});
+
+test('a reflow drag is ONE undo step, and undo puts the file box back', () => {
+  const { project, layer } = boxLayerOf();
+  const depth = project.history.length;
+  const key = 'reflow-burst';
+  for (let w = 120; w >= 70; w -= 10)
+    resizeTextBox(project, layer.id, { x: layer.x, y: layer.y, w }, key);
+
+  assert.equal(project.history.length, depth + 1, 'expected exactly one history entry');
+  assert.equal(layer.text.boxWidth, 70);
+  assert.equal(layer.rerendered, true, 'a reflow re-draws the layer, like every other text edit');
+
+  undo(project);
+  assert.equal(Math.round(layer.text.boxWidth), 129, 'the author own width is back');
+  assert.equal(layer.rerendered, false, 'and so are Photoshop own pixels');
+  assert.deepEqual([layer.x, layer.y, layer.w, layer.h], [71, 86, 60, 21]);
+});
+
+test('changing the type size on box text carries the box with it', () => {
+  // The SCALE operation. fontSize and boxWidth move by the same factor, so
+  // their ratio — the only thing the line breaks depend on — does not move at
+  // all. See the note above for why the breaks themselves are not asserted.
+  const { project, layer } = boxLayerOf();
+  const ratio = layer.text.boxWidth / layer.text.fontSize;
+  assert.equal(layer.text.fontSize, 30);
+
+  retypeText(project, layer.id, { fontSize: 60 });
+
+  assert.equal(layer.text.fontSize, 60);
+  assert.ok(Math.abs(layer.text.boxWidth - 128.99352 * 2) < 1e-9, 'the box doubled too');
+  assert.ok(Math.abs(layer.text.boxWidth / layer.text.fontSize - ratio) < 1e-12,
+    'the ratio the wrap is computed from is exactly preserved');
+});
+
+test('a size change on POINT text has no box to carry', () => {
+  const project = createProject(textDoc, 'text.src.psd');
+  const layer = project.layers.find((l) => l.kind === 'text');
+  retypeText(project, layer.id, { fontSize: 60 });
+  assert.equal(layer.text.boxWidth, null);
+  assert.equal(layer.text.shapeType, 'point');
+});
+
+test('an explicit boxWidth in the same change wins over the size it would imply', () => {
+  // The third thing a user can want: a different type size inside the SAME
+  // column. It is the two operations issued as one command rather than a third
+  // operation, and it is the primitive both of the others are built out of.
+  const { project, layer } = boxLayerOf();
+  retypeText(project, layer.id, { fontSize: 60, boxWidth: 129 });
+  assert.equal(layer.text.boxWidth, 129, 'the caller said what the column is');
+});
+
+test('a word wider than the box keeps its own line, and is neither split nor dropped', () => {
+  // The overhang case. We do not hyphenate, so a mid-word break would be one
+  // Photoshop never makes, and losing a word is never the better failure. The
+  // wrap loop consumes exactly one token per iteration whatever the widths, so
+  // an unfittable word cannot spin it either — this asserts the output, and the
+  // test terminating at all is the assertion about the loop.
+  const { project, layer } = boxLayerOf();
+  retypeText(project, layer.id, { content: 'HI SUPERCALIFRAGILISTIC OK' });
+  const lines = measureText(layer.text).lines;
+  assert.deepEqual(lines, ['HI', 'SUPERCALIFRAGILISTIC', 'OK']);
+  assert.equal(lines.join(' '), layer.text.content, 'every character survives the wrap');
+});
+
+test('an explicit break starts a new paragraph, and each one wraps on its own', () => {
+  // Order, and it is not interchangeable: split on the author's breaks FIRST,
+  // then wrap inside each paragraph. Wrapping first would let one paragraph's
+  // tail share a line with the next one's head.
+  const { project, layer } = boxLayerOf();
+  retypeText(project, layer.id, { content: 'ONE TWO THREE\nFOUR FIVE SIX SEVEN' });
+  assert.deepEqual(measureText(layer.text).lines,
+    ['ONE TWO', 'THREE', 'FOUR FIVE', 'SIX SEVEN']);
 });
 
 test('retyping a raster layer is refused', () => {
