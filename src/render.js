@@ -60,6 +60,39 @@ const fontSpec = (text, scale = 1) =>
   `${text.italic ? 'italic ' : ''}${text.bold ? 'bold ' : ''}${Math.max(1, text.fontSize * scale)}px ${text.fontFamily}`;
 
 /**
+ * Every line separator a text layer can arrive with.
+ *
+ * Photoshop stores a line break as CR, and nothing else: a multi-line PSD text
+ * layer reaches us as "AB\rCD". A browser textarea always hands its value back
+ * with LF. A pasted string can carry CRLF. Splitting on \n alone — which is
+ * what this did — turned every multi-line PSD layer into one line the instant
+ * it switched to live rendering, which is precisely "editing destroys my line
+ * breaks": the file's own raster showed the breaks, ours did not.
+ *
+ * CRLF is ONE break. The alternation order matters — \r\n has to be tried
+ * before either half, or a Windows-authored string doubles its line count.
+ */
+const LINE_BREAK = /\r\n|\r|\n/;
+
+/** Split a string into lines on any of CR, LF or CRLF. */
+export const splitTextLines = (content) => String(content ?? '').split(LINE_BREAK);
+
+/**
+ * One convention for the model: LF.
+ *
+ * Applied at every door a string can come in through — a PSD layer, a created
+ * layer, an edit, a reopened project file — so `layer.text.content` holds LF
+ * and only LF. The alternative, tolerating all three separators everywhere,
+ * means every consumer that ever counts lines (the render path, the sheet's
+ * "N line(s)" readout, the layer name) has to know about CR forever, and each
+ * one that forgets is the same bug again. `splitTextLines` above stays
+ * tolerant regardless, because a project file saved before this normalisation
+ * existed can still carry CR.
+ */
+export const normaliseLineBreaks = (content) =>
+  String(content ?? '').split(LINE_BREAK).join('\n');
+
+/**
  * Measure re-drawn text so the layer box can follow the string as it's typed.
  * Returns null outside a browser — Node has no text rasteriser.
  */
@@ -68,7 +101,7 @@ export function measureText(text) {
   if (!surface) return null;
   const ctx = surface.getContext('2d');
   ctx.font = fontSpec(text);
-  const lines = String(text.content ?? '').split('\n');
+  const lines = splitTextLines(text.content);
   const lineHeight = Math.round(text.fontSize * 1.25);
   let width = 0;
   for (const line of lines) width = Math.max(width, ctx.measureText(line).width);

@@ -250,6 +250,24 @@ test('a 10x scale-up re-shapes glyphs rather than enlarging pixels', () => {
   assert.equal(large.width, natural.width * 10);
 });
 
+test('a Photoshop line break is a line break', () => {
+  // Photoshop stores breaks as CR (\r), not LF. NONE of the 21 fixtures
+  // exercises this -- every one carries the single-line "TEST" -- so the layer
+  // below is SYNTHETIC, and deliberately so: the alternative is asserting
+  // nothing at all about the one separator every PSD actually uses.
+  const of = (content) => measure({ ...textLayer.text, content });
+
+  assert.deepEqual(of('AB\rCD').lines, ['AB', 'CD'], 'CR is how Photoshop writes a break');
+  assert.deepEqual(of('AB\nCD').lines, ['AB', 'CD'], 'LF is what a textarea hands back');
+  assert.deepEqual(of('AB\r\nCD').lines, ['AB', 'CD'], 'CRLF is ONE break, not two');
+  assert.deepEqual(of('AB\rCD\nEF\r\nGH').lines, ['AB', 'CD', 'EF', 'GH'], 'mixed separators');
+
+  // The reported symptom: the breaks look right until the layer goes live,
+  // then collapse to one line. Same string, same box, whichever separator.
+  assert.equal(of('AB\rCD').height, of('AB\nCD').height, 'CR and LF must measure identically');
+  assert.ok(of('AB\rCD').height > of('ABCD').height, 'two lines are taller than one');
+});
+
 test('resizing a text layer switches it to live rendering', () => {
   const tl = textProject.layers.find((l) => l.kind === 'text');
   assert.ok(tl, 'text.src.psd must contain a text layer');
@@ -268,6 +286,21 @@ test('changing text clears the render cache key, not just the pixels', () => {
   setLayer(textProject, tl.id, { text: { content: 'changed' } });
   assert.equal(tl.renderedKey, null, 'a stale key would return null pixels and hide the layer');
   undo(textProject);
+});
+
+test('a multi-line string survives measure, save and reopen', () => {
+  // The whole round trip: content as a PSD carries it, retyped through a
+  // textarea (whose value is always LF), measured, written to a project file
+  // and read back. One separator has to come out the far end.
+  const tl = textProject.layers.find((l) => l.kind === 'text');
+  setLayer(textProject, tl.id, { text: { content: 'AB\nCD' } });
+
+  const json = JSON.parse(JSON.stringify(toProjectJson(textProject)));
+  setLayer(textProject, tl.id, { text: { content: 'wiped' } });
+  applyProjectJson(textProject, json);
+
+  assert.equal(tl.text.content, 'AB\nCD', 'the break must survive the save file');
+  assert.deepEqual(measure(tl.text).lines, ['AB', 'CD'], 'and still measure as two lines');
 });
 
 test('the UI offers exactly the blend modes the compositor implements', () => {

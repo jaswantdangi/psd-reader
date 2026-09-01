@@ -398,6 +398,47 @@ test('a two-line string measures as two lines', () => {
   assert.equal(layer.h, 50);
 });
 
+test('a PSD line break is normalised to LF on the way in', () => {
+  // Photoshop writes CR. A textarea always hands its value back as LF. If the
+  // model kept both conventions, the same layer would measure as two lines
+  // before the first keystroke and one line after it -- which is exactly the
+  // reported "editing destroys my line breaks". One convention, chosen at the
+  // door: \n, because that is the one the editing surface can produce.
+  //
+  // SYNTHETIC: none of the 21 fixtures contains a multi-line text layer, so
+  // the source node below is hand-built in the shape toLayer() reads.
+  const project = createProject({
+    width: 20, height: 20, warnings: [],
+    children: [{
+      name: 'two lines', left: 0, top: 0, right: 60, bottom: 40,
+      text: {
+        text: 'AB\rCD',
+        style: { fontSize: 20, fillColor: { r: 0, g: 0, b: 0 } },
+        paragraphStyle: { justification: 'left' },
+      },
+    }],
+  }, 'synth.psd');
+
+  const layer = project.layers[0];
+  assert.equal(layer.text.content, 'AB\nCD');
+  assert.equal(layer.text.originalContent, layer.text.content,
+    'normalising one and not the other would report an untouched layer as edited');
+  assert.equal(naturalTextSize(layer.text).height, naturalTextSize({ ...layer.text, content: 'AB\nCD' }).height);
+});
+
+test('a multi-line box does not collapse when the layer is first retyped', () => {
+  // The user-visible bug: the breaks render from the file, then vanish on the
+  // first edit. Retyping with the SAME string must leave the box exactly where
+  // measurement already put it.
+  const project = synth();
+  const layer = insertTextLayer(project, { content: 'AB\nCD', fontSize: 20 });
+  const before = [layer.w, layer.h];
+  retypeText(project, layer.id, { content: 'AB\nCD' });
+  assert.deepEqual([layer.w, layer.h], before, 'a no-op edit must not resize the box');
+  assert.ok(layer.h > naturalTextSize({ ...layer.text, content: 'ABCD' }).height,
+    'two lines stay two lines');
+});
+
 test('retyping grows the box with the string and holds the left edge', () => {
   const project = synth();
   const layer = insertTextLayer(project, { content: 'AB', x: 5, y: 5 });

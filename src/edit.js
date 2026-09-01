@@ -18,6 +18,7 @@ import { projectMask, pixelRect } from './mask.js';
 import { createAdjust } from './adjust/ops.js';
 import { isNeutralAdjust } from './adjust/lut.js';
 import { normaliseRect, sameRect } from './frame/rect.js';
+import { normaliseLineBreaks } from './render.js';
 
 /**
  * Blend modes offered in the UI — every mode the compositor implements, in
@@ -175,8 +176,12 @@ function toLayer(source) {
 
   if (source.text) {
     const style = source.text.style || {};
+    // Photoshop stores line breaks as CR. Normalised HERE, at the one door a
+    // file's string comes through, so nothing downstream has to know that --
+    // see normaliseLineBreaks in render.js for why one convention beats three.
+    const content = normaliseLineBreaks(source.text.text ?? '');
     layer.text = {
-      content: source.text.text ?? '',
+      content,
       fontFamily: FONT_STACKS[0],
       fontSize: Math.round(style.fontSize ?? 24),
       color: rgbToHex(style.fillColor),
@@ -184,8 +189,12 @@ function toLayer(source) {
       italic: false,
       align: source.text.paragraphStyle?.justification === 'center' ? 'center'
         : source.text.paragraphStyle?.justification === 'right' ? 'right' : 'left',
-      /** The string as Photoshop had it — lets us tell whether content actually changed. */
-      originalContent: source.text.text ?? '',
+      /**
+       * The string as Photoshop had it — lets us tell whether content actually
+       * changed. Normalised with `content` and never separately: leaving CR
+       * here would report every untouched multi-line layer as edited.
+       */
+      originalContent: content,
     };
   }
 
@@ -726,7 +735,13 @@ export function applyProjectJson(project, json) {
       visible: saved.visible, opacity: saved.opacity, blendMode: saved.blendMode,
       x: saved.x, y: saved.y, w: saved.w, h: saved.h, rerendered: saved.rerendered,
     });
-    if (saved.text && layer.text) Object.assign(layer.text, saved.text);
+    if (saved.text && layer.text) {
+      Object.assign(layer.text, saved.text);
+      // A project file written before line breaks were normalised can still
+      // carry CR, and it is a file on a device, so it can carry anything.
+      layer.text.content = normaliseLineBreaks(layer.text.content);
+      layer.text.originalContent = normaliseLineBreaks(layer.text.originalContent);
+    }
     if (typeof saved.clipping === 'boolean') layer.clipping = saved.clipping;
     if (typeof saved.groupPath === 'string') layer.groupPath = saved.groupPath;
     // The raster is whatever this load produced; only the toggle is restored.

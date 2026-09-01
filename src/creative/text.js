@@ -40,7 +40,7 @@
  * glyph raster does not run there at all.
  */
 import { setLayer, FONT_STACKS } from '../edit.js';
-import { measureText } from '../render.js';
+import { measureText, splitTextLines, normaliseLineBreaks } from '../render.js';
 import { blankLayer, insertLayer, requireLayer, centreIn } from './layers.js';
 
 const NO_MEASURER =
@@ -68,7 +68,7 @@ export function naturalTextSize(text) {
  * user's own text would claim the file contained something it did not.
  */
 const newText = (options) => ({
-  content: String(options.content ?? ''),
+  content: normaliseLineBreaks(options.content),
   fontFamily: options.fontFamily ?? FONT_STACKS[0],
   fontSize: Math.max(1, Math.round(options.fontSize ?? 24)),
   color: options.color ?? '#000000',
@@ -113,7 +113,7 @@ export function insertTextLayer(project, options = {}) {
 
   const centred = centreIn(project, w, h);
   const layer = blankLayer(project, {
-    name: options.name ?? (text.content.split('\n')[0] || 'Text'),
+    name: options.name ?? (splitTextLines(text.content)[0] || 'Text'),
     kind: 'text',
     visible, opacity, blendMode,
     x: Math.round(options.x ?? centred.x),
@@ -230,6 +230,10 @@ export function retypeText(project, id, changes = {}, coalesceKey) {
   const layer = requireLayer(project, id);
   if (layer.kind !== 'text' || !layer.text)
     throw new Error(`Layer "${layer.name}" is not a text layer.`);
+
+  // A textarea normalises its own value to LF, but a programmatic caller or a
+  // paste need not have. One convention reaches the model, always.
+  if (changes.content !== undefined) changes = { ...changes, content: normaliseLineBreaks(changes.content) };
 
   const before = naturalTextSize(layer.text);
   const after = naturalTextSize({ ...layer.text, ...changes });
