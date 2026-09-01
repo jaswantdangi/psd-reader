@@ -493,3 +493,74 @@ Noticed while building font loading, deliberately not fixed.
   has stem `robotomedium` and does not answer `Roboto-Regular`. Deliberate —
   every added word is a chance to eat a family word — but it means a real family
   can fail to match on a weight nobody thought to list.
+
+---
+
+## Noticed while giving a text box its two operations (2026-09-01)
+
+Resolves the earlier entry **"A text box is a scale target, not a text frame —
+there is no wrapping."** It is now a text frame: `shapeType`/`boxWidth` reach the
+model, `render.js` wraps a paragraph to the author's width, and a corner drag
+re-flows it instead of scaling it. Point text still does not wrap, which is
+correct — it has no box, so there is nothing to wrap to.
+
+- **`boxBounds`' HEIGHT is read and thrown away.** `text-box.src.psd` carries
+  `[0, 0, 128.99352, 49]` and only the width survives into the model. Photoshop
+  CLIPS a paragraph that overflows its box and badges the overflow; we grow the
+  layer downwards instead, so a file whose text already overflows renders text
+  Photoshop was hiding. Nothing in the UI says so. Deliberate — a box that clips
+  needs an overflow affordance to be usable at all, and there is none — but it
+  is a real divergence from the file.
+
+- **Only `left`/`center`/`right` justification survives.** `toLayer` maps
+  `paragraphStyle.justification` through three values; a PSD can also say
+  `justifyLeft`, `justifyCenter`, `justifyRight` and `justifyAll`, all of which
+  land silently on `left`. Full justification is exactly the setting whose
+  absence is most visible in a wrapped paragraph, because every line's right
+  edge moves.
+
+- **`firstLineIndent`, `startIndent`, `endIndent`, `spaceBefore` and
+  `spaceAfter` are all ignored.** They are read from the file into
+  `paragraphStyle` and never reach `layer.text`. Each one moves where the lines
+  break or where they sit, so a paragraph with any of them set is wrapped to the
+  wrong width or spaced wrongly, with no disclosure.
+
+- **The every-line composer is not detected.** `wrapParagraph` is greedy, which
+  is Photoshop's SINGLE-line composer.  `paragraphStyle.everyLineComposer` is
+  `false` in both fixtures, so the corpus cannot tell the difference — a file
+  that asks for the every-line composer gets greedy breaks and no warning.
+
+- **Created text is always point text, and there is no way to convert.** A layer
+  typed into the sheet gets `shapeType: 'point'`, so it can never wrap and its
+  handle drag can only scale. Photoshop offers point ↔ paragraph conversion;
+  this has no control for it, and no way to draw a box in the first place.
+
+- **A refused reflow on the canvas is dropped silently.** `ProjectService.
+  resizeTextBox` returns the engine's message and `canvas-stage.ts` discards it,
+  because the canvas has no error surface. In practice the only refusal reachable
+  from a drag is "no measurer", which cannot happen on the main thread — but the
+  same is true of every other silent path that later turned out to have a second
+  cause.
+
+- **The two shapes have identical handles.** Whether a corner drag will reflow
+  or scale is discoverable only from the text sheet's copy. A different handle
+  shape for a text frame — or edge handles for width and corner handles for
+  scale, which is what Figma and InDesign do — would say it on the canvas, and
+  needs `HANDLES`/`arbitrate` in `src/gesture.js` to grow beyond four corners.
+
+- **"A different type size in the SAME column" exists in the engine and in no
+  UI.** `retypeText(id, { fontSize, boxWidth })` does it in one command and is
+  tested; the Size slider always scales the box, so reaching it from the app
+  takes two gestures (drag Size, then drag the box back).
+
+- **Wrapping costs one `ctx.measureText` per token, per measurement.** Kerning
+  crosses the space between two words, so a cached per-word width is an
+  approximation and this is not. A 60-word paragraph is ~120 measurements per
+  `measureText()` call — once per keystroke and once per `textPixelsAt` cache
+  miss, NOT once per frame. It has not been measured on a phone.
+
+- **No browser-level pixel test covers a wrapped paragraph either.** The Node
+  stub advances a flat 10px per character at every size, where a real face
+  advances proportionally to the em. So the "scale preserves the wrap" claim is
+  asserted on the ratio the breaks are derived from and never on the breaks
+  themselves; only a browser can close that gap.
