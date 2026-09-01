@@ -302,3 +302,51 @@ has to learn the frame exists.
   the sentence and nothing calls it. `createProject` collects warnings for
   flattened groups, unapplied clipping and vector masks; a crop that hides three
   layers says nothing until some UI asks.
+
+## Noticed while fixing the text-distortion bug (2026-09-01)
+
+The bug itself is fixed (`rasteriseTextAt` scales by one factor; `retypeText`
+re-fits a PSD text layer's box to our own measurement on the first edit). What
+it exposed and this change did not touch:
+
+- **`measureText`'s height is a convention, not a font metric.**
+  `lines * round(fontSize * 1.25)` is where the units mismatch comes from:
+  Photoshop's box is the INK extent of the glyphs, ours is a synthetic line box.
+  For "TEST" at 30px in `fixtures/text.src.psd` that is 21 against 38. Canvas
+  exposes `actualBoundingBoxAscent/Descent` and `fontBoundingBoxAscent/Descent`;
+  using them would make the two boxes the same KIND of quantity and let the
+  Photoshop-to-live re-fit be exact rather than the "centre the new box on the
+  old one" heuristic it is now. Not done because it changes the box of every
+  existing text layer, created ones included, and both test stubs
+  (`test/edit.mjs`, `test/creative.mjs`) would need real metrics to stay
+  meaningful.
+
+- **The PSD's typeface is still never read.** `toLayer` hardcodes
+  `fontFamily: FONT_STACKS[0]`, `bold: false`, `italic: false` for every text
+  layer, so a correctly-sized box still redraws in the wrong face. Disclosed in
+  the text sheet; nothing fixes it. It also means our measured width is the
+  width of OUR font, so the re-fitted box is right for what we draw and not for
+  what the file contained.
+
+- **PSD leading is ignored.** Line height is always `1.25 * fontSize` whatever
+  the file's `leading`/`autoLeading` says, so the re-fit of a multi-line PSD
+  text layer can be well off vertically. `fixtures/text.src.psd` is
+  single-line, so no test in the suite would catch it.
+
+- **The text layer's transform matrix is not applied to `fontSize`.** `toLayer`
+  reads `style.fontSize` raw. PSD text can carry a scale in its transform, so a
+  scaled text layer re-renders at the wrong size however good the box maths is.
+
+- **A text box is a scale target, not a text frame — there is no wrapping.** A
+  box dragged narrower than the string scales the whole line down uniformly
+  instead of wrapping it. Nothing in the UI says so.
+
+- **`arbitrate` hit-tests handles against the layer's CURRENT box while a scale
+  drag now starts from `liveTextRect`.** On the very first drag of a PSD text
+  layer the grabbed corner and the anchor corner differ by the re-fit. One-time
+  and small next to the re-fit itself, but it is a real discontinuity.
+
+- **No browser-level pixel test for text exists anywhere in the suite.** Both
+  stubs return transparent `getImageData`, so no assertion in this repo has ever
+  looked at a glyph. Every claim about text APPEARANCE, before and after this
+  change, rests on transform arithmetic alone.
