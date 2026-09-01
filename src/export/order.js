@@ -25,6 +25,30 @@ export function isSelfRendering(layer) {
   return layer.kind === 'text' && layer.rerendered === true;
 }
 
+/**
+ * A layer the walk must NOT wait for, because no arrival will ever carry its
+ * pixels. Two ways to be one, and they are the same fact seen twice:
+ *
+ *   - re-rendered text generates its own glyphs at the final size;
+ *   - an inserted sticker or a replaced image already HOLDS its own
+ *     full-resolution pixels — it never came from the file, so `sourceIndex`
+ *     is null and nothing is coming for it.
+ *
+ * `selfSupplied` is a stamped flag, not something inferred from `pixels &&
+ * sourceIndex === null`. Every layer of an EAGERLY read project matches that
+ * shape too, and so does a proxy-loaded layer whose 256-edge buffer would be
+ * upscaled into a correctly-sized, blurred image at scale 1 — the exact failure
+ * stream.js exists to prevent. Only the code that PUT full-resolution pixels on
+ * a layer knows they are full resolution, so only it sets the flag.
+ *
+ * The `pixels` check is not belt-and-braces: a flagged layer with nothing in it
+ * would sail past assertIdentifiable and then draw nothing, which is a silent
+ * missing layer rather than a refused export.
+ */
+export function drawsOwnPixels(layer) {
+  return isSelfRendering(layer) || (layer.selfSupplied === true && !!layer.pixels);
+}
+
 /** The layers export will actually draw, bottom to top. */
 export function buildExportOrder(project) {
   return project.layers.filter((layer) => layer.visible && layer.opacity > 0);
@@ -34,7 +58,7 @@ export function buildExportOrder(project) {
 export function wantedIndices(order) {
   const wanted = new Set();
   for (const layer of order)
-    if (!isSelfRendering(layer) && typeof layer.sourceIndex === 'number')
+    if (!drawsOwnPixels(layer) && typeof layer.sourceIndex === 'number')
       wanted.add(layer.sourceIndex);
   return wanted;
 }
@@ -46,7 +70,7 @@ export function wantedIndices(order) {
  */
 export function assertIdentifiable(order) {
   for (const layer of order) {
-    if (isSelfRendering(layer)) continue;
+    if (drawsOwnPixels(layer)) continue;
     if (typeof layer.sourceIndex !== 'number')
       throw new ExportError(
         `Layer "${layer.name}" has no sourceIndex, so export cannot match it back to the file. ` +
@@ -60,7 +84,7 @@ export function assertIdentifiable(order) {
 export function isFastPath(order) {
   let last = -1;
   for (const layer of order) {
-    if (isSelfRendering(layer)) continue;
+    if (drawsOwnPixels(layer)) continue;
     if (layer.sourceIndex <= last) return false;
     last = layer.sourceIndex;
   }
@@ -88,7 +112,7 @@ export function planSpill(order) {
   const drain = () => {
     while (need < order.length) {
       const layer = order[need];
-      if (isSelfRendering(layer)) { need++; continue; }
+      if (drawsOwnPixels(layer)) { need++; continue; }
       if (!parked.has(layer.sourceIndex)) break;
       parked.delete(layer.sourceIndex);
       need++;
@@ -98,7 +122,7 @@ export function planSpill(order) {
   drain();
   for (const index of arrivals) {
     const next = order[need];
-    if (next && !isSelfRendering(next) && next.sourceIndex === index) { need++; drain(); }
+    if (next && !drawsOwnPixels(next) && next.sourceIndex === index) { need++; drain(); }
     else { parked.add(index); spill.push(index); }
   }
 

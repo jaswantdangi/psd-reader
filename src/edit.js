@@ -121,6 +121,19 @@ function toLayer(source) {
      */
     sourceIndex: source.sourceIndex ?? null,
     /**
+     * `pixels` is this layer's own FULL-RESOLUTION material and did not come
+     * from the file — an inserted sticker, or an image the user replaced. False
+     * for anything read out of a PSD, including an eager read, which is the
+     * whole reason this is a stamped flag rather than `pixels && sourceIndex
+     * === null`: that shape also describes every eagerly-read layer and every
+     * proxy-loaded one, whose 256-edge buffer must NOT be blended at scale 1.
+     *
+     * Export reads it through `drawsOwnPixels()` and blends such a layer from
+     * what it already holds instead of awaiting an arrival that never comes.
+     * Only code that puts full-resolution pixels on a layer may set it.
+     */
+    selfSupplied: false,
+    /**
      * Layer mask as a 0..255 coverage plane on exactly the `pixels` grid, or
      * null. blendInto has always accepted one; nothing ever supplied it, which
      * is why masked documents rendered correctly in the inspector and wrong in
@@ -330,6 +343,21 @@ function applyCommand(project, command) {
   } else if (command.type === 'reorder') {
     const [moved] = project.layers.splice(command.from, 1);
     project.layers.splice(command.to, 0, moved);
+  } else if (command.type === 'insert') {
+    // The command holds the LAYER OBJECT, not a description of one. Rebuilding
+    // it would mint a fresh id on every redo, and both the panel's selection
+    // and the sandwich cache's slice boundaries name layers by id -- they would
+    // silently start pointing at nothing. Holding the object also keeps the
+    // pixel buffer alive, which is the only way undoing a delete can put the
+    // picture back.
+    const at = Math.max(0, Math.min(project.layers.length, command.index));
+    project.layers.splice(at, 0, command.layer);
+  } else if (command.type === 'remove') {
+    // By id, not by `command.index`: an insert or a reorder between the remove
+    // and its undo shifts the array, and the recorded index would then delete
+    // the wrong layer. The index is only used to put it BACK.
+    const at = project.layers.findIndex((l) => l.id === command.layer.id);
+    if (at >= 0) project.layers.splice(at, 1);
   }
 
   /**
@@ -344,6 +372,8 @@ function applyCommand(project, command) {
 }
 
 function invert(command) {
+  if (command.type === 'insert') return { ...command, type: 'remove' };
+  if (command.type === 'remove') return { ...command, type: 'insert' };
   return command.type === 'set'
     ? { ...command, to: command.from, from: command.to }
     : { ...command, from: command.to, to: command.from };

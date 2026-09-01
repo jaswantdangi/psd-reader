@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { readDocument } from '../src/reader.js';
 import { createProject, setLayer, undo, redo, findLayer, FONT_STACKS } from '../src/edit.js';
 import { renderProject } from '../src/render.js';
-import { buildExportOrder, assertIdentifiable, isSelfRendering, wantedIndices } from '../src/export/order.js';
+import { buildExportOrder, assertIdentifiable, isSelfRendering, drawsOwnPixels, wantedIndices } from '../src/export/order.js';
 import {
   removeLayer, nextLayerId,
   naturalTextSize, insertTextLayer, retypeText,
@@ -115,9 +115,80 @@ test('nextLayerId is derived from the project, not a module counter', () => {
   assert.equal(nextLayerId(project), 501);
 });
 
+console.log('\ninsert and remove are commands\n');
+
+test('an inserted layer can be undone and redone, and keeps its id', () => {
+  const project = synth();
+  const layer = insertImageLayer(project, { pixels: solid(4, 4, [255, 0, 0, 255]) });
+  const id = layer.id;
+  assert.equal(project.history.length, 1, 'adding a sticker must be a history entry, not a silent mutation');
+
+  assert.equal(undo(project), true);
+  assert.equal(project.layers.length, 1, 'undo must take the sticker back out');
+  assert.equal(findLayer(project, id), null);
+
+  assert.equal(redo(project), true);
+  assert.equal(project.layers.length, 2);
+  // Same id, not a fresh one: the panel's selection and the sandwich cache's
+  // slice boundaries both name layers by id, and a renumbered layer points
+  // them at something else.
+  assert.equal(project.layers[1].id, id, 'a re-inserted layer must be the SAME layer, not a copy with a new id');
+  assert.equal(findLayer(project, id), layer);
+});
+
+test('undo puts a removed layer back where it was, with its pixels', () => {
+  const project = synth();
+  const bottom = insertImageLayer(project, { pixels: solid(4, 4, [0, 0, 255, 255]), index: 0 });
+  const pixels = bottom.pixels;
+
+  const removed = removeLayer(project, bottom.id);
+  assert.equal(removed.index, 0);
+  assert.equal(project.layers.length, 1);
+
+  assert.equal(undo(project), true);
+  assert.equal(project.layers.length, 2);
+  assert.equal(project.layers[0].id, bottom.id, 'it must come back at index 0, not on top');
+  assert.equal(project.layers[0].pixels, pixels, 'undo of a delete has to restore the buffer, not an empty layer');
+
+  assert.equal(redo(project), true);
+  assert.equal(project.layers.length, 1);
+});
+
+test('a structural command moves both counters exactly once per step', () => {
+  const project = synth();
+  const revision = project.revision, mutation = project.mutation;
+
+  insertImageLayer(project, { pixels: solid(2, 2, [1, 1, 1, 255]) });
+  assert.deepEqual([project.revision, project.mutation], [revision + 1, mutation + 1]);
+
+  undo(project);
+  assert.deepEqual([project.revision, project.mutation], [revision + 2, mutation + 2],
+    'undo bumps revision itself -- it calls applyCommand, not commit');
+
+  redo(project);
+  assert.deepEqual([project.revision, project.mutation], [revision + 3, mutation + 3]);
+});
+
+test('inserting after an undo clears the redo stack', () => {
+  const project = synth();
+  const first = insertImageLayer(project, { pixels: solid(2, 2, [1, 1, 1, 255]) });
+  undo(project);
+  assert.equal(project.future.length, 1);
+
+  const second = insertImageLayer(project, { pixels: solid(2, 2, [2, 2, 2, 255]) });
+  assert.equal(project.future.length, 0, 'a new action must not leave the old branch reachable');
+  assert.equal(redo(project), false);
+  assert.equal(project.layers.length, 2);
+  assert.equal(project.layers[1], second, 'the undone layer must not come back');
+  assert.notEqual(project.layers[1], first);
+  // `second` reuses `first`'s id, because nextLayerId reads the LIVE stack and
+  // `first` is no longer in it. Harmless: history is linear, so the abandoned
+  // layer can never be spliced back in beside its namesake.
+});
+
 console.log('\nsourceIndex identity\n');
 
-test('an inserted image layer has no sourceIndex, and export refuses it loudly', () => {
+test('an inserted image layer has no sourceIndex, and supplies its own pixels instead', () => {
   const project = synth();
   // A streamed load stamps this; an eager one leaves it null. Stamp it by hand
   // so the file layer is identifiable and the INSERTED layer is the only one
@@ -126,11 +197,13 @@ test('an inserted image layer has no sourceIndex, and export refuses it loudly',
   const layer = insertImageLayer(project, { pixels: solid(4, 4, [255, 0, 0, 255]) });
 
   assert.equal(layer.sourceIndex, null, 'a number here would be matched to some other layer\'s pixels');
+  assert.equal(layer.selfSupplied, true, 'it never came from the file, so nothing will ever arrive for it');
+  assert.equal(drawsOwnPixels(layer), true);
   assert.equal(wantedIndices(buildExportOrder(project)).has(null), false);
-  assert.throws(
+  assert.equal(wantedIndices(buildExportOrder(project)).size, 1, 'only the file layer is awaited');
+  assert.doesNotThrow(
     () => assertIdentifiable(buildExportOrder(project)),
-    /has no sourceIndex/,
-    'export must refuse rather than draw a plausible wrong image',
+    'a layer holding its own full-resolution pixels needs no identity in the file',
   );
 });
 
@@ -153,7 +226,34 @@ test('replacing an image drops sourceIndex, so export cannot serve the old pictu
   replaceImage(project, layer.id, { pixels: solid(4, 4, [0, 255, 0, 255]) });
 
   assert.equal(layer.sourceIndex, null, 'keeping it would re-fetch the file\'s ORIGINAL pixels at export');
-  assert.throws(() => assertIdentifiable(buildExportOrder(project)), /has no sourceIndex/);
+  assert.equal(layer.selfSupplied, true, 'the NEW pixels are the full-resolution material now');
+  assert.equal(wantedIndices(buildExportOrder(project)).size, 0, 'the file has nothing this project wants');
+  assert.doesNotThrow(() => assertIdentifiable(buildExportOrder(project)));
+});
+
+test('undoing a replace restores the file identity as well as the pixels', () => {
+  const project = synth();
+  const layer = project.layers[0];
+  layer.sourceIndex = 0;
+  const original = layer.pixels;
+  replaceImage(project, layer.id, { pixels: solid(4, 4, [0, 255, 0, 255]) });
+
+  undo(project);
+  assert.equal(layer.pixels, original);
+  assert.equal(layer.sourceIndex, 0, 'the layer is the file\'s again, so export must await its arrival');
+  assert.equal(layer.selfSupplied, false, 'a stale flag here would blend PROXY pixels at full resolution');
+  assert.deepEqual([...wantedIndices(buildExportOrder(project))], [0]);
+});
+
+test('a layer whose pixels are only a proxy is never treated as self-supplying', () => {
+  // The trap the whole flag exists for: a file layer under a proxy load holds a
+  // 256-edge buffer for a 1080px layer. Blending that at scale 1 upscales a
+  // thumbnail into a correctly-sized, blurred image -- the failure stream.js
+  // exists to prevent, and the one that looks like it worked.
+  const project = synth();
+  project.layers[0].sourceIndex = 0;
+  assert.equal(project.layers[0].selfSupplied, false);
+  assert.equal(drawsOwnPixels(project.layers[0]), false, 'it has pixels, but they are the file\'s to re-supply');
 });
 
 console.log('\nimage layers\n');

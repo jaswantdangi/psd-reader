@@ -10,22 +10,18 @@
  * here. `blankLayer()` below is therefore a mirror of `toLayer()` in edit.js
  * and test/creative.mjs pins the two field sets together.
  *
- * ## Insertion is NOT on the undo stack
+ * ## Insertion IS on the undo stack
  *
- * `edit.js`'s `applyCommand` understands exactly two command types, `set` and
- * `reorder`, and this module deliberately does not edit that file. A `commit()`
- * of an unknown command type would push a history entry that undoes to nothing
- * — a dead press of the undo button that silently swallows a step — which is
- * strictly worse than not being on the stack at all.
+ * `edit.js` grew `insert` and `remove` command types, so adding a sticker and
+ * deleting a layer are ordinary history entries: `commit` pushes them, `invert`
+ * turns each straight into the other, and undo/redo replays them like any set
+ * or reorder. There is one command model and one undo stack.
  *
- * So `insertLayer` and `removeLayer` are structural, like `createProject`
- * itself: they mutate the stack, bump both counters, and clear the redo stack
- * the way any new action does. `removeLayer` is the exact inverse and returns
- * the index it removed from, so a caller with its own stack can reverse it.
- * Everything that changes a layer already in the stack — `replaceImage`,
- * `retypeText` — goes through `setLayer` and IS undoable.
+ * The command carries the LAYER OBJECT rather than a description of one, which
+ * is what makes ids stable across an undo/redo cycle and what keeps the pixel
+ * buffer of a deleted layer alive long enough to restore it.
  */
-import { findLayer } from '../edit.js';
+import { findLayer, commit } from '../edit.js';
 
 /**
  * An id no layer in this project is using.
@@ -48,8 +44,9 @@ export function nextLayerId(project) {
  * decision for created layers: the export walk matches decoded arrivals to
  * project layers on `sourceIndex` and nothing else, so any number here would
  * claim some other layer's pixels and shift every layer after it — a plausible
- * wrong image with a green suite. `null` instead makes `assertIdentifiable()`
- * refuse the export by name, which is the failure the user can act on.
+ * wrong image with a green suite. A layer that then carries its OWN
+ * full-resolution pixels sets `selfSupplied` too, and export blends it from
+ * what it holds instead of awaiting an arrival that will never come.
  *
  * @param {object} project
  * @param {object} fields  overrides applied on top of the defaults
@@ -67,6 +64,7 @@ export function blankLayer(project, fields = {}) {
     sourceW: 1, sourceH: 1,
     proxyW: 1, proxyH: 1,
     sourceIndex: null,
+    selfSupplied: false,
     mask: null,
     clipping: false,
     groupPath: '',
@@ -82,35 +80,30 @@ export function blankLayer(project, fields = {}) {
 /**
  * Put a layer into the stack. `index` 0 is the bottom; the default is the top.
  *
- * Bumps `revision` as well as `mutation`: the sandwich cache keys on
- * `revision`, and a stack that gained a layer must not be served from a cache
- * built before it existed.
+ * Goes through `commit`, so it is an ordinary undo step: `revision` moves once
+ * (the sandwich cache keys on it, and a stack that gained a layer must not be
+ * served from a cache built before it existed), `mutation` moves once inside
+ * `applyCommand`, and `future` is cleared because a new action always is a new
+ * branch.
  */
 export function insertLayer(project, layer, index = project.layers.length) {
   const at = Math.max(0, Math.min(project.layers.length, Math.round(index)));
-  project.layers.splice(at, 0, layer);
-  project.future.length = 0;
-  project.revision = (project.revision ?? 0) + 1;
-  project.mutation = (project.mutation ?? 0) + 1;
+  commit(project, { type: 'insert', layer, index: at });
   return layer;
 }
 
 /**
- * Take a layer back out. The exact inverse of `insertLayer`.
- *
- * History entries naming the removed layer become no-ops rather than errors —
- * `applyCommand` looks the id up and returns when it is gone — so undoing past
- * a removal is safe but cannot resurrect it.
+ * Take a layer back out. The exact inverse of `insertLayer`, and undoable:
+ * `invert` turns the `remove` command straight back into the `insert` that
+ * restores this same layer object — same id, same pixels — at `index`.
  *
  * @returns {{layer: object, index: number} | null} null when no layer has that id
  */
 export function removeLayer(project, id) {
   const index = project.layers.findIndex((l) => l.id === id);
   if (index < 0) return null;
-  const [layer] = project.layers.splice(index, 1);
-  project.future.length = 0;
-  project.revision = (project.revision ?? 0) + 1;
-  project.mutation = (project.mutation ?? 0) + 1;
+  const layer = project.layers[index];
+  commit(project, { type: 'remove', layer, index });
   return { layer, index };
 }
 

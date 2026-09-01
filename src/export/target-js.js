@@ -11,6 +11,7 @@
 import { createBuffer } from '../composite.js';
 import { drawLayerInto } from '../render.js';
 import { ExportError } from './errors.js';
+import { drawsOwnPixels } from './order.js';
 import { createScratch, releaseScratch } from '../adjust/scratch.js';
 
 export function createJsExportTarget(width, height) {
@@ -33,12 +34,22 @@ export function createJsExportTarget(width, height) {
   return {
     /**
      * @param {object} layer   Geometry in DOCUMENT coordinates, drawn at scale 1.
-     * @param {object|null} pixels  Full-resolution pixels, or null for a layer
-     *   that draws itself (re-rendered text) or has none at all.
+     * @param {object|null} pixels  Full-resolution pixels streamed from the
+     *   file, or null for a layer that draws itself or has none at all.
      */
     blend(layer, pixels) {
+      // A self-supplied layer -- an inserted sticker, a replaced image -- has
+      // no arrival, so `pixels` is null for it. Its own buffer IS the
+      // full-resolution material, so blend that.
+      //
+      // Narrowly gated on the flag, NOT on `pixels === null`. A blanket
+      // fallback to layer.pixels would silently serve the PROXY buffer for any
+      // file layer that failed to arrive, upscaling a 256-edge thumbnail into a
+      // correctly-sized blurred layer -- which is the one failure this whole
+      // module exists to prevent.
+      const source = pixels === null && drawsOwnPixels(layer) ? (layer.pixels ?? null) : pixels;
       drawLayerInto(dest, layer, 1, {
-        pixels,
+        pixels: source,
         scratch,
         onMissing: (missing, reason) => {
           if (reason === 'text')

@@ -17,7 +17,7 @@
  */
 import { readDocument } from '../reader.js';
 import { ExportError } from './errors.js';
-import { buildExportOrder, wantedIndices, assertIdentifiable, isSelfRendering } from './order.js';
+import { buildExportOrder, wantedIndices, assertIdentifiable, drawsOwnPixels } from './order.js';
 import { spillHeader, decodeSpill } from './spill.js';
 import { phaseFraction } from './progress.js';
 import { createJsExportTarget } from './target-js.js';
@@ -76,13 +76,19 @@ export async function exportFullRes(options) {
 
   /**
    * Satisfy every layer that can be satisfied right now, in blend order:
-   * self-rendering text draws itself, and anything already on disk comes back.
+   * a layer that draws its own pixels -- re-rendered text, or an inserted or
+   * replaced image that already holds its full-resolution buffer -- needs
+   * nothing from the file, and anything already on disk comes back.
    * Stops at the first layer that still has to arrive from the stream.
+   *
+   * `blend(layer, null)` is what advances `need` past a self-supplying layer.
+   * It has NO arrival, so waiting for one would park every layer behind it and,
+   * once the stream ended, fail the INCOMPLETE check with nothing to blame.
    */
   const drain = async (phase) => {
     while (need < order.length) {
       const layer = order[need];
-      if (isSelfRendering(layer)) { blend(layer, null); continue; }
+      if (drawsOwnPixels(layer)) { blend(layer, null); continue; }
       if (!parked.has(layer.sourceIndex)) break;
 
       const name = nameFor(layer.sourceIndex);
@@ -126,9 +132,10 @@ export async function exportFullRes(options) {
             'SOURCE_MISMATCH',
           );
         report('parse', 0, 0);
-        // A self-rendering text layer at the bottom of the stack has to be
-        // drawn before the first arrival, or `need` never points at anything
-        // the stream can satisfy and every arrival would be parked.
+        // A self-supplying layer at the bottom of the stack -- re-rendered text
+        // or an inserted sticker -- has to be drawn before the first arrival,
+        // or `need` never points at anything the stream can satisfy and every
+        // arrival would be parked.
         await drain('layers');
       },
 
@@ -137,7 +144,7 @@ export async function exportFullRes(options) {
         seen.add(node.sourceIndex);
 
         const next = order[need];
-        if (next && !isSelfRendering(next) && next.sourceIndex === node.sourceIndex) {
+        if (next && !drawsOwnPixels(next) && next.sourceIndex === node.sourceIndex) {
           // Arrival order is blend order for this layer. Blend it now, release
           // it, and take anything the drain can now finish.
           blend(next, image || null);

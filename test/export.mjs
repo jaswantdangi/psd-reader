@@ -14,6 +14,10 @@ import {
   SPILL_ROOT, newExportId, spillDirFor, sweepSpillDirectories,
   BRIDGE_CHUNK_BYTES, chunkRanges, bytesToBase64,
 } from '../src/index.js';
+// Direct imports: src/index.js is a shared barrel and other work is landing in
+// it. A missing re-export there is not a failure of this code.
+import { drawsOwnPixels } from '../src/export/order.js';
+import { insertImageLayer } from '../src/creative/index.js';
 
 let passed = 0;
 const test = (name, fn) => {
@@ -28,6 +32,22 @@ const atest = async (name, fn) => {
 
 const bytesOf = (path) => new Uint8Array(fs.readFileSync(path));
 const img = (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) });
+
+/**
+ * A 200x200 sticker: opaque on the left half, 50% alpha on the right, so a
+ * dropped alpha or a resample would both show up in the oracle comparison.
+ * A fresh buffer every call -- nothing may share one with the layer under test.
+ */
+const sticker200 = () => {
+  const s = img(200, 200);
+  for (let y = 0; y < 200; y++)
+    for (let x = 0; x < 200; x++) {
+      const i = (y * 200 + x) * 4;
+      s.data[i] = 240; s.data[i + 1] = 90; s.data[i + 2] = 30;
+      s.data[i + 3] = x < 100 ? 255 : 128;
+    }
+  return s;
+};
 
 console.log('\nlayer identity\n');
 
@@ -138,6 +158,8 @@ const orderOf = (...specs) => specs.map((s, i) => ({
   opacity: s.opacity ?? 1,
   rerendered: s.rerendered ?? false,
   sourceIndex: s.sourceIndex,
+  selfSupplied: s.selfSupplied ?? false,
+  pixels: s.pixels ?? null,
 }));
 const projectOf = (...specs) => ({ width: 10, height: 10, layers: orderOf(...specs) });
 
@@ -177,6 +199,53 @@ test('an UNTOUCHED Photoshop text layer is a raster and IS awaited from the file
 test('a layer with no identity is refused before a single byte is read', () => {
   const order = buildExportOrder(projectOf({ sourceIndex: null, name: 'orphan' }));
   assert.throws(() => assertIdentifiable(order), (e) => e.code === 'NO_IDENTITY' && /orphan/.test(e.message));
+});
+
+test('a self-supplied layer needs no identity and is never awaited from the file', () => {
+  // An inserted sticker or a replaced image. It never came from the file, so
+  // no arrival will ever carry its pixels -- it already holds them.
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 0 },
+    { sourceIndex: null, name: 'sticker', selfSupplied: true, pixels: img(4, 4) },
+  ));
+  assert.equal(drawsOwnPixels(order[1]), true);
+  assert.doesNotThrow(() => assertIdentifiable(order));
+  assert.deepEqual([...wantedIndices(order)], [0], 'index null must not be requested from the stream');
+});
+
+test('the self-supplied flag alone is not enough — there have to be pixels', () => {
+  const order = buildExportOrder(projectOf({ sourceIndex: null, name: 'empty', selfSupplied: true }));
+  assert.equal(drawsOwnPixels(order[0]), false);
+  assert.throws(() => assertIdentifiable(order), (e) => e.code === 'NO_IDENTITY');
+});
+
+test('a file layer holding PROXY pixels is not self-supplying', () => {
+  // The whole point of the flag. Every proxy-loaded layer has `pixels`; blending
+  // a 256-edge buffer at scale 1 upscales a thumbnail into a correctly-sized,
+  // blurred layer, which is the failure this module exists to prevent.
+  const order = buildExportOrder(projectOf({ sourceIndex: 0, pixels: img(256, 256) }));
+  assert.equal(drawsOwnPixels(order[0]), false);
+  assert.deepEqual([...wantedIndices(order)], [0]);
+});
+
+test('a self-supplied layer at the bottom does not park the stack behind it', () => {
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: null, selfSupplied: true, pixels: img(4, 4) },
+    { sourceIndex: 0 }, { sourceIndex: 1 },
+  ));
+  assert.equal(isFastPath(order), true, '`need` must step past it without waiting, exactly as it does for text');
+  assert.deepEqual(planSpill(order).spill, []);
+});
+
+test('a self-supplied layer in the middle of a reorder does not change what spills', () => {
+  const withSticker = buildExportOrder(projectOf(
+    { sourceIndex: 2 },
+    { sourceIndex: null, selfSupplied: true, pixels: img(4, 4) },
+    { sourceIndex: 0 }, { sourceIndex: 1 },
+  ));
+  const without = buildExportOrder(projectOf({ sourceIndex: 2 }, { sourceIndex: 0 }, { sourceIndex: 1 }));
+  assert.deepEqual(planSpill(withSticker).spill, planSpill(without).spill);
+  assert.deepEqual(planSpill(withSticker).spill, [0, 1]);
 });
 
 test('untouched order is the fast path and spills nothing', () => {
@@ -434,6 +503,30 @@ await atest('the spill path parks exactly what planSpill predicted', async () =>
   assert.deepEqual(spill.writes, ['0.rgba', '1.rgba', '2.rgba']);
 });
 
+await atest('an inserted sticker exports without ever being awaited from the file', async () => {
+  const project = await openProxy();
+  const sticker = insertImageLayer(project, { pixels: sticker200(), name: 'sticker' });
+  assert.equal(sticker.sourceIndex, null);
+
+  const spill = createMemorySpill();
+  const out = await runExport(project, spill);
+  assert.equal(out.width, 1080, 'the sticker must not have blocked the export');
+  assert.deepEqual(spill.writes, [], 'nothing arrives for it, so nothing behind it may park');
+});
+
+await atest('a sticker under a reorder still parks exactly what planSpill predicted', async () => {
+  const project = await openProxy();
+  // Sticker at the BOTTOM: `need` points at a layer no arrival can satisfy, so
+  // if the walk waited for it every single arrival would spill.
+  insertImageLayer(project, { pixels: sticker200(), name: 'sticker', index: 0 });
+  reorderLayer(project, 4, 1);                 // top file layer to the bottom of the file layers
+  const spill = createMemorySpill();
+  await runExport(project, spill);
+  const expected = planSpill(buildExportOrder(project)).spill.map((i) => `${i}.rgba`);
+  assert.deepEqual(spill.writes, expected,
+    'the walk and the plan must agree, or one of them is wrong and nothing would notice');
+});
+
 await atest('every spill file is gone when the export succeeds', async () => {
   const project = await openProxy();
   reorderLayer(project, 3, 0);
@@ -560,6 +653,33 @@ await atest('a reordered export matches — this is the spill path under test', 
   const spill = createMemorySpill();
   matches(await runExport(proxy, spill), renderProject(eager, { scale: 1 }));
   assert.deepEqual(spill.writes, ['0.rgba', '1.rgba', '2.rgba'], 'the spill path really was exercised');
+});
+
+await atest('an inserted sticker exports at FULL resolution, in its stack position', async () => {
+  // The strongest form of the question: the export output has to be identical
+  // to the same document composited at scale 1 from full-resolution pixels.
+  // A sticker dropped, drawn at proxy scale, or blended out of order fails here.
+  const proxy = await openProxy();
+  const eager = await openEager();
+  for (const project of [proxy, eager])
+    insertImageLayer(project, { pixels: sticker200(), name: 'sticker', x: 300, y: 400, index: 2 });
+
+  const spill = createMemorySpill();
+  matches(await runExport(proxy, spill), renderProject(eager, { scale: 1 }));
+  assert.deepEqual(spill.writes, [], 'the sticker sits in arrival order, so nothing needs parking');
+});
+
+await atest('a reordered export with a sticker matches, spill path and all', async () => {
+  const proxy = await openProxy();
+  const eager = await openEager();
+  for (const project of [proxy, eager]) {
+    insertImageLayer(project, { pixels: sticker200(), name: 'sticker', x: 100, y: 100, index: 0 });
+    reorderLayer(project, 4, 1);
+  }
+
+  const spill = createMemorySpill();
+  matches(await runExport(proxy, spill), renderProject(eager, { scale: 1 }));
+  assert.ok(spill.writes.length > 0, 'the spill path really was exercised');
 });
 
 await atest('a transform re-applies to FULL-RESOLUTION pixels, not the proxy', async () => {

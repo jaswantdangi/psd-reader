@@ -86,6 +86,10 @@ export function insertImageLayer(project, options = {}) {
     pixels,
     sourceW: pixels.width, sourceH: pixels.height,
     proxyW: pixels.width, proxyH: pixels.height,
+    // These pixels ARE the full-resolution material -- there is no file copy to
+    // re-read, and no arrival is ever coming for this layer. Export blends what
+    // is here, in this stack position, and steps its `need` pointer past it.
+    selfSupplied: true,
   });
 
   return insertLayer(project, layer, index);
@@ -97,9 +101,10 @@ export function insertImageLayer(project, options = {}) {
  * **It clears `sourceIndex`, and that is the point.** Export re-reads the
  * original PSD and matches arrivals to layers on `sourceIndex`; a replaced
  * layer that kept its index would export the picture the user just got rid of,
- * at full resolution, looking entirely correct. Dropping it makes
- * `assertIdentifiable()` refuse the export and name the layer instead. Loud and
- * wrong beats quiet and wrong.
+ * at full resolution, looking entirely correct. It sets `selfSupplied` in the
+ * same breath, so export blends the NEW buffer — which is the full-resolution
+ * material now — instead of awaiting an arrival for a layer the file no longer
+ * describes.
  *
  * Goes through `setLayer`, so it is one undo step. The outgoing buffer is
  * captured by reference in the command's `from` and is never written into —
@@ -131,8 +136,12 @@ export function replaceImage(project, id, options = {}) {
     pixels,
     sourceW: pixels.width, sourceH: pixels.height,
     proxyW: pixels.width, proxyH: pixels.height,
-    // No longer the file's layer. See the note above.
+    // No longer the file's layer. See the note above. The two fields move
+    // together and are captured together in the command's `from`, so undo puts
+    // BOTH back -- a restored sourceIndex with a stale `selfSupplied: true`
+    // would blend the proxy buffer at full resolution.
     sourceIndex: null,
+    selfSupplied: true,
     // Drop the cache KEY as well as the pixels: hitTest reads `rendered` in
     // preference to `pixels`, so a stale one hit-tests against the old image.
     rendered: null,
