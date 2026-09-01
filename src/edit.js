@@ -19,6 +19,9 @@ import { createAdjust } from './adjust/ops.js';
 import { isNeutralAdjust } from './adjust/lut.js';
 import { normaliseRect, sameRect } from './frame/rect.js';
 import { normaliseLineBreaks } from './render.js';
+import {
+  FONT_STACKS, textTransformOf, effectiveFontSize, sourceFontName, fontStackFor,
+} from './engine-data.js';
 
 /**
  * Blend modes offered in the UI — every mode the compositor implements, in
@@ -40,18 +43,12 @@ export const BLEND_MODES = [
   'hue', 'saturation', 'color', 'luminosity',
 ];
 
-/** Photoshop's font names are unreliable (often the placeholder `AdobeInvisFont`). */
-export const FONT_STACKS = [
-  'Arial, Helvetica, sans-serif',
-  'Helvetica, Arial, sans-serif',
-  '"Segoe UI", system-ui, sans-serif',
-  'Verdana, Geneva, sans-serif',
-  'Tahoma, sans-serif',
-  '"Times New Roman", Times, serif',
-  'Georgia, serif',
-  '"Courier New", Courier, monospace',
-  'Impact, sans-serif',
-];
+/**
+ * The stacks the renderer can draw. Defined in engine-data.js next to the
+ * substitution rule that picks between them, and re-exported here because this
+ * is where every caller already imports it from.
+ */
+export { FONT_STACKS } from './engine-data.js';
 
 const rgbToHex = (c) =>
   c ? '#' + [c.r, c.g, c.b].map((v) => Math.round(v ?? 0).toString(16).padStart(2, '0')).join('') : '#000000';
@@ -87,7 +84,68 @@ function maskOf(source, pixelSource) {
   };
 }
 
-function toLayer(source) {
+/**
+ * The parts of a text transform this renderer cannot express, said out loud.
+ *
+ * `hypot` recovers the scale from the matrix and discards the direction, so a
+ * rotated layer would come out at exactly the right size, upright, and look
+ * like a success. A non-uniform scale is legal in PSD and means genuinely
+ * stretched glyphs, which `rasteriseTextAt` will not draw — it fits glyphs
+ * inside their box undistorted, on purpose, because doing otherwise is what
+ * squashed every text layer once already. Neither is fixed here; both are
+ * disclosed, because a wrong picture with the right numbers in it is the one
+ * outcome worse than a visible gap.
+ */
+function describeTextTransform(name, transform, warnings) {
+  const label = `Text layer "${name}"`;
+  if (transform.rotated)
+    warnings.add(
+      `${label} is rotated ${Math.round(transform.rotation * 10) / 10}° in the file. Rotation is not ` +
+      `applied — the layer is drawn upright at the right size, so it will not match Photoshop.`,
+    );
+  if (!transform.uniform)
+    warnings.add(
+      `${label} is stretched in the file — ${Math.round((transform.scaleX / transform.scaleY) * 100)}% ` +
+      `as wide as it is tall. Glyphs are drawn undistorted at the vertical size, so the text will be ` +
+      `${transform.scaleX > transform.scaleY ? 'narrower' : 'wider'} than Photoshop draws it.`,
+    );
+}
+
+/**
+ * Everything the model keeps from a PSD text layer, and the disclosures that
+ * come with it.
+ *
+ * ## The size is not `style.fontSize`
+ *
+ * `style.fontSize` is the PRE-transform size; Photoshop draws it under the
+ * layer's own 2x3 matrix. fixtures/float-color.src.psd's "outer glow" says
+ * 66.66666 and appears at 16.6, because that matrix scales by 0.249. Reading
+ * `fontSize` alone drew it four times too large, and a file that scales UP —
+ * which is what a real headline does — drew far too small. Both other text
+ * fixtures carry an identity transform, which is precisely why nothing caught it.
+ *
+ * The scale is BAKED IN rather than carried alongside. Keeping it separate
+ * would make `fontSize` a number that is never the size anything draws, and
+ * every consumer — `fontSpec`, `measureText`, the render cache key, the size
+ * slider, `retypeText` — would have to remember to multiply. That is the same
+ * shape as the CR-versus-LF bug this file already normalises at the door: one
+ * convention reaches the model, and nothing downstream has to know. The file's
+ * own numbers are not lost — `sourceFontSize` and `sourceScale` keep them, so
+ * the sheet can say where 17 came from rather than silently contradicting
+ * Photoshop's own panel.
+ *
+ * ## The typeface is the file's, the stack is ours
+ *
+ * `fontFamily` used to be `FONT_STACKS[0]` for every layer ever read, so a
+ * serif headline became Arial and nothing said so. The real name now reaches
+ * `sourceFont` and picks the closest stack we can actually draw. It stays a
+ * SUBSTITUTION — a PSD stores font names, never font files — so the name is
+ * kept for the UI to disclose. `sourceFont` is null when the file names nothing,
+ * which is the honest reading of Photoshop's `AdobeInvisFont` placeholder.
+ *
+ * @param {Set<string>} [warnings]  rotation and stretch this renderer cannot draw
+ */
+function toLayer(source, warnings) {
   const x = source.left ?? 0;
   const y = source.top ?? 0;
   const w = (source.right ?? 0) - x;
@@ -180,10 +238,14 @@ function toLayer(source) {
     // file's string comes through, so nothing downstream has to know that --
     // see normaliseLineBreaks in render.js for why one convention beats three.
     const content = normaliseLineBreaks(source.text.text ?? '');
+    const transform = textTransformOf(source.text.transform);
+    const sourceFont = sourceFontName(style);
+    const drawn = effectiveFontSize(style, source.text.transform);
+
     layer.text = {
       content,
-      fontFamily: FONT_STACKS[0],
-      fontSize: Math.round(style.fontSize ?? 24),
+      fontFamily: fontStackFor(sourceFont),
+      fontSize: Math.max(1, Math.round(drawn || 24)),
       color: rgbToHex(style.fillColor),
       bold: false,
       italic: false,
@@ -195,7 +257,15 @@ function toLayer(source) {
        * here would report every untouched multi-line layer as edited.
        */
       originalContent: content,
+      /** The typeface the FILE names, or null where it names none. Never drawn — disclosed. */
+      sourceFont,
+      /** `style.fontSize` before the transform, so the sheet can show where the drawn size came from. */
+      sourceFontSize: typeof style.fontSize === 'number' ? style.fontSize : null,
+      /** The vertical scale of the transform, already applied to `fontSize` above. */
+      sourceScale: transform.scaleY,
     };
+
+    if (warnings) describeTextTransform(layer.name, transform, warnings);
   }
 
   return layer;
@@ -245,7 +315,7 @@ function flatten(children, out, warnings, path = [], stats = { skipped: 0 }, inW
       stats.skipped++;
       continue;
     }
-    const layer = toLayer(node);
+    const layer = toLayer(node, warnings);
     layer.groupPath = path.join(' / ');
     layer.groupWarned = inWarnedGroup;
     out.push(layer);

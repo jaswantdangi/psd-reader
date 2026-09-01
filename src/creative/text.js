@@ -24,9 +24,11 @@
  * instead. It now reports the ink extent as well, so the heights agree (21
  * against 21) and the first edit no longer moves the box vertically.
  *
- * The WIDTH can still differ, because `toLayer` substitutes FONT_STACKS[0] for
- * whatever typeface the file used: our box is right for the glyphs we draw and
- * cannot be right for glyphs we never had.
+ * The WIDTH can still differ, because `toLayer` substitutes the nearest stack it
+ * can draw for whatever typeface the file named — a PSD stores font names, never
+ * font files — so our box is right for the glyphs we draw and cannot be right
+ * for glyphs we never had. `text.sourceFont` keeps the file's own name so the
+ * substitution is stated rather than silent.
  *
  * So the rule is unchanged: the file's box positions the layer and never
  * scales it. The first edit re-fits the box to our own measurement; every edit
@@ -82,6 +84,15 @@ const newText = (options) => ({
   italic: options.italic === true,
   align: options.align ?? 'left',
   originalContent: '',
+  /**
+   * Null and 1, for the same reason `originalContent` is `''`: these three
+   * fields mean "what the FILE said", and no file said anything about this
+   * layer. Naming the chosen stack as a `sourceFont` would make the sheet
+   * report a substitution that never happened.
+   */
+  sourceFont: null,
+  sourceFontSize: null,
+  sourceScale: 1,
 });
 
 /**

@@ -402,6 +402,63 @@ test('a multi-line string survives measure, save and reopen', () => {
   assert.deepEqual(measure(tl.text).lines, ['AB', 'CD'], 'and still measure as two lines');
 });
 
+/**
+ * A text layer in the shape `createProject` reads, so the transform disclosures
+ * run against the real `toLayer()` without needing a fixture that carries a
+ * rotation. No fixture does: all four text layers in the corpus are upright and
+ * uniformly scaled, which is exactly why these two paths shipped unwarned.
+ * The NUMBERS that come from a file are asserted in test/text-engine.mjs.
+ */
+const textDoc = (transform, style = {}) => ({
+  width: 100, height: 100, warnings: [],
+  children: [{
+    name: 'Headline', left: 10, top: 10, right: 90, bottom: 40,
+    text: { text: 'Hi', transform, style: { fontSize: 40, ...style } },
+  }],
+});
+
+test('a rotated text layer is disclosed rather than drawn upright in silence', () => {
+  const c = Math.cos(Math.PI / 6), s = Math.sin(Math.PI / 6);
+  const project = createProject(textDoc([c, s, -s, c, 0, 0]), 'rotated.psd');
+  const warning = project.warnings.find((w) => /rotated/.test(w));
+  assert.ok(warning, 'rotation is thrown away by hypot() — saying so is the whole fix');
+  assert.match(warning, /"Headline" is rotated 30°/);
+  assert.equal(project.layers[0].text.fontSize, 40, 'the SIZE is still right; only the angle is lost');
+});
+
+test('a stretched text layer is disclosed, and its size follows the vertical axis', () => {
+  const project = createProject(textDoc([2, 0, 0, 0.5, 0, 0]), 'stretched.psd');
+  const warning = project.warnings.find((w) => /stretched/.test(w));
+  assert.ok(warning, 'a non-uniform scale means genuinely stretched glyphs we cannot draw');
+  assert.match(warning, /400% as wide as it is tall/);
+  assert.match(warning, /narrower than Photoshop/);
+  // 40 x 0.5, not 40 x the average of 2 and 0.5 — an average is a size neither
+  // axis has, and it would hide the stretch in the same move.
+  assert.equal(project.layers[0].text.fontSize, 20);
+});
+
+test('an upright, uniformly scaled text layer says nothing', () => {
+  const project = createProject(textDoc([0.25, 0, 0, 0.25, 0, 0]), 'plain.psd');
+  assert.deepEqual(project.warnings.filter((w) => /rotated|stretched/.test(w)), []);
+  assert.equal(project.layers[0].text.fontSize, 10);
+});
+
+test("the file's own size and scale survive a save and reopen", () => {
+  // The sheet shows "Photoshop: 66.7px at 25%" from these two fields. A project
+  // file that dropped them would turn that disclosure into a blank on reopen.
+  const project = createProject(textDoc([0.25, 0, 0, 0.25, 0, 0], { fontSize: 66.66666 }), 'plain.psd');
+  const layer = project.layers[0];
+  assert.equal(layer.text.sourceFontSize, 66.66666);
+  assert.equal(layer.text.sourceScale, 0.25);
+  assert.equal(layer.text.fontSize, 17, '66.66666 x 0.25 = 16.67, rounded');
+
+  const json = JSON.parse(JSON.stringify(toProjectJson(project)));
+  setLayer(project, layer.id, { text: { sourceFontSize: 1, sourceScale: 9 } });
+  applyProjectJson(project, json);
+  assert.equal(layer.text.sourceFontSize, 66.66666);
+  assert.equal(layer.text.sourceScale, 0.25);
+});
+
 test('the UI offers exactly the blend modes the compositor implements', () => {
   // These drifted by eight modes once: the compositor handled 26, the UI listed
   // 18, so a file using `vivid light` rendered correctly while the user could

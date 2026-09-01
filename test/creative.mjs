@@ -553,8 +553,10 @@ console.log('\nPhotoshop bounds against ours\n');
  * measureText now reports the ink extent, so both boxes are the same quantity
  * and the height stops moving: 21 in the file, 21 from us. The WIDTH still
  * moves -- 60 in the file, 40 under this stub -- and that is not a units
- * problem but a font one: toLayer() substitutes FONT_STACKS[0] for whatever
- * the file used, so we are honestly measuring a different typeface.
+ * problem but a font one: toLayer() substitutes the nearest stack it can draw
+ * for whatever the file named, so we are honestly measuring a different
+ * typeface. This fixture's run names none at all, so the substitute is the
+ * default stack and `text.sourceFont` is null.
  */
 test('editing a PSD text layer re-fits the box to metrics that agree with the file', () => {
   const project = createProject(textDoc, 'text.src.psd');

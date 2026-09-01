@@ -133,9 +133,10 @@ const FALLBACK_ASCENT_SHARE = 0.8;
  *
  * The WIDTH barely moves for this string — a left-aligned run's ink right edge
  * is its advance less one side bearing — and it does not become 60 either. It
- * cannot: `toLayer` substitutes FONT_STACKS[0] for the file's typeface, so we
- * are measuring different glyphs. That residue is a font problem, not a
- * metrics one, and it is in docs/BACKLOG.md rather than fixed here.
+ * cannot: `toLayer` substitutes the nearest stack it can draw for the file's
+ * typeface — a PSD names a font and never ships one — so we are measuring
+ * different glyphs. That residue is a font problem, not a metrics one, and the
+ * substitution is now disclosed (`text.sourceFont`) rather than fixed here.
  *
  * ## Ink is not spacing
  *

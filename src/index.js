@@ -2,6 +2,11 @@ export { readDocument } from './reader.js';
 export { extractResources, RESOURCE } from './resources.js';
 export { parseIccProfile } from './icc.js';
 export { parseIptc } from './iim.js';
+export {
+  readTextEngineLayers, parseEngineData, textEngineFacts,
+  textTransformOf, effectiveFontSize, sourceFontName, fontStackFor,
+  PLACEHOLDER_FONT,
+} from './engine-data.js';
 export { installPlainPixelBackend } from './canvas.js';
 export { compositeDocument, compareBuffers, differenceBuffer, createBuffer, flattenOnto, SUPPORTED_BLEND_MODES } from './composite.js';
 export { layerRect, pixelRect, projectMask, downscaleMask, resampleMask } from './mask.js';
