@@ -7,6 +7,12 @@ export {
   textTransformOf, effectiveFontSize, sourceFontName, fontStackFor,
   PLACEHOLDER_FONT,
 } from './engine-data.js';
+export {
+  splitFontName, isFontFileName, planFont,
+  createFontRegistry, registerFont, recordFontFailure, loadedFonts, fontFailures,
+  resolveFont, cssFontFamilyFor, familyInCss, fontDemand,
+  FONT_FILE_EXTENSIONS, FONT_FILE_ACCEPT,
+} from './fonts.js';
 export { installPlainPixelBackend } from './canvas.js';
 export { compositeDocument, compareBuffers, differenceBuffer, createBuffer, flattenOnto, SUPPORTED_BLEND_MODES } from './composite.js';
 export { layerRect, pixelRect, projectMask, downscaleMask, resampleMask } from './mask.js';
