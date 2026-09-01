@@ -727,7 +727,7 @@ test('badges are suppressed at their defaults', () => {
   const plain = rows.find((r) => r.index === 0).badges;
   assert.deepEqual(plain, {
     text: false, mask: false, maskOff: false, clipped: false, hidden: false,
-    opacity: null, blendMode: null, groupPath: null, warned: false,
+    opacity: null, blendMode: null, groupPath: null, warned: false, adjusted: false,
   });
   const blended = rows.find((r) => r.index === 1).badges;
   assert.equal(blended.opacity, 62);

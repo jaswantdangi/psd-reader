@@ -12,6 +12,7 @@ import {
   toProjectJson, applyProjectJson,
   resample, renderProject, createRenderStats, createSandwichCache, renderSandwiched,
   loadProjectProxy, exportFullRes, createJsExportTarget, createMemorySpill,
+  panelRows, PANEL_FILTERS,
 } from '../src/index.js';
 
 let passed = 0;
@@ -1048,6 +1049,45 @@ test('a discarded sheet session invalidates the cache once', () => {
   renderSandwiched(cache, p, 1, { scale: 1 });
   assert.ok(cache.builds > builds, 'the cache must not survive a rollback');
   assert.equal(p.layers[1].adjust, null);
+});
+
+console.log('\nthe panel\n');
+
+test('an adjusted layer gets the badge and a neutral one does not', () => {
+  const p = threeLayerProject();
+  setAdjust(p, p.layers[2].id, { contrast: 25 });
+  const rows = panelRows(p).rows;
+  assert.equal(rows.find((r) => r.index === 2).badges.adjusted, true);
+  assert.equal(rows.find((r) => r.index === 0).badges.adjusted, false);
+});
+
+test('a present-but-neutral adjustment does not earn a badge', () => {
+  // A badge that appears when the user opened a sheet and touched nothing is a
+  // badge that stops meaning anything.
+  const p = threeLayerProject();
+  p.layers[1].adjust = createAdjust();          // neutral, but not null
+  assert.equal(panelRows(p).rows.find((r) => r.index === 1).badges.adjusted, false);
+});
+
+test('the Adjusted filter chip selects exactly the adjusted layers', () => {
+  const p = threeLayerProject();
+  setAdjust(p, p.layers[0].id, { brightness: 10 });
+  setAdjust(p, p.layers[2].id, { brightness: 10 });
+  const { rows, shown } = panelRows(p, { filters: ['adjusted'] });
+  assert.equal(shown, 2);
+  assert.deepEqual(rows.map((r) => r.index), [2, 0], 'top of the stack first');
+});
+
+test('PANEL_FILTERS and matchesFilter stay in step', () => {
+  // A chip the panel offers but the matcher ignores shows every row and reads
+  // as a broken filter.
+  const p = threeLayerProject();
+  setAdjust(p, p.layers[0].id, { brightness: 10 });
+  assert.ok(PANEL_FILTERS.includes('adjusted'));
+  for (const filter of PANEL_FILTERS)
+    assert.ok(panelRows(p, { filters: [filter] }).shown <= p.layers.length, filter);
+  assert.notEqual(panelRows(p, { filters: ['adjusted'] }).shown, p.layers.length,
+    'the chip must actually narrow the list');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

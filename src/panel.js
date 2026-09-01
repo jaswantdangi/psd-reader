@@ -18,11 +18,13 @@
  * creates it.
  */
 
+import { isNeutralAdjust } from './adjust/lut.js';
+
 /**
  * Every filter is an axis the model already carries. Derived from the field
  * list rather than invented, which is also how its completeness is checked.
  */
-export const PANEL_FILTERS = ['hidden', 'text', 'masked', 'clipped', 'blended', 'faded', 'warned'];
+export const PANEL_FILTERS = ['hidden', 'text', 'masked', 'clipped', 'blended', 'faded', 'warned', 'adjusted'];
 
 /**
  * Badges, each null/false at its default value.
@@ -40,6 +42,15 @@ export const badgesFor = (layer) => ({
   blendMode: layer.blendMode !== 'normal' ? layer.blendMode : null,
   groupPath: layer.groupPath || null,
   warned: layer.groupWarned === true,
+  /**
+   * Any non-neutral raster adjustment. Non-dismissible, like the clip chip:
+   * a layer carrying a filter looks exactly like one that does not, and
+   * "which layers have I touched?" is otherwise four sheets on twenty rows.
+   *
+   * A PRESENT-but-neutral object earns nothing -- opening a sheet and touching
+   * nothing must not light a badge, or the badge stops meaning anything.
+   */
+  adjusted: !isNeutralAdjust(layer.adjust),
 });
 
 const matchesFilter = (layer, filter) => {
@@ -51,6 +62,7 @@ const matchesFilter = (layer, filter) => {
     case 'blended': return layer.blendMode !== 'normal';
     case 'faded': return layer.opacity < 1;
     case 'warned': return layer.groupWarned === true;
+    case 'adjusted': return !isNeutralAdjust(layer.adjust);
     default: return true;
   }
 };
