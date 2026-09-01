@@ -48,7 +48,7 @@
  * glyph raster does not run there at all.
  */
 import { setLayer, FONT_STACKS } from '../edit.js';
-import { measureText, splitTextLines, normaliseLineBreaks } from '../render.js';
+import { measureText, splitTextLines, normaliseLineBreaks, wrapsInBox } from '../render.js';
 import { blankLayer, insertLayer, requireLayer, centreIn } from './layers.js';
 
 const NO_MEASURER =
@@ -65,6 +65,40 @@ export function naturalTextSize(text) {
   const measured = measureText(text);
   if (!measured || !measured.width || !measured.height) return null;
   return { width: measured.width, height: measured.height };
+}
+
+/**
+ * The box a text layer of THIS shape wants — and it is not the same question
+ * for the two shapes.
+ *
+ * POINT text has no rectangle of its own. Both axes are the glyphs' own ink,
+ * which is what `naturalTextSize` returns and what every caller here used
+ * before paragraph text existed in the model.
+ *
+ * BOX text does have one, and it is the AUTHOR'S: a rectangle they drew in
+ * Photoshop, carried as `text.boxWidth`, and the thing every computed line
+ * break in the paragraph was derived from. Re-measuring that width from our own
+ * substituted glyphs would re-wrap the paragraph on the first keystroke — the
+ * same class of bug as losing the breaks entirely, and the reason the re-fit
+ * has to hold the width and let only the HEIGHT follow the text.
+ *
+ * `Math.max` rather than the author's width alone, for the one case where the
+ * text is genuinely wider than the box: a word too long to fit overhangs its
+ * line rather than being hyphenated or dropped (see `wrapParagraph`), and the
+ * LAYER box has to contain that overhang. Without this,
+ * `rasteriseTextAt`'s `min(w / natural.width, h / natural.height)` would scale
+ * the whole paragraph down to squeeze one long word inside the author's width,
+ * shrinking every other line because of a word on one of them. The author's
+ * box is untouched by this; only the layer's bounds grow.
+ */
+function fittedSize(text) {
+  const natural = naturalTextSize(text);
+  if (!natural) return null;
+  if (!wrapsInBox(text)) return natural;
+  return {
+    width: Math.max(Math.max(1, Math.round(text.boxWidth)), natural.width),
+    height: natural.height,
+  };
 }
 
 /**
@@ -93,6 +127,18 @@ const newText = (options) => ({
   sourceFont: null,
   sourceFontSize: null,
   sourceScale: 1,
+  /**
+   * Point, and no box.
+   *
+   * That is the shape Photoshop gives a layer created by CLICKING rather than
+   * by dragging out a rectangle, and it is the only honest answer for a string
+   * typed into a sheet: nobody drew a box, so every line break in it is the
+   * author's own. It also keeps a created layer's handle drag scaling, which is
+   * the only sensible drag for a layer with no author width. Converting one to
+   * a paragraph box is in docs/BACKLOG.md.
+   */
+  shapeType: 'point',
+  boxWidth: null,
 });
 
 /**
@@ -120,7 +166,7 @@ export function insertTextLayer(project, options = {}) {
 
   let w = options.w, h = options.h;
   if (w === undefined || h === undefined) {
-    const natural = naturalTextSize(text);
+    const natural = fittedSize(text);
     if (!natural) throw new Error(NO_MEASURER);
     w = w ?? natural.width;
     h = h ?? natural.height;
@@ -161,11 +207,23 @@ export function insertTextLayer(project, options = {}) {
  * factors forward is what turned that empty space into a permanent distortion
  * which every later keystroke re-applied.
  *
+ * BOX text is excluded outright, and not because the arithmetic would come out
+ * wrong — `fittedSize` keeps its box equal to its own fitted size, so this
+ * would return 1 anyway. It is excluded because box text does not EXPRESS a
+ * hand scale in its bounds at all: its width is the author's rectangle and its
+ * height is derived from the wrap, so the only way to make box text bigger is
+ * to move `fontSize`, which `retypeText` carries the box along with. Reading a
+ * factor out of bounds that mean something else is how the stretch was minted
+ * the first time; saying so here stops a stray `setLayer({w})` from a caller
+ * that has not been taught the two operations turning into a silent type-size
+ * change on the next keystroke.
+ *
  * @param {object} layer
  * @param {{width:number,height:number}} natural  the CURRENT string's own size
  */
 function glyphScaleOf(layer, natural) {
   if (!layer.rerendered) return 1;
+  if (wrapsInBox(layer.text)) return 1;
   return Math.min(layer.w / natural.width, layer.h / natural.height);
 }
 
@@ -209,7 +267,7 @@ const anchorBox = (layer, w, h, align, recentre) => ({
  */
 export function liveTextRect(layer) {
   if (!layer || layer.kind !== 'text' || !layer.text || layer.rerendered) return null;
-  const natural = naturalTextSize(layer.text);
+  const natural = fittedSize(layer.text);
   if (!natural) return null;
   return anchorBox(
     layer,
@@ -254,8 +312,8 @@ export function retypeText(project, id, changes = {}, coalesceKey) {
   // paste need not have. One convention reaches the model, always.
   if (changes.content !== undefined) changes = { ...changes, content: normaliseLineBreaks(changes.content) };
 
-  const before = naturalTextSize(layer.text);
-  const after = naturalTextSize({ ...layer.text, ...changes });
+  const before = fittedSize(layer.text);
+  const after = fittedSize({ ...layer.text, ...changes });
   if (!before || !after) throw new Error(NO_MEASURER);
 
   const scale = glyphScaleOf(layer, before);

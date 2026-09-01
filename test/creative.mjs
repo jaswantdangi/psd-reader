@@ -18,8 +18,10 @@ import fs from 'fs';
 import assert from 'node:assert/strict';
 
 import { readDocument } from '../src/reader.js';
-import { createProject, setLayer, undo, redo, findLayer, FONT_STACKS } from '../src/edit.js';
-import { renderProject } from '../src/render.js';
+import {
+  createProject, setLayer, undo, redo, findLayer, toProjectJson, applyProjectJson, FONT_STACKS,
+} from '../src/edit.js';
+import { renderProject, measureText } from '../src/render.js';
 import { buildExportOrder, assertIdentifiable, isSelfRendering, drawsOwnPixels, wantedIndices } from '../src/export/order.js';
 import {
   removeLayer, nextLayerId,
@@ -56,6 +58,10 @@ const synth = () => createProject({
 /** Read once at module scope: parsing a PSD needs no canvas, so it is not part of any stub. */
 const textDoc = await readDocument(
   new Uint8Array(fs.readFileSync('fixtures/text.src.psd')), { pixels: 'eager', metadata: false });
+
+/** The corpus's one PARAGRAPH text layer — shapeType 'box', with a real boxBounds. */
+const boxDoc = await readDocument(
+  new Uint8Array(fs.readFileSync('fixtures/text-box.src.psd')), { pixels: 'eager', metadata: false });
 
 const pixelAt = (buffer, x, y) => {
   const i = (y * buffer.width + x) * 4;
@@ -632,6 +638,155 @@ test('a hand resize survives typing as ONE uniform scale, not an X/Y stretch', (
   setLayer(project, layer.id, { w: 200, h: 42 });
   retypeText(project, layer.id, { content: 'ABCD' });
   assert.deepEqual([layer.w, layer.h], [120, 42], 'the extra width was empty space, not a stretch');
+});
+
+console.log('\nparagraph (box) text\n');
+
+/**
+ * The second shape a PSD text layer can be, and the one whose line breaks we
+ * were losing.
+ *
+ * `fixtures/text-box.src.psd` reports `shapeType: 'box'` and
+ * `boxBounds: [0, 0, 128.99352, 49]`, against `fixtures/text.src.psd`'s
+ * `shapeType: 'point'` and no boxBounds at all. Point text breaks only where
+ * the author typed a break — that is what this engine already did, and it is
+ * correct for that shape. Box text is poured into the rectangle and Photoshop
+ * wraps it, so its breaks are COMPUTED and appear nowhere in the string.
+ *
+ * The box the model carries is the author's, not the glyphs'. That is the whole
+ * difference from point text, and it is what the re-fit has to respect: the
+ * WIDTH is a decision the author made and re-measuring it from our own
+ * substituted font would destroy the wrap on the first keystroke. Only the
+ * height follows the text.
+ */
+const boxLayerOf = () => {
+  const project = createProject(boxDoc, 'text-box.src.psd');
+  const layer = project.layers.find((l) => l.kind === 'text');
+  assert.ok(layer, 'text-box.src.psd must contain a text layer');
+  return { project, layer };
+};
+
+test('the two shapes are told apart and only the box one carries a width', () => {
+  const { layer } = boxLayerOf();
+  assert.equal(layer.text.shapeType, 'box');
+  assert.equal(Math.round(layer.text.boxWidth * 100000) / 100000, 128.99352,
+    "boxBounds' right minus left, at this layer's scale of 1");
+
+  const point = createProject(textDoc, 'text.src.psd').layers.find((l) => l.kind === 'text');
+  assert.equal(point.text.shapeType, 'point');
+  assert.equal(point.text.boxWidth, null, 'point text has no box to wrap to, and must not pretend to');
+});
+
+test('the box width is in the same space as the layer bounds — checked against the file', () => {
+  // A wrap width in the wrong space gives plausible-looking WRONG line breaks,
+  // which is the worst outcome available here, so this is checked against the
+  // file rather than reasoned about. boxBounds is relative to the text
+  // transform's translation, in the same pixels as the layer record's own
+  // bounds: the file's transform puts the box at x = 36.00648, the layer's
+  // baked ink runs 71..131, and the layer is CENTRE-justified — so the ink's
+  // centre has to land on the box's centre. It does, to within half a pixel.
+  const node = (function find(ns) {
+    for (const n of ns || []) {
+      const hit = n.children ? find(n.children) : (n.text ? n : null);
+      if (hit) return hit;
+    }
+    return null;
+  })(boxDoc.children);
+
+  assert.equal(node.text.paragraphStyle.justification, 'center');
+  const boxLeft = node.text.transform[4];
+  const { layer } = boxLayerOf();
+  const boxCentre = boxLeft + layer.text.boxWidth / 2;
+  const inkCentre = (node.left + node.right) / 2;
+  assert.ok(Math.abs(boxCentre - inkCentre) < 0.5,
+    `box centre ${boxCentre} should coincide with Photoshop's own ink centre ${inkCentre}`);
+});
+
+test('the fixture string fits the fixture box on one line, and no break is invented', () => {
+  // TEST is four characters — 40px under this stub, 60px in Photoshop's own
+  // font — inside a 129px box. Wrapping must produce ONE line. A wrap width
+  // taken in the wrong space, or applied to point text, shows up here first.
+  const { layer } = boxLayerOf();
+  assert.equal(layer.text.content, 'TEST');
+  assert.equal(measureText(layer.text).lines.length, 1);
+});
+
+test('a string too long for the box wraps to the box, through the model', () => {
+  const { project, layer } = boxLayerOf();
+  retypeText(project, layer.id, { content: 'ONE TWO THREE FOUR FIVE' });
+
+  assert.deepEqual(measureText(layer.text).lines, ['ONE TWO', 'THREE FOUR', 'FIVE'],
+    '129px of box at the stub\'s 10px per character');
+  assert.equal(layer.text.content, 'ONE TWO THREE FOUR FIVE',
+    'the STRING keeps no computed breaks — they are layout, not content');
+});
+
+test('re-fitting box text holds the width and lets only the height follow', () => {
+  // Point text derives BOTH axes from the glyphs. Box text cannot: the width is
+  // the author's own rectangle, and re-fitting it to our measurement of a
+  // substituted font would re-wrap the paragraph on the first keystroke — which
+  // is the same class of bug as losing the breaks entirely.
+  const { project, layer } = boxLayerOf();
+  retypeText(project, layer.id, { content: 'TEST' });
+
+  assert.equal(layer.w, 129, "the author's box, not the 40px the glyphs measure");
+  assert.equal(layer.h, 21, 'one line of ink at 30px — the height IS re-measured');
+  assert.equal(layer.x, 37, 'centre-anchored on the file\'s box, so it lands where Photoshop drew it');
+
+  retypeText(project, layer.id, { content: 'ONE TWO THREE FOUR FIVE' });
+  assert.equal(layer.w, 129, 'three lines later, still the same box');
+  assert.equal(layer.h, 21 + 2 * 33, 'and exactly two more line advances tall');
+});
+
+test('liveTextRect gives a box-text drag the author\'s width too', () => {
+  const { layer } = boxLayerOf();
+  assert.deepEqual(liveTextRect(layer), { x: 37, y: 86, w: 129, h: 21 });
+});
+
+test('a word wider than the box widens the layer rather than shrinking the paragraph', () => {
+  // Overhang, decided in render.js: the word keeps its size and sticks out.
+  // The box has to widen with it, or `rasteriseTextAt`'s min(w/nat.w, h/nat.h)
+  // would scale the WHOLE paragraph down to make one long word fit.
+  const { project, layer } = boxLayerOf();
+  retypeText(project, layer.id, { content: 'SUPERCALIFRAGILISTIC' });
+  assert.equal(layer.w, 200, 'twenty characters at the stub\'s 10px, overhanging the 129px box');
+  assert.equal(layer.text.boxWidth > 128 && layer.text.boxWidth < 129, true,
+    'the AUTHOR\'s box is unchanged — only the layer bounds grew to contain the overhang');
+});
+
+test('a stretched box scales its wrap width by the same factor as its font size', () => {
+  // boxBounds and style.fontSize are both PRE-transform, and Photoshop composes
+  // the paragraph in that space — so the line breaks depend only on their
+  // RATIO. The model bakes the transform's vertical scale into fontSize (see
+  // engine-data.js), so the wrap width has to take the identical scale or the
+  // ratio changes and the breaks move. text-box.src.psd's transform is
+  // identity, so it cannot discriminate the two; this layer is synthetic.
+  const project = createProject({
+    width: 400, height: 400, warnings: [],
+    children: [{
+      name: 'scaled box', left: 0, top: 0, right: 100, bottom: 50,
+      text: {
+        text: 'TEST', shapeType: 'box', boxBounds: [0, 0, 200, 100],
+        transform: [0.5, 0, 0, 0.5, 0, 0],
+        style: { fontSize: 40, fillColor: { r: 0, g: 0, b: 0 } },
+        paragraphStyle: { justification: 'left' },
+      },
+    }],
+  }, 'scaled-box.psd');
+
+  const text = project.layers[0].text;
+  assert.equal(text.fontSize, 20, '40 at 50%');
+  assert.equal(text.sourceScale, 0.5);
+  assert.equal(text.boxWidth, 100, '200 at the SAME 50% — the ratio to the font size is preserved');
+});
+
+test('the shape and the box width survive a save and reopen', () => {
+  const { project, layer } = boxLayerOf();
+  const json = JSON.parse(JSON.stringify(toProjectJson(project)));
+  setLayer(project, layer.id, { text: { shapeType: 'point', boxWidth: null } });
+  applyProjectJson(project, json);
+  assert.equal(layer.text.shapeType, 'box');
+  assert.equal(Math.round(layer.text.boxWidth), 129);
 });
 
 test('retyping a raster layer is refused', () => {

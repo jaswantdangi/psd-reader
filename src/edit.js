@@ -112,8 +112,54 @@ function describeTextTransform(name, transform, warnings) {
 }
 
 /**
+ * The width Photoshop wrapped a PARAGRAPH layer to, in the space the model
+ * draws in — or null for point text and for a box we cannot read.
+ *
+ * `boxBounds` is `[left, top, right, bottom]` in the TEXT OBJECT's own space,
+ * the same pre-transform space `style.fontSize` lives in. Photoshop composes
+ * the paragraph there, so where the lines break depends only on the RATIO of
+ * the box width to the font size. `toLayer` bakes the transform's vertical
+ * scale into `fontSize` (see the note below and effectiveFontSize), so the box
+ * width has to take the IDENTICAL scale or that ratio changes and every line
+ * breaks in the wrong place.
+ *
+ * scaleY and not scaleX, for exactly that reason: it is the factor already
+ * applied to the font size, so the pair stays in proportion. On a genuinely
+ * stretched layer (scaleX !== scaleY) the box we draw is therefore the right
+ * width for the LINE BREAKS and not for the rectangle Photoshop drew — that
+ * renderer cannot draw a stretch at all, which is already disclosed by
+ * `describeTextTransform`.
+ *
+ * Null rather than a guess wherever the numbers are not there. `render.js`
+ * wraps only when the shape is 'box' AND the width is positive, because
+ * wrapping to a made-up width gives plausible-looking wrong line breaks — the
+ * worst available outcome, since nothing on screen says which it is.
+ */
+function boxWidthOf(text, transform) {
+  const bounds = text?.boxBounds;
+  if (!Array.isArray(bounds) || bounds.length < 4) return null;
+  const [left, , right] = bounds;
+  if (typeof left !== 'number' || typeof right !== 'number') return null;
+  const width = (right - left) * transform.scaleY;
+  return Number.isFinite(width) && width > 0 ? width : null;
+}
+
+/**
  * Everything the model keeps from a PSD text layer, and the disclosures that
  * come with it.
+ *
+ * ## Two shapes, and only one of them wraps
+ *
+ * A PSD text layer is either POINT text — an insertion point and a string,
+ * breaking only where the author typed a break — or BOX (paragraph) text: a
+ * rectangle the author drew, with Photoshop wrapping the string to its width.
+ * ag-psd reports which in `shapeType`, and the rectangle in `boxBounds`.
+ *
+ * Neither reached the model, so a paragraph layer lost every computed break as
+ * soon as we started drawing it, and a three-line headline came out as one
+ * line. `shapeType` and `boxWidth` are carried so `render.js` can lay the
+ * paragraph out the way the file was laid out; point text is untouched by all
+ * of it and keeps behaving exactly as before.
  *
  * ## The size is not `style.fontSize`
  *
@@ -263,6 +309,15 @@ function toLayer(source, warnings) {
       sourceFontSize: typeof style.fontSize === 'number' ? style.fontSize : null,
       /** The vertical scale of the transform, already applied to `fontSize` above. */
       sourceScale: transform.scaleY,
+      /**
+       * 'point' or 'box', as the FILE says — not as we can act on it. A
+       * paragraph layer whose boxBounds we cannot read is still a paragraph
+       * layer, and reporting it as point text would hide the reason its lines
+       * are not wrapping.
+       */
+      shapeType: source.text.shapeType === 'box' ? 'box' : 'point',
+      /** The wrap width, at the same scale as `fontSize`. Null for point text. */
+      boxWidth: boxWidthOf(source.text, transform),
     };
 
     if (warnings) describeTextTransform(layer.name, transform, warnings);
