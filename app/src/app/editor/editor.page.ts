@@ -15,6 +15,7 @@ import { FontsService } from '../services/fonts.service';
 import { ProjectService } from '../services/project.service';
 import { AdjustSheet } from './adjust-sheet';
 import { CanvasStage } from './canvas-stage';
+import { CutoutPanel } from './cutout-panel';
 import { FilterSheet } from './filter-sheet';
 import { FontsSheet } from './fonts-sheet';
 import { HslSheet } from './hsl-sheet';
@@ -63,6 +64,7 @@ const TITLES: Record<SheetId, string> = {
   imports: [
     AdjustSheet,
     CanvasStage,
+    CutoutPanel,
     FilterSheet,
     FontsSheet,
     HslSheet,
@@ -382,6 +384,27 @@ const TITLES: Record<SheetId, string> = {
             </div>
           }
         }
+
+        <!-- ── cut out ──────────────────────────────────────────────
+             INSIDE main on purpose. The sheets below render after the closing
+             main tag with "absolute inset-0", so their backdrop covers the
+             header as well as the stage — fine for a modal tool you dismiss
+             before looking at the result, wrong for this one. Cutting a
+             background out is a look-at-it-while-you-tune-it job, and the
+             document title and export button have to stay reachable the whole
+             time. main is "relative", so anchoring here bounds the panel to
+             the stage and it cannot reach the header however it is styled.
+
+             NOTE: no backticks in this comment. The whole template is a
+             template literal, so a backtick here terminates it and the file
+             stops parsing — which is exactly what happened. -->
+        @if (cutout()) {
+          <app-cutout-panel
+            [layerId]="svc.selectedId()"
+            (close)="cutout.set(false)"
+            (modeChange)="cutMode.set($event)"
+          />
+        }
       </main>
 
       <!-- ── tool rail ───────────────────────────────────────────── -->
@@ -401,6 +424,21 @@ const TITLES: Record<SheetId, string> = {
               <span class="text-[11px]">{{ tool.label }}</span>
             </button>
           }
+
+          <!-- Its own button rather than a RAIL entry: everything in RAIL is a
+               SheetId and goes through the shared sheet shell, and this tool
+               deliberately does not — see the note on app-cutout-panel. -->
+          <button
+            type="button"
+            class="flex w-20 shrink-0 flex-col items-center justify-center gap-1.5 rounded-xl disabled:opacity-40"
+            [class]="cutout() ? 'bg-white/10 text-sky-300' : 'text-neutral-300'"
+            [disabled]="svc.selectedId() === null"
+            [attr.aria-pressed]="cutout()"
+            (click)="toggleCutout()"
+          >
+            <app-icon name="layer" />
+            <span class="text-[11px]">Cut out</span>
+          </button>
         </nav>
       }
 
@@ -591,6 +629,16 @@ export class EditorPage {
   protected readonly accept = BUNDLE_FILE_ACCEPT;
 
   protected readonly sheet = signal<SheetId | null>(null);
+  /**
+   * The cut-out panel, tracked separately from `sheet`.
+   *
+   * It is a side panel inside the stage rather than a modal sheet over
+   * everything, so it can be open WHILE another sheet is — and folding it into
+   * `sheet` would have made those mutually exclusive for no reason.
+   */
+  protected readonly cutout = signal(false);
+  /** Which meaning a canvas tap currently has: '', 'add', 'subtract', 'erase', 'restore'. */
+  protected readonly cutMode = signal('');
   protected readonly prompt = signal('');
   protected readonly exporting = signal(false);
   protected readonly exportNote = signal('');
@@ -721,6 +769,21 @@ export class EditorPage {
       return;
     }
     this.open(tool.id);
+  }
+
+  /**
+   * Open or close the cut-out panel.
+   *
+   * Closing also disarms the canvas mode. Leaving a brush or a tap-to-correct
+   * armed after the panel that explains it has gone is how a user ends up
+   * painting a mask they cannot see the controls for — and the mask is
+   * invisible until it hides something, so the first sign would be the layer
+   * disappearing under their finger.
+   */
+  protected toggleCutout(): void {
+    const next = !this.cutout();
+    this.cutout.set(next);
+    if (!next) this.cutMode.set('');
   }
 
   protected open(id: SheetId): void {

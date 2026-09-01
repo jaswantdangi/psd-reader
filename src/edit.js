@@ -799,6 +799,64 @@ export function hitTest(project, canvasX, canvasY) {
 
 // ---------------------------------------------------------------- persistence
 
+/**
+ * Base64 for a coverage plane, in both runtimes.
+ *
+ * `btoa` exists in browsers and in Node, so no Buffer branch is needed -- but
+ * it takes a STRING, and `String.fromCharCode(...bytes)` on a megapixel plane
+ * spreads a million arguments and overflows the call stack. Chunked instead,
+ * at a width small enough to be safe on every engine.
+ */
+const B64_CHUNK = 0x8000;
+
+function encodeBytes(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += B64_CHUNK)
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + B64_CHUNK));
+  return btoa(binary);
+}
+
+function decodeBytes(text) {
+  const binary = atob(text);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+/** Serialise a mask, but only when it is the user's work rather than the file's. */
+function maskJson(mask) {
+  if (!mask?.generated || !mask.data) return null;
+  return {
+    width: mask.width,
+    height: mask.height,
+    disabled: mask.disabled === true,
+    generated: true,
+    data: encodeBytes(mask.data),
+  };
+}
+
+/**
+ * Rebuild a saved mask, refusing anything that does not describe itself.
+ *
+ * A project file is text on a device and can carry anything, so the byte count
+ * is checked against the dimensions rather than trusted: a plane whose length
+ * disagrees with `width * height` would be indexed out of bounds by render.js.
+ */
+function decodeMaskJson(saved) {
+  if (!saved || typeof saved.data !== 'string') return null;
+  const width = saved.width | 0;
+  const height = saved.height | 0;
+  if (width <= 0 || height <= 0) return null;
+  let data;
+  try {
+    data = decodeBytes(saved.data);
+  } catch {
+    return null;
+  }
+  if (data.length !== width * height) return null;
+  return { data, width, height, disabled: saved.disabled === true, generated: true };
+}
+
 /** Everything needed to rebuild this edit session on top of the same source PSD. */
 export function toProjectJson(project) {
   return {
@@ -832,6 +890,21 @@ export function toProjectJson(project) {
        * writing it here would store a second copy of the document.
        */
       maskDisabled: l.mask ? l.mask.disabled : null,
+      /**
+       * The exception to the line above: a GENERATED mask.
+       *
+       * A PSD mask can be left out because the file it came from will still be
+       * there next time. A mask produced by a cut-out or painted by hand has no
+       * such source -- drop it and the user's work is gone on reopen, silently,
+       * which is the same failure the inserted-image layers already have.
+       *
+       * Written as base64 of the raw coverage bytes. That is one byte per pixel
+       * before encoding and about 1.37 after, so a 1024x1024 proxy layer costs
+       * ~1.4 MB of JSON. Real, and worth it against losing the cut; PNG-packing
+       * the plane would cut it by roughly an order of magnitude and is the
+       * obvious follow-up.
+       */
+      mask: maskJson(l.mask),
       /**
        * The adjustment PARAMETERS. Not the table they build: lutFor rebuilds
        * that from these, keyed on exactly the values it reads, so writing it
@@ -871,6 +944,21 @@ export function applyProjectJson(project, json) {
     if (typeof saved.groupPath === 'string') layer.groupPath = saved.groupPath;
     // The raster is whatever this load produced; only the toggle is restored.
     if (layer.mask && typeof saved.maskDisabled === 'boolean') layer.mask.disabled = saved.maskDisabled;
+    /*
+     * A saved GENERATED mask replaces whatever this load produced, because it
+     * IS the user's work rather than a re-derivation of the file's. Restored
+     * only when its dimensions match the layer's pixel buffer: a project saved
+     * at one proxy edge and reopened at another would otherwise write a plane
+     * of the wrong size onto the layer, and render.js indexes it by
+     * `y * width + x` with no bounds check -- it would read past the end and
+     * mask the layer with arithmetic noise rather than fail.
+     */
+    const savedMask = decodeMaskJson(saved.mask);
+    if (savedMask && layer.pixels
+        && savedMask.width === layer.pixels.width
+        && savedMask.height === layer.pixels.height) {
+      layer.mask = savedMask;
+    }
     // Through createAdjust rather than Object.assign: the save file is text on
     // a device, so an out-of-range or half-built object has to be clamped and
     // completed before it can reach an evaluator -- and the result has to be

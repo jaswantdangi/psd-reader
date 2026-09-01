@@ -565,6 +565,69 @@ correct — it has no box, so there is nothing to wrap to.
   asserted on the ratio the breaks are derived from and never on the breaks
   themselves; only a browser can close that gap.
 
+## Background removal (2026-09-01, `src/segment/**` + `app/.../segment.service.ts`)
+
+Built fast and without tests at the user's explicit direction. That decision is
+the source of most of this list, and it is recorded rather than implied.
+
+- **NOTHING HERE HAS BEEN EXECUTED IN A BROWSER.** The pure engine
+  (`resampleLogits` -> `guidedRefine` -> `decontaminate` -> `applyCutout`) was
+  smoke-run in Node against a synthetic 64x64 layer and behaves; every claim
+  about the WORKER, the model download, WebGPU selection, the Angular wiring and
+  the panel's layout rests on reading alone. No suite covers `src/segment/**`.
+
+- **The canvas does not yet consume `cutMode`.** `app-cutout-panel` emits
+  `modeChange` and `editor.page.ts` stores it in a signal, but `canvas-stage.ts`
+  was not touched -- so the brush and tap-to-correct have a full UI, a working
+  engine path (`paintMask`, `pointAt`) and NO pointer events feeding them. The
+  automatic cut works end to end; the two manual modes are wired at both ends
+  and disconnected in the middle. This is the single largest gap.
+
+- **The BiRefNet input and output tensor names are guessed.** The worker probes
+  `model.sessions.model.inputNames` for something containing `image` or `pixel`,
+  falls back to `pixel_values`, and takes the first output tensor by position.
+  That is defensive rather than correct -- the real names are one execution away
+  and were not available without running it.
+
+- **Generated masks cost ~1.4 MB of JSON per cut layer.** `maskJson` base64s the
+  raw coverage plane: one byte per proxy pixel, x1.37 for the encoding. PNG-
+  packing the plane through `src/export/png.js` would cut that by roughly an
+  order of magnitude and was skipped for time.
+
+- **A saved cut is silently dropped when the proxy edge changes.**
+  `applyProjectJson` restores a generated mask only when its dimensions match
+  the layer's current pixel buffer -- correct, because render.js indexes the
+  plane with no bounds check -- but the user is told nothing when it refuses.
+  Reopening a project on a device with a different budget can lose the cut with
+  no message.
+
+- **Export upscales the proxy mask, and only warns above 2x.**
+  `exportSoftnessNote` discloses it; nothing fixes it. Guided upsampling against
+  the full-resolution layer's own edges is a strict improvement over plain
+  resampling at no model cost, and is the obvious follow-up.
+
+- **`selfSupplied` is not set on a decontaminated layer.** `applyCutout` writes
+  new `pixels` when decontamination ran, but does not stamp the flag that tells
+  `src/export/order.js` a layer carries its own full-resolution buffer. Those
+  pixels are PROXY resolution, so the flag would be a lie -- but it means the
+  export re-reads the original layer from the PSD and the exported edges keep
+  the background spill the editor removed. Preview and export therefore disagree
+  on colour as well as sharpness.
+
+- **Subject presets are three entries in a registry, not three tested paths.**
+  Only the general model was reasoned through. `BiRefNet-portrait-ONNX` and
+  `BiRefNet_512x512-ONNX` are assumed to share the general model's input and
+  output shape; if either differs the probe above will pick the wrong tensor.
+
+- **No cancellation.** Same gap the export path already has: a cut that takes 20
+  seconds on the WASM fallback cannot be stopped, and backgrounding the app
+  mid-inference has no defined behaviour.
+
+- **`@huggingface/transformers` was added to `app/package.json` and never
+  installed.** No `npm install` was run, so the dependency is declared and
+  absent. It is also not in `allowedCommonJsDependencies`, which currently lists
+  only `ag-psd` -- whether the worker bundle needs it there is unknown.
+
 ---
 
 ## Zip handovers (`src/bundle.js`, `app/src/app/services/bundle.service.ts`, 2026-09-01)
