@@ -9,7 +9,7 @@ export {
   normaliseRect, sameRect, largestCentredRect, moveRect, resizeRect,
 } from './rect.js';
 export {
-  fullFrame, frameOf, isCropped,
+  fullFrame, frameOf, isCropped, canvasSize,
   setFrame, setRatio, undo, redo, discardTo,
   framedLayer, framedProject, framedTarget,
   CANVAS_ANCHORS, canvasRect, resizeCanvas,

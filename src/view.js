@@ -17,6 +17,7 @@
  *
  * `viewport` throughout is {left, top, width, height} in CSS pixels.
  */
+import { canvasSize } from './edit.js';
 
 /** Zoom stops at 4x proxy 1:1. A chosen limit, not a measurement. */
 export const ZOOM_MAX_FACTOR = 4;
@@ -65,16 +66,24 @@ export const maxDocScale = (proxyScale) => ZOOM_MAX_FACTOR * proxyScale;
  */
 export const isPreviewQuality = (view, proxyScale) => view.docScale > proxyScale;
 
-/** Scale the whole document into the viewport with a margin, centred. */
+/**
+ * Scale the whole CANVAS into the viewport with a margin, centred.
+ *
+ * `canvasSize`, not `project.width`/`height`: those are the SOURCE document and
+ * do not change when the document is cropped, so reading them here would fit a
+ * 16x12 crop as though it were the 40x30 file it came out of — the view sized
+ * to something the user cannot see.
+ */
 export function fitView(project, viewport, options = {}) {
   const { margin = 16 } = options;
+  const canvas = canvasSize(project);
   const usableW = Math.max(1, viewport.width - margin * 2);
   const usableH = Math.max(1, viewport.height - margin * 2);
-  const docScale = Math.min(usableW / project.width, usableH / project.height);
+  const docScale = Math.min(usableW / canvas.width, usableH / canvas.height);
   return {
     docScale,
-    panX: (viewport.width - project.width * docScale) / 2,
-    panY: (viewport.height - project.height * docScale) / 2,
+    panX: (viewport.width - canvas.width * docScale) / 2,
+    panY: (viewport.height - canvas.height * docScale) / 2,
   };
 }
 
@@ -104,8 +113,11 @@ export function zoomAbout(view, factor, clientX, clientY, viewport, options = {}
  */
 export function clampView(view, project, viewport, options = {}) {
   const { minVisible = MIN_VISIBLE_PX } = options;
-  const w = project.width * view.docScale;
-  const h = project.height * view.docScale;
+  // The CANVAS, not the source document -- see fitView. A cropped document
+  // clamped to its uncropped size can be dragged entirely off screen.
+  const canvas = canvasSize(project);
+  const w = canvas.width * view.docScale;
+  const h = canvas.height * view.docScale;
   const keepX = Math.min(minVisible, w);
   const keepY = Math.min(minVisible, h);
   return {

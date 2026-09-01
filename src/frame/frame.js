@@ -27,21 +27,27 @@
  * walk cannot see a neighbour and must never be handed a project whose
  * dimensions disagree with the file it is re-reading.
  *
- * ## The seam this module has, stated plainly
+ * ## Where the command lives
  *
- * `edit.js`'s `applyCommand` understands `set` and `reorder` and nothing else,
- * so a frame command cannot ride its `undo`/`redo`/`discardTo`. The three
- * wrappers below share the SAME `project.history` array and intercept only
- * their own command type, delegating everything else — so interleaving is
- * correct and ordering is exact. The cost is that a caller must route through
- * these three rather than edit.js's. Six lines in `applyCommand` would remove
- * the seam; `edit.js` is not this task's to edit.
+ * NOT here. `project.frame` is a field on the project, so `setFrame` is a
+ * command in `edit.js` beside `setLayer` and `reorderLayer`, and `applyCommand`
+ * / `invert` / `undo` / `redo` / `discardTo` handle it like any other. This
+ * module owns the GEOMETRY — which rect a ratio chip, a handle drag or a canvas
+ * anchor produces — and how the frame is applied to a render and an export.
+ *
+ * It used to wrap `undo`/`redo`/`discardTo` over the shared history array
+ * instead, which meant two undo functions and a caller who had to know which to
+ * import. That is the shape of bug that gets filed as "undo doesn't work
+ * sometimes" and takes a day to find. One undo, one history, one command model.
  */
-import { undo as editUndo, redo as editRedo, discardTo as editDiscardTo } from '../edit.js';
+import { frameOf, isCropped, setFrame } from '../edit.js';
 import { intersectRect } from '../export/tiles.js';
-import { normaliseRect, sameRect, largestCentredRect, ratioOf, MIN_FRAME_SIZE } from './rect.js';
+import { largestCentredRect, ratioOf, MIN_FRAME_SIZE } from './rect.js';
 
 export { MIN_FRAME_SIZE };
+// Re-exported so `src/frame` stays one import for the whole framing surface.
+// These are the REAL ones, not wrappers: `undo === editUndo` is asserted.
+export { frameOf, fullFrame, isCropped, canvasSize, setFrame, undo, redo, discardTo } from '../edit.js';
 
 /**
  * Cache fields that `render.js` writes onto the layer it is handed.
@@ -54,74 +60,6 @@ export { MIN_FRAME_SIZE };
  */
 const CACHE_KEYS = ['rendered', 'renderedKey', 'lut', 'lutKey'];
 
-/** The whole source document, which is what an unframed project means. */
-export const fullFrame = (project) => ({ x: 0, y: 0, width: project.width, height: project.height });
-
-/** The current frame — never null, so callers never branch on absence. */
-export const frameOf = (project) => project.frame || fullFrame(project);
-
-export function isCropped(project) {
-  const frame = project.frame;
-  return !!frame &&
-    (frame.x !== 0 || frame.y !== 0 || frame.width !== project.width || frame.height !== project.height);
-}
-
-// ---------------------------------------------------------------- commands
-
-/**
- * Frozen for the same reason `createAdjust` freezes: the undo entry captures
- * `from` BY REFERENCE, so a caller who mutates `project.frame` in place has
- * destroyed that entry before it was written, and nothing would notice until
- * someone pressed undo.
- */
-const freezeFrame = (rect) => Object.freeze(normaliseRect(rect));
-
-function applyFrameCommand(project, command) {
-  project.frame = command.to;
-  // Bumped on EVERY applied frame, coalesced drag frames included -- the same
-  // contract edit.js's applyCommand has. `revision` is the one that stays still
-  // during a gesture, so the sandwich cache survives it.
-  project.mutation = (project.mutation ?? 0) + 1;
-}
-
-const invertFrame = (command) => ({ ...command, from: command.to, to: command.from });
-
-function commitFrame(project, command) {
-  applyFrameCommand(project, command);
-  project.history.push(command);
-  project.future.length = 0;
-  project.revision = (project.revision ?? 0) + 1;
-  return project;
-}
-
-/**
- * Set the document frame. `null` clears it, restoring the whole document.
- *
- * @param {object} project
- * @param {{x,y,width,height}|null} rect  document coordinates; may extend
- *   OUTSIDE the document, which is how the canvas is enlarged.
- * @param {string} [coalesceKey]  from `nextGestureKey('crop')`. Merges with the
- *   previous entry for the same gesture, so a crop drag is one undo step and
- *   `revision` does not move — exactly as a layer drag behaves.
- */
-export function setFrame(project, rect, coalesceKey) {
-  const to = rect ? freezeFrame(rect) : null;
-  const from = project.frame || null;
-  if (sameRect(from, to) || (!from && !to)) return project;
-
-  const previous = project.history[project.history.length - 1];
-  if (coalesceKey && previous && previous.type === 'frame' && previous.coalesceKey === coalesceKey) {
-    // Extend the existing step. `previous.from` stays the rect the gesture
-    // started from, so one undo unwinds the whole drag.
-    previous.to = to;
-    applyFrameCommand(project, { type: 'frame', from, to });
-    project.future.length = 0;
-    return project;
-  }
-
-  return commitFrame(project, { type: 'frame', from, to, coalesceKey });
-}
-
 /**
  * Crop to the largest centred rect of a ratio. `free` (or `null`) restores the
  * whole document.
@@ -133,73 +71,13 @@ export function setFrame(project, rect, coalesceKey) {
  * promises.
  *
  * @param {number|string|null} ratio  a number, or a preset id like `'4:5'`.
- *   Taking the id too is not a convenience: `usableRatio` rejects a string, so
- *   a chip that passed one would silently clear the crop instead of setting it.
+ *   Taking the id too is not a convenience: a raw string would be falsy-checked
+ *   as a number and silently clear the crop instead of setting it.
  */
 export function setRatio(project, ratio, coalesceKey) {
   const value = typeof ratio === 'string' ? ratioOf(ratio) : ratio;
   if (!value) return setFrame(project, null, coalesceKey);
   return setFrame(project, largestCentredRect(project.width, project.height, value), coalesceKey);
-}
-
-const topIsFrame = (stack) => {
-  const top = stack[stack.length - 1];
-  return !!top && top.type === 'frame';
-};
-
-/** Undo, whichever kind of command is on top. Delegates everything but a frame. */
-export function undo(project) {
-  if (!topIsFrame(project.history)) return editUndo(project);
-  const command = project.history.pop();
-  applyFrameCommand(project, invertFrame(command));
-  project.future.push(command);
-  project.revision = (project.revision ?? 0) + 1;
-  return true;
-}
-
-/** Redo, whichever kind of command is on top. Delegates everything but a frame. */
-export function redo(project) {
-  if (!topIsFrame(project.future)) return editRedo(project);
-  const command = project.future.pop();
-  applyFrameCommand(project, command);
-  project.history.push(command);
-  project.revision = (project.revision ?? 0) + 1;
-  return true;
-}
-
-/**
- * Roll the history back to a recorded length — what a tool sheet's X does.
- *
- * Pops WITHOUT pushing to `future`, exactly as edit.js's does: a discarded
- * experiment left on the redo stack is something the user finds again by
- * accident three actions later and cannot explain.
- *
- * Non-frame commands are handed to edit.js in RUNS rather than one at a time,
- * so a rollback of eight layer edits still costs the one `revision` bump it
- * was designed to cost.
- */
-export function discardTo(project, historyLength) {
-  const target = Math.max(0, Number(historyLength) || 0);
-  let popped = 0;
-
-  while (project.history.length > target) {
-    if (topIsFrame(project.history)) {
-      applyFrameCommand(project, invertFrame(project.history.pop()));
-      popped++;
-      continue;
-    }
-    let floor = project.history.length;
-    while (floor > target && project.history[floor - 1].type !== 'frame') floor--;
-    const run = editDiscardTo(project, floor);
-    if (!run) break;
-    popped += run;
-  }
-
-  if (popped) {
-    project.future.length = 0;
-    project.revision = (project.revision ?? 0) + 1;
-  }
-  return popped;
 }
 
 // ---------------------------------------------------------------- application

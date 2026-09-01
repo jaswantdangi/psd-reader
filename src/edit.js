@@ -17,6 +17,7 @@
 import { projectMask, pixelRect } from './mask.js';
 import { createAdjust } from './adjust/ops.js';
 import { isNeutralAdjust } from './adjust/lut.js';
+import { normaliseRect, sameRect } from './frame/rect.js';
 
 /**
  * Blend modes offered in the UI — every mode the compositor implements, in
@@ -306,6 +307,14 @@ export function createProject(doc, fileName = 'untitled.psd', options = {}) {
     /** Where the file came from, so a full-resolution export can re-read it. */
     source,
     layers,                       // index 0 = bottom, matching the file
+    /**
+     * The window onto the document that is currently the canvas, or null for
+     * the whole of it. `width`/`height` above are the SOURCE document and never
+     * change — that is what makes a crop reversible — so anything asking "how
+     * big is the canvas" must go through `canvasSize()`, not read them.
+     * src/frame owns the geometry; the command lives here with every other one.
+     */
+    frame: null,
     warnings: [...warnings],
     /** Leaves flatten() dropped for carrying neither pixels nor text. Drives the empty-document copy. */
     skippedLeaves: stats.skipped,
@@ -324,6 +333,36 @@ export function createProject(doc, fileName = 'untitled.psd', options = {}) {
 }
 
 export const findLayer = (project, id) => project.layers.find((l) => l.id === id) || null;
+
+// ---------------------------------------------------------------- the frame
+
+/** The whole source document, which is what an unframed project means. */
+export const fullFrame = (project) => ({ x: 0, y: 0, width: project.width, height: project.height });
+
+/** The current frame — never null, so callers never branch on absence. */
+export const frameOf = (project) => project.frame || fullFrame(project);
+
+export function isCropped(project) {
+  const frame = project.frame;
+  return !!frame &&
+    (frame.x !== 0 || frame.y !== 0 || frame.width !== project.width || frame.height !== project.height);
+}
+
+/**
+ * How big the CANVAS is — the one accessor everything that means "the size of
+ * the thing on screen" must use.
+ *
+ * `project.width`/`height` are the source document and stay put through a crop,
+ * so reading them for a canvas size is silently wrong the moment a frame is
+ * set: the view would be scaled to the uncropped document and every tap would
+ * land on the wrong layer. Two fields both plausibly mean "how big is it", and
+ * a comment is not enough to stop the next reader picking the wrong one — so
+ * the right one has a name.
+ */
+export function canvasSize(project) {
+  const frame = frameOf(project);
+  return { width: frame.width, height: frame.height };
+}
 
 // ---------------------------------------------------------------- commands
 
@@ -358,6 +397,12 @@ function applyCommand(project, command) {
     // the wrong layer. The index is only used to put it BACK.
     const at = project.layers.findIndex((l) => l.id === command.layer.id);
     if (at >= 0) project.layers.splice(at, 1);
+  } else if (command.type === 'frame') {
+    // A crop is a document-level change to a single field, so it is a command
+    // like any other. It lives here rather than in a wrapper over `history`
+    // because two undo functions over one stack is a bug waiting to be filed as
+    // "undo doesn't work sometimes" -- whichever one a caller imported.
+    project.frame = command.to;
   }
 
   /**
@@ -487,6 +532,44 @@ export function reorderLayer(project, fromIndex, toIndex) {
   return commit(project, { type: 'reorder', from: fromIndex, to: toIndex });
 }
 
+/**
+ * Set the document frame. `null` clears it, restoring the whole document.
+ *
+ * The geometry that produces the rect lives in `src/frame` — the ratio presets,
+ * the handle drags, the canvas anchors. Only the COMMAND lives here, next to
+ * every other command, so there is one `applyCommand`, one `invert` and one
+ * undo stack for the whole editor.
+ *
+ * The rect is frozen for the same reason `createAdjust` freezes its result: the
+ * undo entry captures `from` BY REFERENCE, so a caller who mutated
+ * `project.frame` in place would have destroyed that entry before it was
+ * written, and nothing would notice until someone pressed undo.
+ *
+ * @param {object} project
+ * @param {{x,y,width,height}|null} rect  document coordinates; may extend
+ *   OUTSIDE the document, which is how the canvas is enlarged.
+ * @param {string} [coalesceKey]  from `nextGestureKey('crop')`. Merges with the
+ *   previous entry for the same gesture, so a crop drag is one undo step and
+ *   `revision` does not move — exactly as a layer drag behaves.
+ */
+export function setFrame(project, rect, coalesceKey) {
+  const to = rect ? Object.freeze(normaliseRect(rect)) : null;
+  const from = project.frame || null;
+  if (sameRect(from, to)) return project;
+
+  const previous = project.history[project.history.length - 1];
+  if (coalesceKey && previous && previous.type === 'frame' && previous.coalesceKey === coalesceKey) {
+    // Extend the existing step. `previous.from` stays the rect the gesture
+    // started from, so one undo unwinds the whole drag.
+    previous.to = to;
+    applyCommand(project, { type: 'frame', from, to });
+    project.future.length = 0;
+    return project;
+  }
+
+  return commit(project, { type: 'frame', from, to, coalesceKey });
+}
+
 export function undo(project) {
   const command = project.history.pop();
   if (!command) return false;
@@ -550,8 +633,19 @@ export function discardTo(project, historyLength) {
 /**
  * Topmost visible layer whose pixel at (x, y) is not transparent.
  * Falls back to bounds for layers we re-render (text being retyped).
+ *
+ * `x`/`y` are CANVAS coordinates — the space `viewToDoc` produces, and the
+ * space the rendered buffer is in. On a cropped document that is the frame's
+ * space, not the source document's, so the frame's origin is added back before
+ * anything is compared to a layer's `x`/`y`. Reading the tap as a source-
+ * document point instead puts every selection off by the crop offset, which
+ * looks like the wrong layer being picked rather than like a coordinate bug.
  */
-export function hitTest(project, x, y) {
+export function hitTest(project, canvasX, canvasY) {
+  const frame = frameOf(project);
+  const x = canvasX + frame.x;
+  const y = canvasY + frame.y;
+
   for (let i = project.layers.length - 1; i >= 0; i--) {
     const layer = project.layers[i];
     if (!layer.visible || layer.opacity === 0) continue;
@@ -579,6 +673,15 @@ export function toProjectJson(project) {
     source: project.fileName,
     width: project.width,
     height: project.height,
+    /**
+     * The crop, or null. Written even when null so a reopen can CLEAR a frame
+     * as well as set one — a save made before the crop must un-crop the project
+     * it is applied to, not leave the old one standing.
+     *
+     * Two numbers and an origin, not pixels: nothing was cut, so there is
+     * nothing to store but the window.
+     */
+    frame: project.frame ? { ...project.frame } : null,
     layers: project.layers.map((l) => ({
       id: l.id, name: l.name, kind: l.kind,
       visible: l.visible, opacity: l.opacity, blendMode: l.blendMode,
@@ -643,6 +746,12 @@ export function applyProjectJson(project, json) {
     layer.renderedKey = null;
     layer.rendered = null;
   });
+
+  // Re-frozen and re-normalised, not Object.assign'd: the save file is text on
+  // a device, so a hand-edited or half-built rect has to be completed before it
+  // becomes the canvas, and frozen for the same reason setFrame freezes.
+  // A file written before frames existed has no key, which reads as uncropped.
+  project.frame = json.frame ? Object.freeze(normaliseRect(json.frame)) : null;
 
   project.history.length = 0;
   project.future.length = 0;

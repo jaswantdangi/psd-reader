@@ -5,6 +5,13 @@ import {
   loadProjectProxy, exportFullRes, createJsExportTarget, createMemorySpill,
   nextGestureKey,
 } from '../src/index.js';
+// Direct from edit.js, deliberately: these tests are about there being ONE
+// undo, so they have to name the one in edit.js rather than a re-export.
+import {
+  undo as editUndo, redo as editRedo, discardTo as editDiscardTo,
+  canvasSize, hitTest, toProjectJson, applyProjectJson,
+} from '../src/edit.js';
+import { fitView, clampView } from '../src/view.js';
 import {
   ASPECT_RATIOS, RATIO_IDS, ratioOf, largestCentredRect, moveRect, resizeRect, MIN_FRAME_SIZE,
   fullFrame, frameOf, isCropped, setFrame, setRatio, undo, redo, discardTo,
@@ -178,7 +185,9 @@ test('a project with no frame reads as the whole document, and is not cropped', 
   assert.deepEqual(fullFrame(p), { x: 0, y: 0, width: 40, height: 30 });
   assert.deepEqual(frameOf(p), { x: 0, y: 0, width: 40, height: 30 });
   assert.equal(isCropped(p), false);
-  assert.equal(p.frame, undefined, 'createProject is not ours to change; absent means whole');
+  // `createProject` now declares the field, so a reader of the project model
+  // can see that a frame exists as a concept. `null` is the whole document.
+  assert.equal(p.frame, null);
 });
 
 test('setFrame commits one history entry and freezes the rect it stored', () => {
@@ -523,6 +532,134 @@ await atest('a crop does not change which layers the walk reads, or its dimensio
   const out = await runExport(project, framedTarget(frameOf(project), createJsExportTarget));
   assert.equal(out.width, 400);
   assert.equal(project.width, 1080, 'the project still describes the source document');
+});
+
+console.log('\none undo stack, one command model\n');
+
+test('edit.js\'s own undo unwinds a frame command', () => {
+  // The seam this closes: `undo` used to have two implementations, and a caller
+  // importing edit.js's would step over a crop without applying its inverse.
+  // Nobody gets that right, and it reads as "undo doesn't work sometimes".
+  const project = doc();
+  setFrame(project, CROP);
+  assert.equal(editUndo(project), true);
+  assert.equal(project.frame, null, 'edit.js must apply the frame command\'s inverse, not skip it');
+  assert.equal(editRedo(project), true);
+  assert.deepEqual(project.frame, CROP);
+});
+
+test('src/frame\'s undo and edit.js\'s are the same function', () => {
+  assert.equal(undo, editUndo);
+  assert.equal(redo, editRedo);
+  assert.equal(discardTo, editDiscardTo);
+});
+
+test('edit.js\'s discardTo rolls a frame back with the layer edits around it', () => {
+  const project = doc();
+  const mark = project.history.length;
+  setLayer(project, project.layers[0].id, { opacity: 0.5 });
+  setFrame(project, CROP);
+  setLayer(project, project.layers[1].id, { x: 99 });
+
+  const revision = project.revision;
+  assert.equal(editDiscardTo(project, mark), 3);
+  assert.equal(project.frame, null);
+  assert.equal(project.layers[0].opacity, 1);
+  assert.equal(project.layers[1].x, 8);
+  assert.equal(project.revision, revision + 1, 'one user action, one revision bump');
+  assert.equal(project.future.length, 0);
+});
+
+test('a crop drag still coalesces into one step and holds revision still', () => {
+  const project = doc();
+  const key = nextGestureKey('crop');
+  const revision = project.revision, mutation = project.mutation;
+  for (const w of [30, 25, 20, 16]) setFrame(project, { ...CROP, width: w }, key);
+
+  assert.equal(project.history.length, 1, 'four pointer moves, one undo step');
+  assert.equal(project.revision, revision + 1, 'the sandwich cache must survive the gesture');
+  assert.equal(project.mutation, mutation + 4);
+  editUndo(project);
+  assert.equal(project.frame, null, 'one undo unwinds the whole gesture');
+});
+
+console.log('\npersistence\n');
+
+test('a saved project carries its frame, and reopening restores it', () => {
+  const project = doc();
+  setFrame(project, CROP);
+  const json = JSON.parse(JSON.stringify(toProjectJson(project)));
+  assert.deepEqual(json.frame, CROP, 'a crop that is not written is a crop silently lost on reopen');
+
+  const reopened = applyProjectJson(doc(), json);
+  assert.deepEqual(frameOf(reopened), CROP);
+  assert.equal(isCropped(reopened), true);
+  assert.ok(Object.isFrozen(reopened.frame), 'the undo entry captures it by reference');
+});
+
+test('an uncropped project writes a null frame and reopens uncropped', () => {
+  const json = JSON.parse(JSON.stringify(toProjectJson(doc())));
+  assert.equal(json.frame, null);
+  const reopened = applyProjectJson(doc(), json);
+  assert.equal(reopened.frame, null);
+  assert.equal(isCropped(reopened), false);
+});
+
+test('reopening a cropped session onto an uncropped project clears nothing by accident', () => {
+  // The reverse direction: a save made BEFORE the crop must un-crop the project
+  // it is applied to, not leave the old frame standing.
+  const saved = JSON.parse(JSON.stringify(toProjectJson(doc())));
+  const target = doc();
+  setFrame(target, CROP);
+  applyProjectJson(target, saved);
+  assert.equal(target.frame, null);
+});
+
+console.log('\ntwo sizes, one name\n');
+
+test('canvasSize is the frame, not the source document', () => {
+  const project = doc();
+  assert.deepEqual(canvasSize(project), { width: 40, height: 30 });
+  setFrame(project, CROP);
+  assert.deepEqual(canvasSize(project), { width: 16, height: 12 });
+  assert.equal(project.width, 40, 'the source document is unchanged, which is what makes the crop reversible');
+});
+
+test('fitView scales the CANVAS into the viewport, not the uncropped document', () => {
+  const project = doc();
+  setFrame(project, CROP);
+  const viewport = { left: 0, top: 0, width: 160, height: 160 };
+  const view = fitView(project, viewport, { margin: 0 });
+  // 160/16 = 10 and 160/12 = 13.3; the canvas is 16x12, so 10 fits.
+  assert.equal(view.docScale, 10, 'sizing to 40x30 would fit the crop at 4x and leave it tiny');
+  assert.equal(view.panX, 0);
+  assert.equal(view.panY, (160 - 12 * 10) / 2);
+});
+
+test('clampView keeps the CANVAS on screen', () => {
+  const project = doc();
+  setFrame(project, CROP);
+  const viewport = { left: 0, top: 0, width: 100, height: 100 };
+
+  // Panned far off to the left: the canvas is 16x12, so its origin may go no
+  // further than `minVisible - size`. Sized to the 40x30 document those bounds
+  // would be -36 and -26, and the canvas would be dragged clean off screen.
+  const off = clampView({ docScale: 1, panX: -10000, panY: -10000 }, project, viewport, { minVisible: 4 });
+  assert.equal(off.panX, 4 - 16);
+  assert.equal(off.panY, 4 - 12);
+
+  const far = clampView({ docScale: 1, panX: 10000, panY: 10000 }, project, viewport, { minVisible: 4 });
+  assert.equal(far.panX, 96);
+  assert.equal(far.panY, 96);
+});
+
+test('hitTest reads canvas coordinates, so a tap lands on the layer under it', () => {
+  const project = doc();
+  setFrame(project, CROP);
+  // (2, 2) in the canvas is (10, 8) in the document, which is inside `mid`.
+  const hit = hitTest(project, 2, 2);
+  assert.ok(hit, 'a tap inside the canvas must hit something');
+  assert.equal(hit.name, 'mid', 'reading the tap as a DOCUMENT point would land on `back` instead');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
