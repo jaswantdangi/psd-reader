@@ -19,13 +19,17 @@ import { LayerSheet } from './layer-sheet';
 import { LayersSheet } from './layers-sheet';
 import { OverlaySheet } from './overlay-sheet';
 import { SheetShell } from './sheet-shell';
+import { TextSheet } from './text-sheet';
 
-type SheetId = 'layers' | 'layer' | 'adjust' | 'filter' | 'hsl' | 'overlay' | 'warnings' | 'export';
+type SheetId =
+  | 'layers' | 'layer' | 'text' | 'adjust' | 'filter' | 'hsl' | 'overlay'
+  | 'warnings' | 'export';
 
 /** The rail carries only tools that work. Phase 4-5 entries are absent, not greyed. */
 const RAIL: ReadonlyArray<{ id: SheetId; icon: string; label: string; needsLayer: boolean }> = [
   { id: 'layers', icon: 'layers', label: 'Layers', needsLayer: false },
   { id: 'layer', icon: 'layer', label: 'Layer', needsLayer: true },
+  { id: 'text', icon: 'text', label: 'Text', needsLayer: true },
   { id: 'adjust', icon: 'adjust', label: 'Adjust', needsLayer: true },
   { id: 'filter', icon: 'filter', label: 'Filter', needsLayer: true },
   { id: 'hsl', icon: 'hsl', label: 'HSL', needsLayer: true },
@@ -33,11 +37,12 @@ const RAIL: ReadonlyArray<{ id: SheetId; icon: string; label: string; needsLayer
 ];
 
 /** Sheets whose `✕` rolls their whole session back. The layers sheet has no session. */
-const DISCARDABLE: ReadonlyArray<SheetId> = ['layer', 'adjust', 'filter', 'hsl', 'overlay'];
+const DISCARDABLE: ReadonlyArray<SheetId> = ['layer', 'text', 'adjust', 'filter', 'hsl', 'overlay'];
 
 const TITLES: Record<SheetId, string> = {
   layers: 'Layers',
   layer: 'Layer',
+  text: 'Text',
   adjust: 'Adjust',
   filter: 'Filter',
   hsl: 'HSL',
@@ -60,6 +65,7 @@ const TITLES: Record<SheetId, string> = {
     LayersSheet,
     OverlaySheet,
     SheetShell,
+    TextSheet,
   ],
   template: `
     <div class="fixed inset-0 flex flex-col overflow-hidden bg-neutral-950 text-neutral-100">
@@ -284,6 +290,7 @@ const TITLES: Record<SheetId, string> = {
                   <app-layers-sheet />
                 }
                 @case ('layer') { <app-layer-sheet /> }
+                @case ('text') { <app-text-sheet /> }
                 @case ('adjust') { <app-adjust-sheet /> }
                 @case ('filter') { <app-filter-sheet /> }
                 @case ('hsl') { <app-hsl-sheet /> }
