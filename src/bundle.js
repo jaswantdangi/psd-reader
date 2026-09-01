@@ -57,6 +57,12 @@ export const BUNDLE_FILE_ACCEPT = [...PSD_FILE_EXTENSIONS, ...BUNDLE_FILE_EXTENS
  * family in it has tens of entries. An archive with tens of thousands is
  * somebody's backup or somebody's bomb, and in both cases the right answer is
  * to say so rather than to spend a minute walking it.
+ *
+ * The refusal says "more than N" and never a count, because the caller is
+ * expected to STOP collecting once it holds N + 1. Building a million-element
+ * manifest in order to discover that it has a million elements is exactly the
+ * cost this cap exists to avoid, so a number here would be the length of a
+ * deliberately truncated list.
  */
 export const BUNDLE_ENTRY_CAP = 512;
 
@@ -165,8 +171,8 @@ export function classifyBundle(entries, options = {}) {
       ...base,
       reason: 'too-many-entries',
       message:
-        `This zip declares ${list.length} entries. This app reads handovers of up to `
-        + `${BUNDLE_ENTRY_CAP} — an archive this large is a backup, not a PSD and its fonts.`,
+        `This zip declares more than ${BUNDLE_ENTRY_CAP} entries. A handover is a document `
+        + 'and the fonts it names — an archive this large is a backup, or a bomb.',
     };
   }
 

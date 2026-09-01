@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
+import { BundleService } from '../services/bundle.service';
 import { FontsService } from '../services/fonts.service';
 import { FontPicker } from './font-picker';
 
@@ -42,6 +43,27 @@ import { FontPicker } from './font-picker';
           closest stack it can guarantee and says so. The files stay in this tab: nothing
           is uploaded, and nothing is kept after you close it.
         </p>
+
+        <!-- What the handover zip actually did, kept whole.
+
+             The picker's own note below reports the last PICK and is cleared
+             every time a sheet opens; this one has to survive until it is read,
+             because it is the only place the three facts appear together — what
+             drew, what the zip carried that nothing asked for, and what is
+             still substituted. The third is the one that makes the feature
+             trustworthy rather than magic, so it is never dropped for brevity. -->
+        @if (bundle.note(); as note) {
+          <p
+            class="rounded-xl px-3 py-3 text-[11px] leading-relaxed"
+            [class]="
+              bundle.stillSubstituted().length
+                ? 'bg-amber-400/10 text-amber-200'
+                : 'bg-emerald-400/10 text-emerald-200'
+            "
+          >
+            {{ note }}
+          </p>
+        }
 
         @if (report.wanted) {
           <ul class="divide-y divide-white/5 overflow-hidden rounded-xl bg-white/5">
@@ -142,6 +164,7 @@ import { FontPicker } from './font-picker';
 })
 export class FontsSheet {
   protected fonts = inject(FontsService);
+  protected bundle = inject(BundleService);
 
   /**
    * Layers that ask for this typeface and are not drawing it.

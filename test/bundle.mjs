@@ -260,7 +260,12 @@ test('an archive with implausibly many entries is refused before any of them is 
 
   assert.equal(report.ok, false);
   assert.equal(report.reason, 'too-many-entries');
-  assert.match(report.message, new RegExp(String(BUNDLE_ENTRY_CAP)));
+  assert.match(report.message, new RegExp(`more than ${BUNDLE_ENTRY_CAP}`));
+  assert.doesNotMatch(
+    report.message,
+    new RegExp(String(BUNDLE_ENTRY_CAP + 1)),
+    'no exact count: the caller stops collecting at the cap, so the list it hands over is truncated',
+  );
   assert.deepEqual(report.ignored, [], 'refused before per-entry work, so there is nothing to report about them');
 });
 

@@ -6,8 +6,10 @@ import {
   signal,
   viewChild,
 } from '@angular/core';
+import { BUNDLE_FILE_ACCEPT } from '@engine/bundle.js';
 import { renderProject } from '@engine/render.js';
 import { isPreviewQuality } from '@engine/view.js';
+import { BundleService } from '../services/bundle.service';
 import { ExportService } from '../services/export.service';
 import { FontsService } from '../services/fonts.service';
 import { ProjectService } from '../services/project.service';
@@ -167,11 +169,114 @@ const TITLES: Record<SheetId, string> = {
 
       <!-- ── stage ───────────────────────────────────────────────── -->
       <main class="relative min-h-0 flex-1">
+        <!-- Reading a handover zip.
+
+             An OVERLAY rather than another arm of the state switch below, on
+             purpose: a zip that turns out to be unusable — two documents in it,
+             a bomb, no PSD at all — must not have thrown away the document the
+             user already had open. Cancel puts them straight back. -->
+        @if (bundle.status() !== 'idle') {
+          <div class="absolute inset-0 z-20 overflow-y-auto bg-neutral-950">
+            <div class="flex min-h-full flex-col items-center justify-center gap-4 px-8 py-8 text-center">
+              @switch (bundle.status()) {
+                @case ('reading') {
+                  <p class="text-sm text-neutral-300">Reading {{ bundle.fileName() }}…</p>
+                  <p class="text-xs leading-relaxed text-neutral-500">
+                    Unpacking the document and the font files beside it. The zip is read
+                    here in the browser — nothing is uploaded.
+                  </p>
+                }
+
+                @case ('choose') {
+                  <span class="text-amber-400"><app-icon name="warn" [size]="32" /></span>
+                  <p class="text-sm text-neutral-200">{{ bundle.message() }}</p>
+                  <!-- No default and no "first one": two PSDs in a handover are
+                       normally a final and a draft, and opening the draft looks
+                       exactly like this working until the wrong artwork ships. -->
+                  <ul class="w-full max-w-sm space-y-2">
+                    @for (choice of bundle.choices(); track choice.path) {
+                      <li>
+                        <button
+                          type="button"
+                          class="flex min-h-[56px] w-full flex-col justify-center rounded-xl border border-white/15 px-4 py-2 text-left active:bg-white/10"
+                          (click)="chooseBundlePsd(choice.path)"
+                        >
+                          <span class="truncate text-sm text-neutral-100">{{ choice.name }}</span>
+                          <span class="truncate text-[11px] text-neutral-500">
+                            {{ choice.path }} · {{ sizeLabel(choice.size) }}
+                          </span>
+                        </button>
+                      </li>
+                    }
+                  </ul>
+                  <button
+                    type="button"
+                    class="h-11 rounded-xl px-4 text-sm text-neutral-400 active:bg-white/10"
+                    (click)="bundle.reset()"
+                  >
+                    Cancel
+                  </button>
+                }
+
+                @case ('refused') {
+                  <span class="text-amber-400"><app-icon name="warn" [size]="32" /></span>
+                  <p class="text-sm leading-relaxed text-neutral-200">{{ bundle.message() }}</p>
+                  <p class="text-xs text-neutral-500">{{ bundle.fileName() }}</p>
+                  <label class="h-12 cursor-pointer rounded-xl bg-sky-500 px-5 text-sm font-medium leading-[3rem] text-white">
+                    Pick another file
+                    <input type="file" class="hidden" [accept]="accept" (change)="onPick($event)" />
+                  </label>
+                  <button
+                    type="button"
+                    class="h-11 rounded-xl px-4 text-sm text-neutral-400 active:bg-white/10"
+                    (click)="bundle.reset()"
+                  >
+                    Cancel
+                  </button>
+                }
+              }
+            </div>
+          </div>
+        }
+
         @switch (svc.state()) {
           @case ('ready') {
             <app-canvas-stage />
 
             <div class="pointer-events-none absolute left-3 top-3 flex flex-col items-start gap-2">
+              <!-- What the zip actually achieved, stated where it cannot be
+                   missed. The number that matters is the one that is NOT good
+                   news: a document rendering three real typefaces and one
+                   fallback looks finished, so the user ships it. Tapping opens
+                   the Fonts sheet, which names each substituted typeface and
+                   the layers still drawing a substitute for it. -->
+              @if (bundle.note()) {
+                <div class="pointer-events-auto flex max-w-[min(22rem,85vw)] items-stretch gap-1 rounded-xl bg-black/80">
+                  <button
+                    type="button"
+                    class="flex min-h-[44px] min-w-0 flex-1 items-center gap-2 rounded-l-xl px-3 py-2 text-left active:bg-white/10"
+                    (click)="open('fonts')"
+                  >
+                    <span
+                      class="shrink-0"
+                      [class]="bundle.stillSubstituted().length ? 'text-amber-300' : 'text-emerald-300'"
+                    >
+                      <app-icon name="text" [size]="16" />
+                    </span>
+                    <span class="min-w-0 text-[11px] leading-relaxed text-neutral-300">
+                      {{ bundleHeadline() }}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    class="flex h-11 w-11 shrink-0 items-center justify-center rounded-r-xl text-neutral-400 active:bg-white/10"
+                    aria-label="Dismiss the handover report"
+                    (click)="bundle.note.set('')"
+                  >
+                    ✕
+                  </button>
+                </div>
+              }
               @if (previewQuality()) {
                 <span class="rounded-full bg-black/70 px-2.5 py-1 text-[11px] text-amber-300">
                   {{ zoomLabel() }} · preview quality
@@ -236,7 +341,7 @@ const TITLES: Record<SheetId, string> = {
               <p class="text-sm text-neutral-200">{{ svc.message() }}</p>
               <label class="h-12 cursor-pointer rounded-xl bg-sky-500 px-5 text-sm font-medium leading-[3rem] text-white">
                 Pick a smaller file
-                <input type="file" class="hidden" accept=".psd,.psb" (change)="onPick($event)" />
+                <input type="file" class="hidden" [accept]="accept" (change)="onPick($event)" />
               </label>
             </div>
           }
@@ -247,7 +352,7 @@ const TITLES: Record<SheetId, string> = {
               <p class="text-xs text-neutral-500">{{ svc.fileName() }}</p>
               <label class="h-12 cursor-pointer rounded-xl bg-white/10 px-5 text-sm leading-[3rem] text-neutral-100">
                 Pick another file
-                <input type="file" class="hidden" accept=".psd,.psb" (change)="onPick($event)" />
+                <input type="file" class="hidden" [accept]="accept" (change)="onPick($event)" />
               </label>
             </div>
           }
@@ -256,15 +361,23 @@ const TITLES: Record<SheetId, string> = {
             <div class="flex h-full flex-col items-center justify-center gap-5 px-8 text-center">
               <span class="text-neutral-600"><app-icon name="file" [size]="40" /></span>
               <div>
-                <p class="text-base font-medium text-neutral-200">Open a PSD</p>
-                <p class="mt-1 text-xs text-neutral-500">
+                <p class="text-base font-medium text-neutral-200">Open a PSD, or a zip of one</p>
+                <p class="mt-1 text-xs leading-relaxed text-neutral-500">
                   Layers stay separate. Nothing is flattened, and nothing is written
                   back to your file.
+                </p>
+                <!-- A PSD names its typefaces and carries none of them, so a bare
+                     PSD always leaves the user a list of files to go and find. A
+                     handover folder already has them next to the document. -->
+                <p class="mt-2 text-xs leading-relaxed text-neutral-500">
+                  Zip the document together with its font files and this opens in the
+                  real typefaces. The zip is unpacked here in the browser — nothing is
+                  uploaded, and the fonts are not kept.
                 </p>
               </div>
               <label class="h-12 cursor-pointer rounded-xl bg-sky-500 px-5 text-sm font-medium leading-[3rem] text-white">
                 Choose file
-                <input type="file" class="hidden" accept=".psd,.psb" (change)="onPick($event)" />
+                <input type="file" class="hidden" [accept]="accept" (change)="onPick($event)" />
               </label>
             </div>
           }
@@ -466,9 +579,16 @@ export class EditorPage {
   protected svc = inject(ProjectService);
   protected exporter = inject(ExportService);
   protected fonts = inject(FontsService);
+  protected bundle = inject(BundleService);
   protected stage = viewChild(CanvasStage);
 
   protected readonly rail = RAIL;
+
+  /**
+   * `.psd,.psb,.zip` — one list, derived from the engine's own extensions so a
+   * picker and a classifier can never disagree about what is openable.
+   */
+  protected readonly accept = BUNDLE_FILE_ACCEPT;
 
   protected readonly sheet = signal<SheetId | null>(null);
   protected readonly prompt = signal('');
@@ -543,11 +663,46 @@ export class EditorPage {
     input.value = '';
     if (!file) return;
     this.sheet.set(null);
+    // A zip is a handover — document AND the fonts it names — so it takes the
+    // route that unpacks and registers both. A bare PSD is unchanged.
+    if (this.bundle.handles(file)) {
+      await this.bundle.open(file);
+      return;
+    }
+    // A plain PSD has no handover report to show, and leaving the last one up
+    // would attribute this file's typefaces to a zip it never came from.
+    this.bundle.reset();
     await this.svc.open(file);
+  }
+
+  protected async chooseBundlePsd(path: string): Promise<void> {
+    await this.bundle.choose(path);
+  }
+
+  /** Whole MB above 10 MB, one decimal below it — a 400 KB draft must not read as 1 MB. */
+  protected sizeLabel(bytes: number): string {
+    const mb = bytes / (1024 * 1024);
+    return `${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB`;
+  }
+
+  /**
+   * The handover in one line, leading with the part that is not good news.
+   *
+   * The full three-part report lives in the Fonts sheet, which this opens. What
+   * belongs on the canvas is the count a user would otherwise never look for:
+   * a document rendering three real typefaces and one substitute looks
+   * finished, and gets shipped.
+   */
+  protected bundleHeadline(): string {
+    const missing = this.bundle.stillSubstituted().length;
+    if (!missing) return 'Every typeface this file names came with the zip. Tap to check.';
+    return `${missing} typeface${missing === 1 ? '' : 's'} still substituted — the zip did not `
+      + `include ${missing === 1 ? 'it' : 'them'}. Tap for the list.`;
   }
 
   protected back(): void {
     this.sheet.set(null);
+    this.bundle.reset();
     // Closing the document abandons the thing being exported. Leaving the
     // worker alive would hold the file, a copy of the project and a
     // document-sized buffer for a PNG nobody is waiting for any more.
