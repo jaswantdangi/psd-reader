@@ -72,6 +72,23 @@ export class FontsService {
    */
   private readonly faces = new Map<string, FontFace>();
 
+  /**
+   * The picked FILE behind each loaded family.
+   *
+   * `document.fonts` is main-thread only. Full-resolution export rasterises
+   * re-drawn text inside a worker (`isSelfRendering` in src/export/order.js),
+   * and an `OffscreenCanvas` there draws from the WORKER's own `FontFaceSet` —
+   * which knows nothing about a face added here. Without this the exported PNG
+   * would quietly come back in the substitute while the screen showed the real
+   * typeface, which is the worst available outcome: the divergence appears only
+   * in the file the user ships.
+   *
+   * A `File` is a Blob HANDLE, so holding it costs a reference and not the font
+   * bytes. It crosses structured clone by reference too, so the worker reads
+   * each font once per export and nothing is copied to get it there.
+   */
+  private readonly sources = new Map<string, File>();
+
   private readonly fontSet = typeof document !== 'undefined' ? document.fonts : undefined;
 
   /** For a file input's `accept`. */
@@ -184,8 +201,10 @@ export class FontsService {
         const stale = this.faces.get(replaced.family);
         if (stale && stale !== face) this.fontSet!.delete(stale);
         this.faces.delete(replaced.family);
+        this.sources.delete(replaced.family);
       }
       this.faces.set(plan.family, face);
+      this.sources.set(plan.family, file);
       return { ok: true, family: plan.family, replaced: replaced ? replaced.family : '' };
     } catch (error: any) {
       recordFontFailure(
@@ -195,6 +214,18 @@ export class FontsService {
       );
       return miss;
     }
+  }
+
+  /**
+   * The loaded faces, as something a worker can install for itself.
+   *
+   * Handed to the export worker at the start of every export. If this ever
+   * returns less than what the screen is drawing, the PNG and the preview
+   * disagree — so it is derived from the same map the loader writes, and never
+   * from a snapshot taken earlier.
+   */
+  fontFiles(): { family: string; file: File }[] {
+    return [...this.sources.entries()].map(([family, file]) => ({ family, file }));
   }
 
   // ------------------------------------------------------------ applying

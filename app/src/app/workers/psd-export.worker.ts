@@ -143,8 +143,47 @@ async function encode(image: { width: number; height: number; data: Uint8Clamped
   return new Blob([asBytes(encodePngStored(image))], { type: 'image/png' });
 }
 
+/**
+ * Install the user's font files into THIS worker's font set.
+ *
+ * `document.fonts` does not reach here. A worker has its own `FontFaceSet`, and
+ * an `OffscreenCanvas` — which is what `create2dSurface` returns in a worker,
+ * and therefore what rasterises every re-drawn text layer at full resolution —
+ * draws from that one. So a face the editor loaded on the main thread is simply
+ * absent during export, and `ctx.font` falls through to the substitute stack
+ * behind it. The screen would be right and the exported PNG wrong, which is the
+ * worst place for the two to disagree: the user only finds out in the file they
+ * ship.
+ *
+ * THROWS rather than carrying on. A font that parsed on the main thread parses
+ * here too — the same bytes through the same engine — so a failure here means
+ * the file handle has gone stale (moved or deleted since it was picked). An
+ * export that silently substitutes is worse than one that stops and says which
+ * file it could not read.
+ */
+async function installFonts(fonts: { family: string; file: File }[]): Promise<void> {
+  if (!fonts?.length) return;
+  const set = (self as unknown as { fonts?: FontFaceSet }).fonts;
+  if (!set || typeof FontFace === 'undefined')
+    throw new Error('This browser cannot load fonts inside the export worker, so the '
+      + 'export would come back in a substitute typeface.');
+
+  for (const { family, file } of fonts) {
+    try {
+      const face = new FontFace(family, await file.arrayBuffer());
+      await face.load();
+      set.add(face);
+    } catch (error: any) {
+      throw new Error(`Could not read ${file.name} for the export. The typeface on screen `
+        + `would not be the one in the PNG. (${error?.message ?? error})`);
+    }
+  }
+}
+
 addEventListener('message', async ({ data }) => {
-  const { project, file } = data as { project: any; file: File };
+  const { project, file, fonts } = data as {
+    project: any; file: File; fonts: { family: string; file: File }[];
+  };
 
   const report = (p: { phase: string; done: number; total: number; fraction: number }) =>
     postMessage({
@@ -160,6 +199,11 @@ addEventListener('message', async ({ data }) => {
     });
 
   try {
+    // Before the walk, not during it: a face arriving halfway through would
+    // leave the layers already blended in the substitute and the rest in the
+    // real face, inside one image.
+    await installFonts(fonts);
+
     const opfs = await createOpfsSpill();
     const spill: ExportSpill = opfs ?? createMemorySpill();
 

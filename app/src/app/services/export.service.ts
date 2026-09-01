@@ -1,4 +1,5 @@
-import { Injectable, computed, signal } from '@angular/core';
+import { Injectable, computed, inject, signal } from '@angular/core';
+import { FontsService } from './fonts.service';
 
 /**
  * Human sentences for the engine's phase names.
@@ -41,6 +42,8 @@ export class ExportService {
   readonly spilledToMemory = signal(false);
 
   readonly phaseLabel = computed(() => PHASE_LABELS[this.phase()] ?? this.phase());
+
+  private fonts = inject(FontsService);
 
   private worker: Worker | null = null;
 
@@ -96,7 +99,12 @@ export class ExportService {
       this.fail('Export failed: the worker stopped responding.');
     };
 
-    worker.postMessage({ project: this.payloadFor(project), file });
+    // The worker has its OWN FontFaceSet — a face added to document.fonts is
+    // invisible to it, and it is the worker that rasterises re-drawn text at
+    // full resolution. Without these the PNG comes back in the substitute while
+    // the screen shows the real typeface. Files cross by reference, so this
+    // costs a handle, not the font bytes.
+    worker.postMessage({ project: this.payloadFor(project), file, fonts: this.fonts.fontFiles() });
   }
 
   /**
