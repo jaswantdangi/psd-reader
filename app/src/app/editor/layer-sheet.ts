@@ -25,7 +25,12 @@ const GROUP_ORDER: ReadonlyArray<{ label: string; ids: readonly string[] }> = [
 
 const ALL_MODES: string[] = BLEND_MODES;
 
-const GROUPS = (() => {
+/**
+ * Exported: the Overlay sheet paints a gradient carrying its OWN blend mode,
+ * drawn from the same 26. One grouping, or two pickers over one list would
+ * teach two different mental models of it.
+ */
+export const BLEND_GROUPS = (() => {
   const claimed = new Set<string>();
   const groups = GROUP_ORDER.map((group) => {
     const modes = ALL_MODES.filter((mode) => group.ids.includes(mode));
@@ -142,7 +147,7 @@ const GROUPS = (() => {
 })
 export class LayerSheet {
   protected svc = inject(ProjectService);
-  protected readonly groups = GROUPS;
+  protected readonly groups = BLEND_GROUPS;
 
   private opacityKey = signal<string | undefined>(undefined);
 
