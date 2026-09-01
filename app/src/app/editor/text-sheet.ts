@@ -59,7 +59,9 @@ const BASE_MAX_SIZE = 200;
               This layer is still Photoshop's own pixels. Changing anything here re-draws
               the glyphs with the settings below, and the file's own typeface is not
               carried into this editor — so the result can look different from the
-              original. Undo puts the original pixels back.
+              original. Its box is re-measured to this app's metrics at the same
+              moment, so it resizes once around the text. Undo puts the original
+              pixels back.
             </p>
           } @else {
             <p class="flex items-start gap-2 text-[11px] leading-relaxed text-neutral-500">

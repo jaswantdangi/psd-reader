@@ -31,6 +31,7 @@ import {
   HANDLES,
   HANDLE_HIT_CSS_PX,
 } from '@engine/gesture.js';
+import { liveTextRect } from '@engine/creative/index.js';
 import { ProjectService } from '../services/project.service';
 
 /** Viewport origin for overlay geometry: the overlay is positioned inside the host. */
@@ -337,13 +338,22 @@ export class CanvasStage implements OnDestroy {
       handleRadius: HANDLE_HIT_CSS_PX / view.docScale,
     });
 
+    // A scale drag re-draws a text layer, and a text layer still showing
+    // Photoshop's own pixels is bounded by the FILE's box -- the ink extent of
+    // the glyphs, which our renderer would read as a line box and fit ~1.4x too
+    // small. So the drag starts from the box that layer is ABOUT to have, and
+    // the first frame both re-fits and resizes, in one history entry. Null for
+    // every other layer, and for a text layer already re-drawn.
+    const startRect =
+      decision.kind === 'scale' ? liveTextRect(layer) ?? selection : selection;
+
     this.gesture = {
       kind: decision.kind,
       handle: decision.handle,
       key: this.svc.gestureKey('xform'),
       startDoc: docPoint,
       startClient: { x: event.clientX, y: event.clientY },
-      startRect: selection,
+      startRect,
       startView: view,
       layerId: layer ? layer.id : null,
       moved: false,
