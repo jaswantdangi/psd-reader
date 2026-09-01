@@ -32,12 +32,20 @@ const BASE_MAX_SIZE = 200;
  *    is a visible change to the image, so it is stated before it happens and
  *    badged after.
  *
- * 2. **The file's typography is not fully carried.** `toLayer` sets
- *    `fontFamily` to `FONT_STACKS[0]` and `bold`/`italic` to false for EVERY
- *    text layer it reads — the PSD's own typeface never reaches the model. The
- *    controls below are therefore what the app will draw with, not a readout of
- *    what Photoshop used, and a picker that did not say so would be lying about
- *    the file.
+ * 2. **The typeface is a SUBSTITUTION, and it is named.** A PSD stores font
+ *    names, never font files, so the file's own face can never be loaded here.
+ *    `toLayer` now reads that name into `text.sourceFont` and picks the closest
+ *    stack the renderer can guarantee, and this screen says both — "the file
+ *    names AachenBTBold, showing Arial" — rather than presenting our choice as
+ *    the file's. `bold`/`italic` are still false for every layer read from a
+ *    file; that gap is in docs/BACKLOG.md.
+ *
+ * 3. **The size on the slider is not the number in the file.** `style.fontSize`
+ *    is the PRE-transform size and Photoshop draws it under the layer's matrix.
+ *    The model bakes that scale in, so the slider shows what is drawn; the
+ *    file's own pair (`sourceFontSize` at `sourceScale`) is shown underneath
+ *    wherever they differ, or the sheet would appear to contradict Photoshop's
+ *    Character panel with no explanation.
  *
  * The "edited" state is read from `layer.rerendered`, never from
  * `content !== originalContent`: a layer created here has `originalContent:''`
@@ -57,8 +65,8 @@ const BASE_MAX_SIZE = 200;
           @if (!layer.rerendered) {
             <p class="rounded-lg bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-300">
               This layer is still Photoshop's own pixels. Changing anything here re-draws
-              the glyphs with the settings below, and the file's own typeface is not
-              carried into this editor — so the result can look different from the
+              the glyphs with the settings below, and the file's own typeface cannot be
+              loaded — only substituted — so the result can look different from the
               original. Its box is re-measured to this app's metrics at the same
               moment, so it resizes once around the text. Undo puts the original
               pixels back.
@@ -117,6 +125,13 @@ const BASE_MAX_SIZE = 200;
             (valueChange)="setSize($event)"
             (knobEnd)="endSize()"
           />
+
+          <!-- Photoshop's Character panel shows the PRE-transform size, so a
+               scaled layer reads 66.7 there and 17 here. Without this line the
+               sheet looks like it is simply wrong about the file. -->
+          @if (sizeNote(layer.text); as note) {
+            <p class="-mt-3 text-[11px] leading-relaxed text-neutral-500">{{ note }}</p>
+          }
 
           <div class="flex flex-wrap items-center gap-2">
             <span class="w-20 shrink-0 text-[11px] font-medium uppercase tracking-wider text-neutral-400">
@@ -185,10 +200,21 @@ const BASE_MAX_SIZE = 200;
                 </button>
               }
             </div>
-            <p class="mt-2 text-[11px] leading-relaxed text-neutral-500">
-              These are the stacks the renderer can guarantee on a phone. The PSD's own
-              font is never read, so this is a choice rather than a match.
-            </p>
+            <!-- The point of reading the name at all. Silently drawing Arial in
+                 place of the file's face is the bug; naming both is the fix. -->
+            @if (layer.text.sourceFont; as source) {
+              <p class="mt-2 rounded-lg bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-300">
+                The file asks for <b class="font-semibold">{{ source }}</b> — not available
+                here, showing <b class="font-semibold">{{ nameOf(layer.text.fontFamily) }}</b>.
+                A PSD stores font names, never the font itself, so this is the closest
+                stack the renderer can guarantee rather than a match.
+              </p>
+            } @else {
+              <p class="mt-2 text-[11px] leading-relaxed text-neutral-500">
+                These are the stacks the renderer can guarantee on a phone. No typeface
+                was carried into this layer, so this is a choice rather than a match.
+              </p>
+            }
           </div>
         </div>
       } @else {
@@ -262,6 +288,21 @@ export class TextSheet {
 
   protected nameOf(stack: string): string {
     return (stack.split(',')[0] ?? stack).replace(/["']/g, '');
+  }
+
+  /**
+   * Where the drawn size came from, when it is not the number the file stores.
+   *
+   * Only shown when the transform actually scales — an identity transform makes
+   * this a restatement of the slider, and a sheet that explains something that
+   * needs no explaining teaches the user to stop reading it.
+   */
+  protected sizeNote(text: any): string {
+    const stored = text?.sourceFontSize;
+    const scale = text?.sourceScale ?? 1;
+    if (typeof stored !== 'number' || Math.abs(scale - 1) < 0.005) return '';
+    return `Photoshop stores ${Math.round(stored * 10) / 10} px scaled to `
+      + `${Math.round(scale * 100)}%, which is the ${text.fontSize} px drawn here.`;
   }
 
   protected lineCount(content: string): number {
