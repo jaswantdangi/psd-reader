@@ -13,6 +13,7 @@ import { buildLut } from './lut.js';
 import { blendInto } from '../composite.js';
 import {
   HSL_BANDS, HSL_HUE_DEGREES, bandWeights, isNeutralHsl, isNeutralOverlay,
+  overlaySourceWindow,
 } from './ops.js';
 
 /**
@@ -181,16 +182,86 @@ function sampleStops(stops, t, out) {
 }
 
 /**
- * Paint a procedural gradient over the adjusted buffer, in place.
+ * Bilinear sample of a texture at a NORMALISED position inside `win`,
+ * written into `out` as r, g, b, a(0..1).
+ *
+ * ## Why bilinear, and not downscaleImage's box average
+ *
+ * The two filters in this repository answer different questions.
+ * `downscaleImage` is the correct filter for MINIFICATION -- averaging the
+ * whole source box, which four bilinear neighbours cannot do below about half
+ * scale. `resample` is bilinear, and is what every layer's own pixels go
+ * through in drawLayerInto one line above this pass.
+ *
+ * The anti-alias budget for an overlay is spent ONCE, at import, where the
+ * user's PNG is box-reduced to OVERLAY_IMAGE_EDGE by the app layer. What
+ * reaches here is therefore an already-band-limited texture, and the remaining
+ * job is a resample to the destination rect -- upscaling at export, mild
+ * minification at proxy. Bilinear is right for the first and adequate for the
+ * second, and choosing it means the overlay is filtered by exactly the same
+ * arithmetic as the layer it sits on, rather than by a second filter that could
+ * make the two disagree about where an edge is.
+ *
+ * A per-destination-pixel box average WOULD be better under heavy minification.
+ * It is not free: the honest version is scale-dependent, and a filter that
+ * changes with `scale` is precisely the thing this whole feature must not have
+ * -- it would make the proxy and the export differ by construction. Documented
+ * here rather than left as a silent choice; the visible cost is that a
+ * high-frequency grain texture shrunk hard will sparkle, which is one of the
+ * reasons `tile` is backlogged rather than shipped.
+ *
+ * Clamped to the source's own range at BOTH ends rather than only at the top,
+ * so an edge texel is the edge colour rather than a linear extrapolation past
+ * it -- `resample` tolerates the negative fraction because its source and
+ * destination always cover the same rect; a cropped `cover` window does not.
+ */
+function sampleImage(image, win, u, v, out) {
+  const w = image.width;
+  const h = image.height;
+
+  let sx = (win.u0 + u * (win.u1 - win.u0)) * w - 0.5;
+  let sy = (win.v0 + v * (win.v1 - win.v0)) * h - 0.5;
+  sx = sx < 0 ? 0 : sx > w - 1 ? w - 1 : sx;
+  sy = sy < 0 ? 0 : sy > h - 1 ? h - 1 : sy;
+
+  const x0 = Math.floor(sx);
+  const y0 = Math.floor(sy);
+  const x1 = x0 + 1 > w - 1 ? w - 1 : x0 + 1;
+  const y1 = y0 + 1 > h - 1 ? h - 1 : y0 + 1;
+  const fx = sx - x0;
+  const fy = sy - y0;
+
+  const i00 = (y0 * w + x0) * 4;
+  const i10 = (y0 * w + x1) * 4;
+  const i01 = (y1 * w + x0) * 4;
+  const i11 = (y1 * w + x1) * 4;
+  const data = image.data;
+
+  for (let c = 0; c < 4; c++) {
+    const top = data[i00 + c] + (data[i10 + c] - data[i00 + c]) * fx;
+    const bottom = data[i01 + c] + (data[i11 + c] - data[i01 + c]) * fx;
+    out[c] = top + (bottom - top) * fy;
+  }
+  // One convention for both sources: sampleStops reports alpha as 0..1.
+  out[3] /= 255;
+}
+
+/**
+ * Paint the overlay over the adjusted buffer, in place.
  *
  * Row by row, through blendInto. Two reasons, both about not building a second
  * compositor: the 26 blend modes stay in ONE implementation -- the
- * pixel-validated oracle -- and the gradient needs only a `width * 4` row
+ * pixel-validated oracle -- and the overlay needs only a `width * 4` row
  * buffer rather than a second full-size scratch, which the export peak cannot
- * afford.
+ * afford. That is also why an image overlay is sampled per pixel INTO THAT ROW
+ * rather than pre-resampled to the destination rect: a pre-resample would
+ * allocate a second rect-sized buffer, which at export is another 66 MB for the
+ * measured poster.
  *
- * The gradient position is normalised: (x + 0.5) / width, never a pixel offset.
- * That is the whole scale-invariance argument, and it is one line.
+ * The sample position is normalised: (x + 0.5) / width, never a pixel offset.
+ * That is the whole scale-invariance argument, and it is one line -- and it is
+ * the same line for a gradient and for an image, which is why the image kind
+ * needed no new argument about proxy and export agreeing.
  */
 export function applyOverlay(out, overlay) {
   const { width, height } = out;
@@ -200,8 +271,16 @@ export function applyOverlay(out, overlay) {
   const radians = (overlay.angle * Math.PI) / 180;
   const ca = Math.cos(radians);
   const sa = Math.sin(radians);
+  const image = overlay.kind === 'image' ? overlay.image : null;
   const radial = overlay.kind === 'radial';
   const rect = { left: 0, top: 0, width, height: 1 };
+
+  // Decided ONCE for the whole pass, from aspect ratios alone -- so the crop is
+  // the same number at proxy scale and at document scale. See
+  // overlaySourceWindow.
+  const srcWindow = image
+    ? overlaySourceWindow(overlay.fit, width, height, image.width, image.height)
+    : null;
 
   for (let y = 0; y < height; y++) {
     const v = (y + 0.5) / height;
@@ -209,19 +288,25 @@ export function applyOverlay(out, overlay) {
 
     for (let x = 0; x < width; x++) {
       const u = (x + 0.5) / width;
-      const t = radial
-        ? Math.min(1, Math.hypot(u - overlay.cx, v - overlay.cy) / overlay.radius)
-        : Math.min(1, Math.max(0, 0.5 + (u - 0.5) * ca + (v - 0.5) * sa));
 
-      sampleStops(overlay.stops, t, sample);
+      if (image) {
+        sampleImage(image, srcWindow, u, v, sample);
+      } else {
+        const t = radial
+          ? Math.min(1, Math.hypot(u - overlay.cx, v - overlay.cy) / overlay.radius)
+          : Math.min(1, Math.max(0, 0.5 + (u - 0.5) * ca + (v - 0.5) * sa));
+        sampleStops(overlay.stops, t, sample);
+      }
 
       const dstAlpha = out.data[base + x * 4 + 3];
       alphas[x] = dstAlpha;
       row[x * 4] = sample[0];
       row[x * 4 + 1] = sample[1];
       row[x * 4 + 2] = sample[2];
-      // Clipped to the layer's OWN alpha. Without this a gradient paints into
-      // the transparent region and turns a cut-out into a rectangle.
+      // Clipped to the layer's OWN alpha, times the texture's own where there
+      // is one -- which is what lets a light leak fade out. Without the layer
+      // term an overlay paints into the transparent region and turns a cut-out
+      // into a rectangle.
       row[x * 4 + 3] = sample[3] * 255 * (dstAlpha / 255);
     }
 

@@ -7,6 +7,8 @@ import {
   applyAdjustments,
   HSL_BANDS, NEUTRAL_HSL, normaliseHsl, isNeutralHsl, bandWeights, applyHsl,
   SUPPORTED_BLEND_MODES, normaliseOverlay, isNeutralOverlay,
+  OVERLAY_KINDS, OVERLAY_FITS, OVERLAY_IMAGE_EDGE, overlaySourceWindow, overlayNeedsImage,
+  DEFAULT_PROXY_EDGE, proxyScaleFor, downscaleImage, drawLayerInto, createBuffer,
   PRESETS, PRESET_IDS, presetAdjust,
   createProject, setAdjust, undo, nextGestureKey, discardTo,
   toProjectJson, applyProjectJson,
@@ -1204,6 +1206,323 @@ test('Table D declares that it has no GPU to compare against', () => {
   // Until 1B-2 lands the route runs JS against itself. A green table that means
   // nothing is worse than an absent one, so the note is not optional.
   assert.match(CONFORMANCE_TABLE_D_NOTE, /no GPU|JS against itself|1B-2/i);
+});
+
+console.log('\nthe image overlay\n');
+
+/**
+ * A synthetic texture: red is a horizontal ramp, green a vertical one.
+ *
+ * Both are LINEAR in the source coordinate, which is what makes the
+ * proxy-versus-full-resolution comparison below exact rather than approximate:
+ * a box average of a linear function equals the function at the box's centre,
+ * and that is precisely what a bilinear sample at the same centre returns.
+ */
+const texture = (w, h, alpha = 255) => {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      data[o] = Math.round((x / Math.max(1, w - 1)) * 255);
+      data[o + 1] = Math.round((y / Math.max(1, h - 1)) * 255);
+      data[o + 2] = 128;
+      data[o + 3] = alpha;
+    }
+  return { width: w, height: h, data };
+};
+
+/** One flat, fully opaque layer -- so the only thing that varies is the overlay. */
+const flatProject = (w, h, grey = 128) => {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    data[i * 4] = grey; data[i * 4 + 1] = grey; data[i * 4 + 2] = grey; data[i * 4 + 3] = 255;
+  }
+  return createProject({
+    width: w, height: h,
+    children: [{ name: 'base', left: 0, top: 0, right: w, bottom: h,
+                 proxyData: { width: w, height: h, data } }],
+  }, 'overlay.psd');
+};
+
+test('image is a supported overlay kind, with stretch and cover as its fits', () => {
+  assert.ok(OVERLAY_KINDS.includes('image'), 'the kind list is the one the UI offers');
+  assert.deepEqual([...OVERLAY_FITS], ['stretch', 'cover']);
+  const o = normaliseOverlay({ kind: 'image', fit: 'nonsense', image: texture(4, 4) });
+  assert.equal(o.kind, 'image');
+  assert.equal(o.fit, 'cover', 'an unknown fit falls back to the one that cannot distort');
+});
+
+test('normaliseOverlay rejects a mis-shaped image rather than indexing past its end', () => {
+  // A project file is text on a device and can carry anything, exactly as
+  // decodeMaskJson already argues -- and the sampler indexes by
+  // (y * width + x) * 4 with no bounds check.
+  const good = texture(4, 4);
+  const kept = normaliseOverlay({ kind: 'image', image: good });
+  assert.equal(kept.image.width, 4);
+  assert.equal(kept.image.data, good.data, 'the caller\'s array is kept, never copied');
+
+  const bad = [
+    { width: 4, height: 4, data: new Uint8ClampedArray(10) },
+    { width: 0, height: 4, data: new Uint8ClampedArray(0) },
+    { width: 4, height: 4 },
+    { width: 4, height: 4, data: [1, 2, 3] },
+    'nonsense', null, 7,
+  ];
+  for (const image of bad)
+    assert.equal(normaliseOverlay({ kind: 'image', image }).image, null,
+      `accepted ${JSON.stringify(image)}`);
+});
+
+test('createAdjust freezes an image overlay WITHOUT trying to freeze its pixels', () => {
+  // Object.freeze on a typed array with elements THROWS, and Object.keys on one
+  // enumerates every index -- four million strings for a full-size texture. So
+  // the pixels are held by convention: the container is frozen so the reference
+  // cannot be swapped, and nothing in the adjust stack ever writes through it.
+  const img = texture(8, 8);
+  const a = createAdjust({ overlay: { kind: 'image', image: img, mode: 'normal', opacity: 1 } });
+  assert.ok(Object.isFrozen(a.overlay), 'the overlay object is frozen');
+  assert.ok(Object.isFrozen(a.overlay.image), 'and so is the image container');
+  assert.equal(Object.isFrozen(a.overlay.image.data), false,
+    'a typed array with elements cannot be frozen at all');
+  assert.equal(a.overlay.image.data, img.data, 'and it is the same array, not a second copy');
+  assert.throws(() => { a.overlay.image.width = 2; }, TypeError);
+});
+
+test('an image overlay with no pixels is neutral, and says so out loud', () => {
+  const missing = createAdjust({
+    overlay: { kind: 'image', mode: 'normal', opacity: 1, source: 'leak.png' },
+  });
+  assert.equal(missing.overlay.kind, 'image', 'it is not silently turned into a gradient');
+  assert.equal(missing.overlay.source, 'leak.png');
+  assert.equal(overlayNeedsImage(missing.overlay), true);
+  assert.equal(isNeutralOverlay(missing.overlay), true);
+  assert.equal(adjustCostOf(missing).overlay, false);
+  assert.equal(isNeutralAdjust(missing), true, 'so the whole pass is skipped');
+
+  const present = createAdjust({
+    overlay: { kind: 'image', image: texture(4, 4), mode: 'normal', opacity: 1 },
+  });
+  assert.equal(overlayNeedsImage(present.overlay), false);
+  assert.equal(isNeutralOverlay(present.overlay), false);
+  assert.equal(adjustCostOf(present).overlay, true);
+});
+
+test('an image overlay paints its own pixels, clipped to the layer\'s alpha', () => {
+  const src = { width: 2, height: 1, data: new Uint8ClampedArray([9, 9, 9, 0, 9, 9, 9, 255]) };
+  const image = { width: 2, height: 1,
+                  data: new Uint8ClampedArray([255, 0, 0, 255, 255, 0, 0, 255]) };
+  const a = createAdjust({
+    overlay: { kind: 'image', fit: 'stretch', image, mode: 'normal', opacity: 1 },
+  });
+  const out = applyAdjustments(src, a, blank(src));
+  assert.deepEqual([...out.data.slice(0, 4)], [9, 9, 9, 0], 'the transparent pixel is untouched');
+  assert.deepEqual([...out.data.slice(4, 8)], [255, 0, 0, 255], 'the opaque one took the texture');
+});
+
+test('the texture\'s OWN alpha is honoured, so a light leak can fade out', () => {
+  const src = { width: 2, height: 1, data: new Uint8ClampedArray([80, 80, 80, 255, 80, 80, 80, 255]) };
+  const image = { width: 2, height: 1,
+                  data: new Uint8ClampedArray([255, 0, 0, 0, 255, 0, 0, 255]) };
+  const a = createAdjust({
+    overlay: { kind: 'image', fit: 'stretch', image, mode: 'normal', opacity: 1 },
+  });
+  const out = applyAdjustments(src, a, blank(src));
+  assert.deepEqual([...out.data.slice(0, 4)], [80, 80, 80, 255], 'a transparent texel paints nothing');
+  assert.equal(out.data[4], 255, 'an opaque one paints fully');
+});
+
+test('alpha is byte-identical before and after an image overlay (invariant A)', () => {
+  const src = sweep();
+  const a = createAdjust({
+    overlay: { kind: 'image', fit: 'cover', image: texture(9, 5), mode: 'overlay', opacity: 0.8 },
+  });
+  const out = applyAdjustments(src, a, blank(src));
+  for (let i = 0; i < src.width * src.height; i++)
+    assert.equal(out.data[i * 4 + 3], src.data[i * 4 + 3], `pixel ${i}`);
+});
+
+test('stretch maps the whole texture across the rect, at any destination width', () => {
+  // The scale-invariance claim for an image, made checkable the same way the
+  // gradient's is: the sample position is NORMALISED, so the same function is
+  // applied at every resolution and there is no proxyScale term to get wrong.
+  const image = texture(64, 1);
+  const a = createAdjust({
+    overlay: { kind: 'image', fit: 'stretch', image, mode: 'normal', opacity: 1 },
+  });
+  for (const width of [8, 64, 256]) {
+    const out = applyAdjustments(blackRow(width), a, blank(blackRow(width)));
+    for (let x = 0; x < width; x++) {
+      const sx = Math.min(63, Math.max(0, ((x + 0.5) / width) * 64 - 0.5));
+      const x0 = Math.floor(sx);
+      const x1 = Math.min(63, x0 + 1);
+      const f = sx - x0;
+      const expect = image.data[x0 * 4] + (image.data[x1 * 4] - image.data[x0 * 4]) * f;
+      assert.ok(Math.abs(out.data[x * 4] - expect) <= 1, `width ${width}, x ${x}`);
+    }
+  }
+});
+
+test('cover crops from the rect\'s ASPECT, so proxy and full resolution agree EXACTLY', () => {
+  // The bug this exists to catch: a fit computed against pixel sizes rather
+  // than the normalised rect produces a different crop at export than on
+  // screen, and nothing on the editing screen can show it.
+  const at = (w, h) => overlaySourceWindow('cover', w, h, 400, 100);
+  assert.deepEqual(at(300, 300), at(1200, 1200), 'a 4x proxy factor changes nothing');
+  assert.deepEqual(at(37, 37), at(4096, 4096), 'nor does any other pair at the same aspect');
+
+  const win = at(300, 300);
+  assert.ok(Math.abs(win.u0 - 0.375) < 1e-12 && Math.abs(win.u1 - 0.625) < 1e-12,
+    'a 4:1 texture in a 1:1 rect keeps the middle quarter, centred');
+  assert.deepEqual([win.v0, win.v1], [0, 1], 'and all of the short axis');
+
+  const tall = overlaySourceWindow('cover', 400, 100, 300, 300);
+  assert.deepEqual([tall.u0, tall.u1], [0, 1], 'the other orientation crops the other axis');
+  assert.ok(Math.abs(tall.v0 - 0.375) < 1e-12 && Math.abs(tall.v1 - 0.625) < 1e-12);
+
+  assert.deepEqual(overlaySourceWindow('stretch', 300, 300, 400, 100),
+    { u0: 0, v0: 0, u1: 1, v1: 1 }, 'stretch never crops');
+});
+
+test('the same image overlay renders the same picture at proxy scale and at full resolution', () => {
+  // The end-to-end version of the two tests above, through renderProject and
+  // drawLayerInto rather than through the sampler alone -- because the fit is
+  // computed against the DESTINATION RECT, which is the thing `scale` moves.
+  const image = texture(128, 32);
+  const full = flatProject(64, 48);
+  setAdjust(full, full.layers[0].id, {
+    overlay: { kind: 'image', fit: 'cover', image, mode: 'normal', opacity: 1 },
+  });
+
+  const one = renderProject(full, { scale: 1 });
+  const half = renderProject(full, { scale: 0.5 });
+  const reduced = downscaleImage(one, 0.5);
+
+  assert.equal(reduced.width, half.width);
+  assert.equal(reduced.height, half.height);
+  let worst = 0;
+  for (let i = 0; i < half.data.length; i++)
+    worst = Math.max(worst, Math.abs(half.data[i] - reduced.data[i]));
+  assert.ok(worst <= 2, `proxy and full resolution disagree by ${worst}`);
+});
+
+test('an image overlay goes through blendInto too, so all 26 modes are available to it', () => {
+  const src = blackRow(4);
+  const image = texture(4, 1);
+  const seen = new Set();
+  for (const mode of SUPPORTED_BLEND_MODES) {
+    const a = createAdjust({ overlay: { kind: 'image', fit: 'stretch', image, mode, opacity: 1 } });
+    assert.equal(a.overlay.mode, mode, `${mode} survived normalisation`);
+    seen.add(applyAdjustments(src, a, blank(src)).data.join(','));
+  }
+  assert.ok(seen.size > 1, 'different modes must produce different results');
+});
+
+test('lutDigest still ignores the overlay when it carries an image', () => {
+  // Keeping the table's key free of the overlay is what stops an overlay drag
+  // rebuilding 768 entries per frame. An image is a bigger temptation to put in
+  // the key than a gradient was, and it must not be there either.
+  const image = texture(8, 8);
+  const base = createAdjust({ brightness: 12 });
+  const withImage = createAdjust({
+    brightness: 12,
+    overlay: { kind: 'image', image, mode: 'multiply', opacity: 0.5 },
+  });
+  assert.equal(lutDigest(withImage), lutDigest(base));
+
+  const layer = { adjust: base };
+  const table = lutFor(layer);
+  layer.adjust = withImage;
+  assert.equal(lutFor(layer), table, 'the same table object -- no rebuild');
+});
+
+test('the overlay pixels survive the crossing into the export worker', () => {
+  // The worker has its own context and receives the project by STRUCTURED
+  // CLONE with `layer.pixels` stripped (ExportService.payloadFor) -- the exact
+  // crossing the font work got wrong, where the screen was right and the PNG
+  // came back substituted. So this walks the same crossing and re-renders from
+  // the far side. It also proves the object carries nothing uncloneable: a
+  // plain enumerable `toJSON` method on it would throw DataCloneError here.
+  const image = texture(40, 40);
+  const p = flatProject(32, 24);
+  setAdjust(p, p.layers[0].id, {
+    overlay: { kind: 'image', fit: 'cover', image, mode: 'screen', opacity: 0.75 },
+  });
+  const here = renderProject(p, { scale: 1 });
+
+  const payload = structuredClone({
+    ...p,
+    layers: p.layers.map((l) => ({ ...l, pixels: null })),
+  });
+  assert.equal(payload.layers[0].adjust.overlay.image.data.length, image.data.length,
+    'the texture reached the far side');
+
+  const dest = createBuffer(p.width, p.height);
+  payload.layers.forEach((layer, i) =>
+    drawLayerInto(dest, layer, 1, { pixels: p.layers[i].pixels }));
+  assert.deepEqual([...dest.data], [...here.data], 'and it renders identically there');
+});
+
+test('one texture on two layers crosses as ONE buffer, not two', () => {
+  const image = texture(16, 16);
+  const p = twoLayerProject();
+  const overlay = { kind: 'image', fit: 'cover', image, mode: 'normal', opacity: 1 };
+  setAdjust(p, p.layers[0].id, { overlay });
+  setAdjust(p, p.layers[1].id, { overlay });
+
+  assert.equal(p.layers[0].adjust.overlay.image.data, p.layers[1].adjust.overlay.image.data,
+    'normalisation keeps the caller\'s array rather than copying it per layer');
+  const clone = structuredClone(p.layers.map((l) => l.adjust));
+  assert.equal(clone[0].overlay.image.data.buffer, clone[1].overlay.image.data.buffer,
+    'and structured clone preserves the sharing, so N layers cost one texture');
+});
+
+test('a saved project REFERENCES the overlay image by name and never writes its pixels', () => {
+  // The generated-mask precedent stores its plane because a cut-out has no
+  // source to rebuild from. A user's texture DOES have one -- the file on their
+  // device -- so this stores the name and says the picture must be supplied
+  // again, rather than adding megabytes of base64 per layer.
+  const image = texture(64, 64);
+  const p = twoLayerProject();
+  setAdjust(p, p.layers[0].id, {
+    overlay: { kind: 'image', fit: 'cover', image, source: 'leak.png',
+               mode: 'screen', opacity: 0.7 },
+  });
+
+  const text = JSON.stringify(toProjectJson(p));
+  assert.ok(text.length < 4000, `the pixels leaked into the save file (${text.length} bytes)`);
+
+  const json = JSON.parse(text);
+  const saved = json.layers[0].adjust.overlay;
+  assert.equal(saved.kind, 'image');
+  assert.equal(saved.fit, 'cover');
+  assert.equal(saved.source, 'leak.png');
+  assert.equal(saved.image, null, 'the pixels are deliberately absent');
+
+  const target = twoLayerProject();
+  applyProjectJson(target, json);
+  const back = target.layers[0].adjust.overlay;
+  assert.equal(back.kind, 'image', 'reopening keeps the overlay rather than inventing a gradient');
+  assert.equal(back.source, 'leak.png');
+  assert.equal(overlayNeedsImage(back), true, 'and says the picture has to be supplied again');
+  assert.deepEqual([...renderProject(target, { scale: 1 }).data],
+                   [...renderProject(twoLayerProject(), { scale: 1 }).data],
+                   'until it is, nothing is painted -- never a wrong picture');
+});
+
+test('the import cap bounds an image overlay to ONE proxy layer\'s worth of bytes', () => {
+  // src/budget.js accounts for `file + largest full-res layer + sum of
+  // proxies`. An overlay is a resident bitmap that budget never counted, so it
+  // is capped at exactly one proxy layer -- 1024 on the long edge, 4 MB at the
+  // very worst -- and the anti-alias budget is spent ONCE here, on import,
+  // rather than on every frame.
+  assert.equal(OVERLAY_IMAGE_EDGE, DEFAULT_PROXY_EDGE, 'one number, not two');
+  const huge = texture(2400, 1200);
+  const reduced = downscaleImage(huge, proxyScaleFor(huge.width, huge.height, OVERLAY_IMAGE_EDGE));
+  assert.equal(Math.max(reduced.width, reduced.height), OVERLAY_IMAGE_EDGE);
+  assert.ok(reduced.data.length <= OVERLAY_IMAGE_EDGE * OVERLAY_IMAGE_EDGE * 4,
+    `${reduced.data.length} bytes`);
+  assert.ok(normaliseOverlay({ kind: 'image', image: reduced }).image,
+    'and the reduced texture is accepted as it stands');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

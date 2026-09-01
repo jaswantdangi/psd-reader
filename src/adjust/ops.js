@@ -31,6 +31,7 @@
  */
 
 import { SUPPORTED_BLEND_MODES } from '../composite.js';
+import { DEFAULT_PROXY_EDGE } from '../proxy.js';
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
@@ -99,10 +100,31 @@ export const OPS = {
  * at the point of the mistake instead of a silent loss later.
  */
 const deepFreeze = (value) => {
-  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
-    for (const key of Object.keys(value)) deepFreeze(value[key]);
-    Object.freeze(value);
-  }
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+
+  /*
+   * PIXELS ARE THE EXCEPTION, and freezing a typed array is not the same thing
+   * as freezing an object. Two separate reasons this has to stop here:
+   *
+   *   - `Object.freeze` on an ArrayBuffer view that HAS elements throws
+   *     outright ("Cannot freeze array buffer views with elements"), so an
+   *     image overlay would make createAdjust throw rather than return.
+   *   - `Object.keys` on one enumerates every INDEX. A 1024x1024 texture is
+   *     four million own keys, each of which the loop above would then recurse
+   *     into. That is not a freeze, it is a hang.
+   *
+   * So an overlay's pixels are immutable BY CONVENTION rather than by the
+   * runtime. The convention is enforceable because it is narrow: the container
+   * `{width, height, data}` IS frozen, so the reference cannot be swapped or
+   * re-pointed, and the whole adjust stack only ever READS through it --
+   * applyOverlay writes into its own row buffer, never into the source. The
+   * undo hazard deepFreeze exists for is a mutated PARAMETER, and the pixels
+   * are not a parameter: they are handed in once and never edited in place.
+   */
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+
+  for (const key of Object.keys(value)) deepFreeze(value[key]);
+  Object.freeze(value);
   return value;
 };
 
@@ -298,7 +320,58 @@ OPS.hsl = {
   evaluate: null,          // cross-channel: it cannot be a per-channel function
 };
 
-export const OVERLAY_KINDS = ['linear', 'radial'];
+/**
+ * `linear` and `radial` are PROCEDURAL -- two colours and a direction. `image`
+ * is the user's own PNG or JPEG: a light leak, a texture, bokeh, grain.
+ *
+ * The third one is a new kind on the same operation, not a parallel one. It
+ * carries the same `mode` and `opacity`, goes through the same blendInto, is
+ * clipped to the same layer alpha, and is sampled at the same NORMALISED
+ * positions -- so everything the gradient already proved about proxy/export
+ * agreement holds for it unchanged.
+ */
+export const OVERLAY_KINDS = ['linear', 'radial', 'image'];
+
+/**
+ * How a texture of arbitrary size covers a rect of arbitrary size.
+ *
+ *   'stretch'  the whole texture, distorted to the rect's aspect.
+ *   'cover'    aspect preserved, the overflowing axis cropped, centred.
+ *
+ * `cover` is the default because it cannot distort, and a distorted light leak
+ * reads as a rendering bug rather than as a choice.
+ *
+ * Both rules are computed from ASPECT RATIOS ALONE (overlaySourceWindow), never
+ * from pixel counts. That is the whole resolution-independence argument for the
+ * image kind, and it is one function: the destination rect doubles between
+ * proxy and export, its aspect does not, so the crop window is bit-identical at
+ * both and the export cannot come out framed differently from the screen.
+ *
+ * NOT HERE: `tile`. A grain tile locked to source pixels is the one rule that
+ * is NOT scale-invariant -- it would double its frequency at export -- and a
+ * tile expressed as "repeat N times across the rect" is scale-invariant but
+ * needs a repeat count, a UI for it, and a source stored well above the cap
+ * below to be worth having at all. Recorded in docs/BACKLOG.md rather than
+ * shipped as a near-miss.
+ */
+export const OVERLAY_FITS = ['stretch', 'cover'];
+
+/**
+ * Longest edge an overlay texture is stored at.
+ *
+ * DELIBERATELY THE PROXY EDGE, as one number rather than two. src/budget.js
+ * accounts for `file bytes + one full-res layer + sum of proxy layers`; an
+ * overlay is a resident bitmap that sum never counted, so it is priced at
+ * exactly one more proxy layer -- 4 MB at the very worst, 1024x1024x4 -- and a
+ * device that could afford the document can afford the texture on top of it.
+ *
+ * The reduction happens ONCE, on import, in the app layer, with
+ * `downscaleImage` (alpha-weighted box -- the correct downscale filter). That
+ * is where the whole anti-alias budget for this feature is spent. The sampler
+ * in apply.js is then plain bilinear, matching `resample`, so the overlay is
+ * filtered exactly the way the layer pixels underneath it are.
+ */
+export const OVERLAY_IMAGE_EDGE = DEFAULT_PROXY_EDGE;
 
 /** A gradient needs two stops. This is what a missing or ragged one becomes. */
 const DEFAULT_STOPS = () => ([
@@ -307,11 +380,105 @@ const DEFAULT_STOPS = () => ([
 ]);
 
 /**
+ * The source window a fit rule reads, in NORMALISED texture coordinates.
+ *
+ * Aspect ratios only. `destWidth / destHeight` is the same number at proxy
+ * scale and at document scale, so this returns the identical window for both --
+ * which is the property that stops an export coming back cropped differently
+ * from the preview. A rule written against pixel counts would not have it, and
+ * the difference is invisible until someone opens the PNG.
+ *
+ * @param {'stretch'|'cover'} fit
+ * @returns {{u0:number,v0:number,u1:number,v1:number}}
+ */
+export function overlaySourceWindow(fit, destWidth, destHeight, imageWidth, imageHeight) {
+  const full = { u0: 0, v0: 0, u1: 1, v1: 1 };
+  if (fit !== 'cover') return full;
+  if (!(destWidth > 0 && destHeight > 0 && imageWidth > 0 && imageHeight > 0)) return full;
+
+  const destAspect = destWidth / destHeight;
+  const imageAspect = imageWidth / imageHeight;
+
+  // Wider than the rect: keep a centred slice of the width, all of the height.
+  if (imageAspect > destAspect) {
+    const keep = destAspect / imageAspect;
+    return { u0: (1 - keep) / 2, v0: 0, u1: (1 + keep) / 2, v1: 1 };
+  }
+  // Taller: the same, the other way round.
+  if (imageAspect < destAspect) {
+    const keep = imageAspect / destAspect;
+    return { u0: 0, v0: (1 - keep) / 2, u1: 1, v1: (1 + keep) / 2 };
+  }
+  return full;
+}
+
+/**
+ * Accept a decoded texture, or refuse it.
+ *
+ * A project file is text on a device and can carry anything -- the same
+ * argument `decodeMaskJson` makes -- and the sampler indexes by
+ * `(y * width + x) * 4` with no bounds check, so a buffer whose length
+ * disagrees with its dimensions would read arithmetic noise rather than fail.
+ *
+ * The array is KEPT, never copied: a copy here doubles the resident cost of
+ * every texture, and it is what lets one texture applied to N layers stay one
+ * buffer -- including across the structured clone into the export worker, which
+ * preserves shared references.
+ *
+ * @returns {{width:number,height:number,data:Uint8ClampedArray}|null}
+ */
+function normaliseOverlayImage(image) {
+  if (!image || typeof image !== 'object') return null;
+  const width = image.width | 0;
+  const height = image.height | 0;
+  const data = image.data;
+  if (width <= 0 || height <= 0) return null;
+  // A plain Array of numbers would index fine and read wrong; require bytes.
+  if (!ArrayBuffer.isView(data) || data.BYTES_PER_ELEMENT !== 1) return null;
+  if (data.length !== width * height * 4) return null;
+  return { width, height, data };
+}
+
+/**
+ * How an overlay serialises -- and the answer to "what does a saved project do
+ * with an image overlay".
+ *
+ * IT REFERENCES IT BY NAME AND DROPS THE PIXELS. `toProjectJson` already makes
+ * this exact distinction for masks: a PSD mask is left out because the file it
+ * came from will still be there, while a GENERATED mask is written because
+ * nothing could rebuild it. A user's texture is the first case -- the file is
+ * on their device -- so the name goes in the save and the megabytes do not. A
+ * 1024-edge texture would be ~5.5 MB of base64 PER LAYER; the generated mask's
+ * ~1.4 MB is already flagged as heavy in that file's own comment.
+ *
+ * Reopening therefore yields an overlay with `kind: 'image'` and no pixels.
+ * That state is DELIBERATE and visible rather than silent: `isNeutralOverlay`
+ * makes it paint nothing (never a wrong picture, never a substituted gradient)
+ * and `overlayNeedsImage` makes the sheet say which file to supply again.
+ *
+ * WHY A `toJSON` AND NOT A LINE IN toProjectJson. Two properties nothing else
+ * gives at once:
+ *
+ *   - `JSON.stringify` honours `toJSON` wherever it is called, so no future
+ *     save path can forget and write four million numbers.
+ *   - it is installed NON-ENUMERABLE, and structured clone serialises only
+ *     enumerable own properties -- so the export worker still receives the real
+ *     pixels. An enumerable function property would instead throw
+ *     DataCloneError and break export outright, which is why the test for the
+ *     worker crossing also stands as the test for this.
+ */
+function overlayToJson() {
+  return { ...this, image: null };
+}
+
+/**
  * Complete, clamp and sort an overlay.
  *
  * Everything here is in NORMALISED layer coordinates -- cx, cy and radius are
  * fractions of the layer rect, never pixels -- which is what makes the overlay
  * scale-invariant and is why no proxyScale term appears anywhere in this file.
+ * The image kind adds no exception: its fit is aspect-only, see
+ * overlaySourceWindow.
  */
 export function normaliseOverlay(overlay) {
   const stops = (Array.isArray(overlay?.stops) ? overlay.stops : [])
@@ -327,8 +494,15 @@ export function normaliseOverlay(overlay) {
   const angle = Number(overlay?.angle);
   const radius = Number(overlay?.radius ?? 0.7071);
 
-  return {
+  const out = {
     kind: OVERLAY_KINDS.includes(overlay?.kind) ? overlay.kind : 'linear',
+    // Kept whatever the kind is, so toggling image -> linear -> image does not
+    // throw the user's picked texture away and make them find the file again.
+    fit: OVERLAY_FITS.includes(overlay?.fit) ? overlay.fit : 'cover',
+    image: normaliseOverlayImage(overlay?.image),
+    // The FILE NAME, for the reopen disclosure. Capped: a save file is text on
+    // a device and this one string must not be able to carry a megabyte.
+    source: typeof overlay?.source === 'string' ? overlay.source.slice(0, 120) : '',
     angle: Number.isFinite(angle) ? angle : 0,
     cx: clamp(Number(overlay?.cx ?? 0.5) || 0, -1, 2),
     cy: clamp(Number(overlay?.cy ?? 0.5) || 0, -1, 2),
@@ -341,11 +515,33 @@ export function normaliseOverlay(overlay) {
     mode: SUPPORTED_BLEND_MODES.includes(overlay?.mode) ? overlay.mode : 'normal',
     opacity: clamp(Number(overlay?.opacity ?? 1), 0, 1),
   };
+
+  Object.defineProperty(out, 'toJSON', { value: overlayToJson, enumerable: false });
+  return out;
 }
 
-/** Nothing to paint: no opacity, or every stop fully transparent. */
-export const isNeutralOverlay = (overlay) =>
-  !overlay || overlay.opacity <= 0 || (overlay.stops ?? []).every((s) => s.a <= 0);
+/**
+ * Nothing to paint: no opacity, no pixels, or every stop fully transparent.
+ *
+ * An image overlay whose pixels are absent -- a reopened project, before the
+ * user re-supplies the file -- is neutral rather than an error. Painting a
+ * gradient in its place would be inventing a picture; refusing to open the
+ * project would lose the rest of the session. Neutral plus `overlayNeedsImage`
+ * is the third answer: nothing on screen, and a sentence saying why.
+ */
+export const isNeutralOverlay = (overlay) => {
+  if (!overlay || overlay.opacity <= 0) return true;
+  if (overlay.kind === 'image') return !overlay.image;
+  return (overlay.stops ?? []).every((s) => s.a <= 0);
+};
+
+/**
+ * An image overlay that has lost its pixels and is waiting for them.
+ *
+ * The one state a saved project can reopen into. Exported so the sheet can name
+ * the file rather than showing an overlay that silently does nothing.
+ */
+export const overlayNeedsImage = (overlay) => !!overlay && overlay.kind === 'image' && !overlay.image;
 
 /**
  * The one positional op.
@@ -363,7 +559,8 @@ export const isNeutralOverlay = (overlay) =>
 OPS.overlay = {
   class: 'P', lut: false, glsl: null,
   gpuDeferred: 'a per-layer overlay blend mode multiplied by the layer\'s own is a 26x26 ' +
-               'program matrix that programNameFor cannot express; resolve in 1B-2',
+               'program matrix that programNameFor cannot express; the image kind adds a ' +
+               'second per-layer sampler and its own texture upload on top; resolve in 1B-2',
   label: 'Overlay', range: null, neutral: null,
   evaluate: null,
 };
