@@ -564,3 +564,54 @@ correct — it has no box, so there is nothing to wrap to.
   advances proportionally to the em. So the "scale preserves the wrap" claim is
   asserted on the ratio the breaks are derived from and never on the breaks
   themselves; only a browser can close that gap.
+
+---
+
+## Zip handovers (`src/bundle.js`, `app/src/app/services/bundle.service.ts`, 2026-09-01)
+
+Noticed while building the PSD-plus-fonts zip import; deliberately not fixed.
+
+- **The manifest pass runs on the main thread, and walks every central-directory
+  record.** `BundleService.readManifest` uses `unzipSync` with a filter that
+  inflates nothing, and stops COLLECTING at `BUNDLE_ENTRY_CAP + 1` — but fflate's
+  loop still parses every record in the directory. An adversarial archive
+  declaring a million entries does a million header reads before the entry cap
+  can refuse it. The per-record work is microseconds, so this is a jank risk
+  rather than a hang, and the fix is fflate's streaming `Unzip` (which can be
+  abandoned mid-directory) or moving the whole read into a worker.
+
+- **The whole archive is materialised on the main thread.** `file.arrayBuffer()`
+  brings the entire zip into the heap before anything is classified, so a 200 MB
+  handover is 200 MB resident on the main thread while the document is unpacked
+  beside it. The decode itself is already in a worker; the unzip is not. Peak
+  today is `zip + PSD + one File-sized copy of the PSD`.
+
+- **Reading a zip cannot be cancelled.** Same gap the export and cut-out paths
+  have. A big archive shows "Reading…" with no way out but closing the tab.
+
+- **Entries that are neither a PSD nor a font are ignored in silence.**
+  `classifyBundle` returns them as `ignored` with `why: 'unsupported'`, and only
+  the `unsafe-path` ones are ever mentioned to the user. A designer who zips
+  `.ttc` or `.dfont` fonts — common on macOS, and unloadable by `FontFace` — is
+  told nothing about why their typefaces did not arrive. The data is already
+  there; only the sentence is missing.
+
+- **A zip can only ever REPLACE the open document.** There is no "add the fonts
+  from this zip to what is already open". A user whose PSD is open and whose
+  fonts are in an archive has to unzip by hand — which is the exact chore this
+  feature exists to remove.
+
+- **The Fonts sheet does not distinguish a face that came from a zip from one
+  picked by hand.** Both read as "Drawing". After two handovers and a manual
+  pick, the user cannot tell which file a family came from without reading the
+  file name and remembering.
+
+- **The "which document?" chooser is an unfiltered list.** Fine for the two or
+  three PSDs a real handover has; an archive of twenty would need search or
+  grouping. Sizes are shown, dimensions are not — and dimensions are what
+  actually distinguishes a print file from a web export.
+
+- **There are now two refusal screens.** `svc.state() === 'refused'` (the memory
+  guard) and `bundle.status() === 'refused'` render similar-looking but separate
+  markup with different escape hatches. They should converge before a third one
+  appears.
