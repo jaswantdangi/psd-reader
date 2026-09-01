@@ -1,0 +1,185 @@
+import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
+import { FontsService } from '../services/fonts.service';
+import { FontPicker } from './font-picker';
+
+/**
+ * Every typeface this document asks for, and whether we can actually draw it.
+ *
+ * The text sheet already discloses the substitution for the SELECTED layer.
+ * That is the right place to say it and the wrong place to fix it: a poster
+ * with four typefaces would have the user open every text layer in turn just to
+ * collect the list of names to go and find. This screen is that list, once, at
+ * document level, with the control to answer it.
+ *
+ * It reports three states and keeps them apart, because they need different
+ * actions from the user:
+ *
+ *   - **substituted** — we have no file for this name. Go and find it. This is
+ *     the number the header badges.
+ *   - **loaded, not drawing** — a file answers the name, but some layer is
+ *     showing something else, normally because a typeface was picked by hand on
+ *     that layer. One button puts it back.
+ *   - **loaded and drawing** — done. Still listed, so the user can see what a
+ *     replacement would replace.
+ *
+ * A weight mismatch is its own line rather than being folded into "loaded":
+ * Roboto Bold answering a document that asked for Roboto Regular is better than
+ * Arial and is still not what the file says, and a user who sees the wrong
+ * weight on screen deserves to be told why rather than left to wonder.
+ */
+@Component({
+  selector: 'app-fonts-sheet',
+  standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [FontPicker],
+  template: `
+    @if (fonts.demand(); as report) {
+      <div class="space-y-4 px-4 pb-6 pt-4">
+        <p class="text-[11px] leading-relaxed text-neutral-500">
+          A PSD stores font <b class="text-neutral-300">names</b>, never the fonts
+          themselves — so nothing in the file can put its own typeface on screen. Give
+          this app the font file and it draws the real thing; until then it draws the
+          closest stack it can guarantee and says so. The files stay in this tab: nothing
+          is uploaded, and nothing is kept after you close it.
+        </p>
+
+        @if (report.wanted) {
+          <ul class="divide-y divide-white/5 overflow-hidden rounded-xl bg-white/5">
+            @for (font of report.fonts; track font.name) {
+              <li class="space-y-2 px-3 py-3">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <p class="truncate text-sm font-medium text-neutral-100">{{ font.name }}</p>
+                    <p class="mt-0.5 truncate text-[11px] text-neutral-500">
+                      {{ font.layers.length }} layer{{ font.layers.length === 1 ? '' : 's' }} ·
+                      {{ font.layers.join(', ') }}
+                    </p>
+                  </div>
+                  <span
+                    class="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
+                    [class]="chip(font)"
+                  >
+                    {{ status(font) }}
+                  </span>
+                </div>
+
+                @if (font.match) {
+                  <p class="text-[11px] leading-relaxed text-neutral-400">
+                    Drawing from <b class="font-semibold text-neutral-200">{{ font.match.fileName }}</b>.
+                    @if (!font.match.styleMatched) {
+                      <span class="text-amber-300">
+                        That file is a different weight or slant from the one the document
+                        names, so the shapes are right and the emphasis may not be.
+                      </span>
+                    }
+                  </p>
+
+                  @if (pending(font); as more) {
+                    <button
+                      type="button"
+                      class="h-11 w-full rounded-xl border border-sky-400/50 text-sm text-sky-300"
+                      (click)="useEverywhere()"
+                    >
+                      Use it on {{ more }} more layer{{ more === 1 ? '' : 's' }}
+                    </button>
+                  }
+                } @else {
+                  <p class="text-[11px] leading-relaxed text-amber-300">
+                    No file loaded for this name. Look for
+                    <b class="font-semibold">{{ font.name }}</b> as a .ttf, .otf, .woff or
+                    .woff2 and load it below.
+                  </p>
+                }
+              </li>
+            }
+          </ul>
+        } @else {
+          <p class="rounded-xl bg-white/5 px-3 py-3 text-xs leading-relaxed text-neutral-400">
+            No text layer in this document names a typeface, so there is nothing to go and
+            find. Loading a font file here would change nothing on screen.
+          </p>
+        }
+
+        @if (report.unnamed) {
+          <p class="text-[11px] leading-relaxed text-neutral-500">
+            {{ report.unnamed }} text layer{{ report.unnamed === 1 ? '' : 's' }} name no
+            typeface at all — either the file wrote Photoshop's placeholder instead of a
+            font, or the layer was added here. Nothing is being substituted for those, so
+            no font file can answer them; pick a typeface in the Text sheet.
+          </p>
+        }
+
+        @if (report.failures.length) {
+          <ul class="space-y-1 rounded-xl bg-red-500/10 px-3 py-3">
+            @for (failure of report.failures; track failure.fileName) {
+              <li class="text-[11px] leading-relaxed text-red-400">
+                <b class="font-semibold">{{ failure.fileName }}</b> — {{ failure.message }}
+              </li>
+            }
+          </ul>
+        }
+
+        @if (fonts.supported) {
+          <app-font-picker label="Load font files…" />
+          @if (fonts.note(); as note) {
+            <p class="text-[11px] leading-relaxed text-sky-300">{{ note }}</p>
+          }
+          <p class="text-[11px] leading-relaxed text-neutral-500">
+            Loading a font re-draws every layer that asks for it — this app takes over from
+            Photoshop's own pixels for those layers, on screen and at export. Each layer is
+            its own undo step, and <b class="text-neutral-300">✕ Discard changes</b> backs
+            all of them out at once.
+          </p>
+        } @else {
+          <p class="rounded-xl bg-white/5 px-3 py-3 text-[11px] leading-relaxed text-neutral-400">
+            This browser has no FontFace API, so font files cannot be loaded here. The
+            substitutions above are the best it can do.
+          </p>
+        }
+      </div>
+    }
+  `,
+})
+export class FontsSheet {
+  protected fonts = inject(FontsService);
+
+  /**
+   * Layers that ask for this typeface and are not drawing it.
+   *
+   * A method rather than the comparison written inline, so no `<` ends up in a
+   * template expression — and so the number in the button and the state the
+   * chip reports can never drift apart.
+   */
+  protected pending(font: any): number {
+    return font.layers.length - font.applied;
+  }
+
+  protected status(font: any): string {
+    if (!font.match) return 'Substituted';
+    if (this.pending(font)) return 'Loaded';
+    return 'Drawing';
+  }
+
+  protected chip(font: any): string {
+    if (!font.match) return 'bg-amber-400/15 text-amber-300';
+    if (this.pending(font)) return 'bg-sky-400/15 text-sky-300';
+    return 'bg-emerald-400/15 text-emerald-300';
+  }
+
+  /**
+   * One button for every font, not one per font: `applyLoaded` already walks
+   * the whole document and skips layers that are drawing the right face, so
+   * "use it here" and "use them all" are the same operation.
+   */
+  protected useEverywhere(): void {
+    const applied = this.fonts.applyLoaded();
+    this.fonts.version.update((v) => v + 1);
+    this.fonts.note.set(
+      applied.refusal
+        || (applied.layers
+          ? `Re-drawn ${applied.layers} text layer${applied.layers === 1 ? '' : 's'}. `
+            + `That is ${applied.layers} undo step${applied.layers === 1 ? '' : 's'}, one per layer.`
+          : 'Every layer was already drawing its own typeface.'),
+    );
+  }
+}

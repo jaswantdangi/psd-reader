@@ -10,7 +10,7 @@ export {
 export {
   splitFontName, isFontFileName, planFont,
   createFontRegistry, registerFont, recordFontFailure, loadedFonts, fontFailures,
-  resolveFont, cssFontFamilyFor, familyInCss, fontDemand,
+  resolveFont, cssFontFamilyFor, loadedFontFamilyFor, fontDemand,
   FONT_FILE_EXTENSIONS, FONT_FILE_ACCEPT,
 } from './fonts.js';
 export { installPlainPixelBackend } from './canvas.js';

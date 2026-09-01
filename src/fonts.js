@@ -37,6 +37,7 @@
  *
  * No dependencies, no DOM, no ag-psd. Same code in a browser, a worker and Node.
  */
+import { fontStackFor } from './engine-data.js';
 
 /** What `FontFace` can parse, and therefore all we will accept. */
 export const FONT_FILE_EXTENSIONS = ['.ttf', '.otf', '.woff', '.woff2'];
@@ -128,16 +129,30 @@ function baseNameOf(fileName) {
  * digits in its name has no family to register under, and putting an
  * unreachable face in the browser's font database is worse than refusing.
  *
+ * @typedef {object} FontRecord
+ * @property {string} fileName    the file the user picked, verbatim
+ * @property {string} family      what `new FontFace(family, ...)` is given
+ * @property {string} normalised  the whole name, letters and digits only
+ * @property {string} stem        the family, with style words split off
+ * @property {string} weight
+ * @property {boolean} italic
+ * @property {string} styleKey
+ * @property {string} key         `stem|styleKey` — the registry's key
+ *
  * @param {string} fileName
- * @returns {{fileName:string, family:string, normalised:string, stem:string,
- *            weight:string, italic:boolean, styleKey:string, key:string}}
+ * @returns {FontRecord}
  */
 export function planFont(fileName) {
   const name = String(fileName ?? '');
   if (!isFontFileName(name))
     throw new Error(`${name || 'That file'} is not a font file. Pick a ${FONT_FILE_EXTENSIONS.join(', ')} file.`);
 
-  const family = baseNameOf(name).trim();
+  // Quotes and backslashes are stripped rather than escaped: `cssFontFamilyFor`
+  // wraps the family in double quotes, and a file called `My"Face.ttf` would
+  // otherwise close the string early and hand the renderer a broken font
+  // shorthand, which canvas ignores in full — every text layer would silently
+  // revert to the default face.
+  const family = baseNameOf(name).replace(/["'\\]/g, '').trim();
   const split = splitFontName(family);
   if (!split.normalised)
     throw new Error(`${name} has no family name in it — nothing could be matched against the document.`);
@@ -171,7 +186,9 @@ export function createFontRegistry() {
  * which is the same class of bug as a silent substitution. Winning and saying
  * so is the pair that works.
  *
- * @returns {{record:object, replaced:object|null}}
+ * @param {object} registry
+ * @param {FontRecord} plan
+ * @returns {{record:FontRecord, replaced:FontRecord|null}}
  */
 export function registerFont(registry, plan) {
   const replaced = registry.faces.get(plan.key) ?? null;
@@ -221,7 +238,7 @@ export const fontFailures = (registry) =>
  * is not a failure to be papered over — it is the document telling the user
  * exactly which file to go and find.
  *
- * @returns {{record:object, family:string, styleMatched:boolean, how:'name'|'stem'}|null}
+ * @returns {{record:FontRecord, family:string, styleMatched:boolean, how:'name'|'stem'}|null}
  */
 export function resolveFont(registry, psdFontName) {
   const want = splitFontName(psdFontName);
@@ -255,11 +272,22 @@ export function resolveFont(registry, psdFontName) {
 export const cssFontFamilyFor = (record, fallbackStack) =>
   `"${record.family}", ${fallbackStack}`;
 
-/** The first family in a CSS font-family value, unquoted. */
-export function familyInCss(value) {
-  const first = String(value ?? '').split(',')[0] ?? '';
-  return first.trim().replace(/^["']|["']$/g, '');
-}
+/**
+ * The exact value a layer asking for `sourceFont` gets when the face is applied.
+ *
+ * Exact matters. "Is this layer drawing the loaded face?" cannot be answered by
+ * comparing the FIRST family in its stack: a user who loads `Georgia.ttf` for a
+ * document that asks for `Georgia` would collide with the substitute stack
+ * `Georgia, serif`, and the layer would be reported as drawing their file while
+ * actually drawing the system's. Narrow, but it is a confidently wrong answer
+ * about a font, which is the one thing this module is built to refuse.
+ *
+ * One derivation, used by the applier and the report alike, so the string they
+ * compare cannot drift apart.
+ */
+export const loadedFontFamilyFor = (record, sourceFont) =>
+  cssFontFamilyFor(record, fontStackFor(sourceFont));
+
 
 // ---------------------------------------------------------------- reporting
 
@@ -299,12 +327,14 @@ export function fontDemand(layers, registry) {
         match: match && {
           family: match.family, fileName: match.record.fileName,
           styleMatched: match.styleMatched, how: match.how,
+          /** The exact `fontFamily` a layer wanting this name gets when applied. */
+          applies: loadedFontFamilyFor(match.record, name),
         },
       };
       fonts.set(name, entry);
     }
     entry.layers.push(layer.name);
-    if (entry.match && familyInCss(layer.text.fontFamily) === entry.match.family) entry.applied++;
+    if (entry.match && layer.text.fontFamily === entry.match.applies) entry.applied++;
   }
 
   const list = [...fonts.values()];

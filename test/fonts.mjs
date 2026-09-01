@@ -27,7 +27,7 @@ import assert from 'node:assert/strict';
 import {
   FONT_FILE_EXTENSIONS, isFontFileName, splitFontName, planFont,
   createFontRegistry, registerFont, recordFontFailure, loadedFonts, fontFailures,
-  resolveFont, cssFontFamilyFor, familyInCss, fontDemand,
+  resolveFont, cssFontFamilyFor, loadedFontFamilyFor, fontDemand,
 } from '../src/fonts.js';
 
 let passed = 0;
@@ -219,8 +219,6 @@ test('the loaded family goes FIRST, and the substitute stays behind it', () => {
   const css = cssFontFamilyFor(record, SANS);
 
   assert.equal(css, '"Myriad Pro Regular", Arial, Helvetica, sans-serif');
-  assert.equal(familyInCss(css), 'Myriad Pro Regular');
-  assert.equal(familyInCss(SANS), 'Arial');
 });
 
 test('a family name that collides with a CSS keyword is still a family name', () => {
@@ -228,6 +226,21 @@ test('a family name that collides with a CSS keyword is still a family name', ()
   const { record } = registerFont(registry, planFont('serif.ttf'));
   // Unquoted, `serif` is the generic keyword and the file would never draw.
   assert.equal(cssFontFamilyFor(record, SANS), '"serif", Arial, Helvetica, sans-serif');
+});
+
+test('a quote in the file name cannot break out of the family string', () => {
+  const registry = createFontRegistry();
+  const { record } = registerFont(registry, planFont('My"Face.ttf'));
+  // An unescaped quote here ends the family early, canvas rejects the whole
+  // `ctx.font` shorthand, and EVERY text layer silently reverts to the default.
+  assert.equal(cssFontFamilyFor(record, SANS), '"MyFace", Arial, Helvetica, sans-serif');
+});
+
+test('the applied value is derived once, from the name the document asks for', () => {
+  const registry = createFontRegistry();
+  const { record } = registerFont(registry, planFont('AachenBT-Bold.otf'));
+  assert.equal(loadedFontFamilyFor(record, 'AachenBTBold'),
+    '"AachenBT-Bold", Arial, Helvetica, sans-serif');
 });
 
 console.log('\nwhat the document wants\n');
@@ -272,6 +285,20 @@ test('a font that is loaded but not yet drawn is reported separately from one th
   const report = fontDemand(layers, registry);
   assert.equal(report.fonts[0].applied, 1, 'one of the two AachenBT layers is actually drawing it');
   assert.equal(report.fonts[0].layers.length, 2);
+});
+
+test('"drawing it" is exact — a stack that merely STARTS with the family is not', () => {
+  // A user loading Georgia.ttf for a document asking for Georgia collides with
+  // the substitute stack `Georgia, serif`. Comparing first families would report
+  // their file as drawing while the system's Georgia is what is on screen.
+  const registry = createFontRegistry();
+  registerFont(registry, planFont('Georgia.ttf'));
+  const layers = [{ name: 'quote', kind: 'text', text: { sourceFont: 'Georgia', fontFamily: 'Georgia, serif' } }];
+
+  const report = fontDemand(layers, registry);
+  assert.equal(report.loaded, 1, 'the file does answer the name');
+  assert.equal(report.fonts[0].applied, 0, 'and it is not what this layer is drawing yet');
+  assert.equal(report.fonts[0].match.applies, '"Georgia", Georgia, serif');
 });
 
 test('a document with no text at all wants nothing', () => {

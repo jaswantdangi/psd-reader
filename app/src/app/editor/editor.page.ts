@@ -9,10 +9,12 @@ import {
 import { renderProject } from '@engine/render.js';
 import { isPreviewQuality } from '@engine/view.js';
 import { ExportService } from '../services/export.service';
+import { FontsService } from '../services/fonts.service';
 import { ProjectService } from '../services/project.service';
 import { AdjustSheet } from './adjust-sheet';
 import { CanvasStage } from './canvas-stage';
 import { FilterSheet } from './filter-sheet';
+import { FontsSheet } from './fonts-sheet';
 import { HslSheet } from './hsl-sheet';
 import { Icon } from './icon';
 import { LayerSheet } from './layer-sheet';
@@ -23,7 +25,7 @@ import { TextSheet } from './text-sheet';
 
 type SheetId =
   | 'layers' | 'layer' | 'text' | 'adjust' | 'filter' | 'hsl' | 'overlay'
-  | 'warnings' | 'export';
+  | 'fonts' | 'warnings' | 'export';
 
 /** The rail carries only tools that work. Phase 4-5 entries are absent, not greyed. */
 const RAIL: ReadonlyArray<{ id: SheetId; icon: string; label: string; needsLayer: boolean }> = [
@@ -37,7 +39,7 @@ const RAIL: ReadonlyArray<{ id: SheetId; icon: string; label: string; needsLayer
 ];
 
 /** Sheets whose `✕` rolls their whole session back. The layers sheet has no session. */
-const DISCARDABLE: ReadonlyArray<SheetId> = ['layer', 'text', 'adjust', 'filter', 'hsl', 'overlay'];
+const DISCARDABLE: ReadonlyArray<SheetId> = ['layer', 'text', 'adjust', 'filter', 'hsl', 'overlay', 'fonts'];
 
 const TITLES: Record<SheetId, string> = {
   layers: 'Layers',
@@ -47,6 +49,7 @@ const TITLES: Record<SheetId, string> = {
   filter: 'Filter',
   hsl: 'HSL',
   overlay: 'Overlay',
+  fonts: 'Fonts',
   warnings: 'This file',
   export: 'Export',
 };
@@ -59,6 +62,7 @@ const TITLES: Record<SheetId, string> = {
     AdjustSheet,
     CanvasStage,
     FilterSheet,
+    FontsSheet,
     HslSheet,
     Icon,
     LayerSheet,
@@ -106,6 +110,28 @@ const TITLES: Record<SheetId, string> = {
         <span class="mx-1 min-w-0 flex-1 truncate text-center text-[13px] text-neutral-400">
           {{ svc.fileName() || 'No document' }}
         </span>
+
+        <!-- The document-level half of the typeface disclosure. The text sheet
+             can only speak for the layer that happens to be selected, so on a
+             file with four typefaces it is the user who has to go and find the
+             other three by clicking. This is the count of names we cannot draw,
+             next to the way to answer them. It goes quiet — not away — once
+             every name has a file, because that is when a user wants to check
+             what is drawing. -->
+        @if (fonts.demand().wanted) {
+          <button
+            type="button"
+            class="flex h-12 items-center gap-1 rounded-xl px-2 active:bg-white/10"
+            [class]="fonts.missing() ? 'text-amber-400' : 'text-neutral-500'"
+            [attr.aria-label]="fontsLabel()"
+            (click)="open('fonts')"
+          >
+            <app-icon name="text" [size]="20" />
+            @if (fonts.missing()) {
+              <span class="text-xs font-semibold tabular-nums">{{ fonts.missing() }}</span>
+            }
+          </button>
+        }
 
         <!-- Permanent, never a toast: these are properties of the file, and a
              toast that vanished is indistinguishable from one nobody read. -->
@@ -295,6 +321,7 @@ const TITLES: Record<SheetId, string> = {
                 @case ('filter') { <app-filter-sheet /> }
                 @case ('hsl') { <app-hsl-sheet /> }
                 @case ('overlay') { <app-overlay-sheet /> }
+                @case ('fonts') { <app-fonts-sheet /> }
                 @case ('warnings') {
                   <ul class="divide-y divide-white/5">
                     @for (warning of svc.warnings(); track $index) {
@@ -438,6 +465,7 @@ const TITLES: Record<SheetId, string> = {
 export class EditorPage {
   protected svc = inject(ProjectService);
   protected exporter = inject(ExportService);
+  protected fonts = inject(FontsService);
   protected stage = viewChild(CanvasStage);
 
   protected readonly rail = RAIL;
@@ -491,6 +519,15 @@ export class EditorPage {
     return Math.round(value * 100);
   }
 
+  /** Spoken form of the fonts chip — the number alone tells a screen reader nothing. */
+  protected fontsLabel(): string {
+    const missing = this.fonts.missing();
+    const wanted = this.fonts.demand().wanted;
+    return missing
+      ? `${missing} of ${wanted} typefaces in this file are substituted`
+      : `Typefaces in this file — all ${wanted} loaded`;
+  }
+
   protected titleOf(id: SheetId): string {
     return TITLES[id];
   }
@@ -534,6 +571,10 @@ export class EditorPage {
   protected open(id: SheetId): void {
     if (id !== 'layers') this.prompt.set('');
     this.exportNote.set('');
+    // The font note reports what the LAST pick did. Carrying it into a fresh
+    // sheet would report a change that is several actions old as if it had just
+    // happened.
+    this.fonts.note.set('');
     this.sessionStart = this.svc.historyLength();
     this.sheet.set(id);
   }

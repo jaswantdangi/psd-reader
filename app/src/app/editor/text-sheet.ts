@@ -1,6 +1,8 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { FONT_STACKS } from '@engine/edit.js';
+import { FontsService } from '../services/fonts.service';
 import { ProjectService } from '../services/project.service';
+import { FontPicker } from './font-picker';
 import { Slider } from './slider';
 
 const STACKS: string[] = FONT_STACKS;
@@ -32,13 +34,20 @@ const BASE_MAX_SIZE = 200;
  *    is a visible change to the image, so it is stated before it happens and
  *    badged after.
  *
- * 2. **The typeface is a SUBSTITUTION, and it is named.** A PSD stores font
- *    names, never font files, so the file's own face can never be loaded here.
- *    `toLayer` now reads that name into `text.sourceFont` and picks the closest
- *    stack the renderer can guarantee, and this screen says both — "the file
- *    names AachenBTBold, showing Arial" — rather than presenting our choice as
- *    the file's. `bold`/`italic` are still false for every layer read from a
- *    file; that gap is in docs/BACKLOG.md.
+ * 2. **The typeface is a SUBSTITUTION until somebody supplies the file.** A PSD
+ *    stores font names, never font files, so nothing in the document can put
+ *    its own face on screen. `toLayer` reads that name into `text.sourceFont`
+ *    and picks the closest stack the renderer can guarantee, and this screen
+ *    says both — "the file names AachenBTBold, showing Arial" — rather than
+ *    presenting our choice as the file's.
+ *
+ *    A user CAN supply it, and then the substitution stops: `FontsService`
+ *    hands the file to `FontFace`, the browser's own HarfBuzz shapes it, and
+ *    this block says which file is drawing instead of which stack. So there are
+ *    three states here, not two, and they need different actions — no file,
+ *    a file that is not being used on this layer, and a file that is drawing.
+ *    `bold`/`italic` are still false for every layer read from a file; that gap
+ *    is in docs/BACKLOG.md.
  *
  * 3. **The size on the slider is not the number in the file.** `style.fontSize`
  *    is the PRE-transform size and Photoshop draws it under the layer's matrix.
@@ -55,7 +64,7 @@ const BASE_MAX_SIZE = 200;
   selector: 'app-text-sheet',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [Slider],
+  imports: [FontPicker, Slider],
   template: `
     @if (svc.selected(); as layer) {
       @if (layer.kind === 'text' && layer.text) {
@@ -65,11 +74,11 @@ const BASE_MAX_SIZE = 200;
           @if (!layer.rerendered) {
             <p class="rounded-lg bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-300">
               This layer is still Photoshop's own pixels. Changing anything here re-draws
-              the glyphs with the settings below, and the file's own typeface cannot be
-              loaded — only substituted — so the result can look different from the
-              original. Its box is re-measured to this app's metrics at the same
-              moment, so it resizes once around the text. Undo puts the original
-              pixels back.
+              the glyphs with the settings below, in whichever typeface is named under
+              Typeface — a substitute unless you have loaded the file the document asks
+              for — so the result can look different from the original. Its box is
+              re-measured to this app's metrics at the same moment, so it resizes once
+              around the text. Undo puts the original pixels back.
             </p>
           } @else {
             <p class="flex items-start gap-2 text-[11px] leading-relaxed text-neutral-500">
@@ -201,14 +210,63 @@ const BASE_MAX_SIZE = 200;
               }
             </div>
             <!-- The point of reading the name at all. Silently drawing Arial in
-                 place of the file's face is the bug; naming both is the fix. -->
+                 place of the file's face is the bug; naming both was the first
+                 half of the fix, and offering the file is the other half. -->
             @if (layer.text.sourceFont; as source) {
-              <p class="mt-2 rounded-lg bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-300">
-                The file asks for <b class="font-semibold">{{ source }}</b> — not available
-                here, showing <b class="font-semibold">{{ nameOf(layer.text.fontFamily) }}</b>.
-                A PSD stores font names, never the font itself, so this is the closest
-                stack the renderer can guarantee rather than a match.
-              </p>
+              @if (fonts.selectedMatch(); as match) {
+                @if (fonts.selectedIsLoaded()) {
+                  <p
+                    class="mt-2 rounded-lg bg-emerald-400/10 px-3 py-2 text-[11px] leading-relaxed text-emerald-300"
+                  >
+                    Drawing <b class="font-semibold">{{ match.record.fileName }}</b> — the file
+                    you loaded for <b class="font-semibold">{{ source }}</b>. These are that
+                    file's own outlines, shaped by the browser. Not a substitute.
+                    @if (!match.styleMatched) {
+                      <span class="text-amber-300">
+                        Its weight or slant is not the one the document names, so the shapes
+                        are right and the emphasis may not be.
+                      </span>
+                    }
+                  </p>
+                } @else {
+                  <p
+                    class="mt-2 rounded-lg bg-sky-400/10 px-3 py-2 text-[11px] leading-relaxed text-sky-300"
+                  >
+                    <b class="font-semibold">{{ match.record.fileName }}</b> is loaded and
+                    answers <b class="font-semibold">{{ source }}</b>, but this layer is
+                    showing <b class="font-semibold">{{ nameOf(layer.text.fontFamily) }}</b>.
+                  </p>
+                  <button
+                    type="button"
+                    class="mt-2 h-11 w-full rounded-xl border border-sky-400/50 text-sm text-sky-300"
+                    (click)="useLoaded(layer.id)"
+                  >
+                    Use {{ match.family }} here
+                  </button>
+                }
+              } @else {
+                <p class="mt-2 rounded-lg bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-300">
+                  The file asks for <b class="font-semibold">{{ source }}</b> — not available
+                  here, showing <b class="font-semibold">{{ nameOf(layer.text.fontFamily) }}</b>.
+                  A PSD stores font names, never the font itself, so this is the closest
+                  stack the renderer can guarantee rather than a match. Give this app the
+                  <b class="font-semibold">{{ source }}</b> file and the glyphs become the
+                  real ones.
+                </p>
+                @if (fonts.supported) {
+                  <div class="mt-2">
+                    <app-font-picker [label]="'Load the ' + source + ' file…'" variant="quiet" />
+                  </div>
+                  <p class="mt-1 text-[11px] leading-relaxed text-neutral-500">
+                    Every typeface this document wants is listed together under
+                    <b class="text-neutral-300">Fonts</b> in the top bar.
+                  </p>
+                }
+              }
+
+              @if (fonts.note(); as note) {
+                <p class="mt-2 text-[11px] leading-relaxed text-sky-300">{{ note }}</p>
+              }
             } @else {
               <p class="mt-2 text-[11px] leading-relaxed text-neutral-500">
                 These are the stacks the renderer can guarantee on a phone. No typeface
@@ -258,6 +316,7 @@ const BASE_MAX_SIZE = 200;
 })
 export class TextSheet {
   protected svc = inject(ProjectService);
+  protected fonts = inject(FontsService);
 
   protected readonly stacks = STACKS;
   protected readonly alignments = ALIGNMENTS;
@@ -357,6 +416,18 @@ export class TextSheet {
     const layer = this.svc.selected();
     if (!layer) return;
     this.error.set(this.svc.retypeText(layer.id, changes, coalesceKey) ?? '');
+  }
+
+  /**
+   * Point this one layer back at the face loaded for its own typeface.
+   *
+   * Only reachable when a file answers the name and the layer is showing
+   * something else — which happens when a stack above was picked by hand. The
+   * service re-measures the box for the real metrics, so this is one undo step
+   * exactly like every other write on this sheet.
+   */
+  protected useLoaded(id: number): void {
+    this.fonts.applyToLayer(id);
   }
 
   protected addLayer(): void {
