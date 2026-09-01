@@ -13,6 +13,11 @@ export {
   resolveFont, cssFontFamilyFor, loadedFontFamilyFor, fontDemand,
   FONT_FILE_EXTENSIONS, FONT_FILE_ACCEPT,
 } from './fonts.js';
+export {
+  classifyBundle, bundleFontOutcome, isBundleFileName, bundleByteCap,
+  PSD_FILE_EXTENSIONS, BUNDLE_FILE_EXTENSIONS, BUNDLE_FILE_ACCEPT,
+  BUNDLE_ENTRY_CAP, BUNDLE_FONT_HEADROOM_BYTES,
+} from './bundle.js';
 export { installPlainPixelBackend } from './canvas.js';
 export { compositeDocument, compareBuffers, differenceBuffer, createBuffer, flattenOnto, SUPPORTED_BLEND_MODES } from './composite.js';
 export { layerRect, pixelRect, projectMask, downscaleMask, resampleMask } from './mask.js';
