@@ -4,7 +4,12 @@
   <meta charset="utf-8">
   <title>App</title>
   <base href="/">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- `interactive-widget=resizes-content` shrinks the LAYOUT viewport when the
+       on-screen keyboard opens. Every sheet in the editor is a bottom-anchored
+       `fixed inset-0` panel, so without it the keyboard covers the sheet the
+       user is typing into and no CSS inside the sheet can move it. Ignored on
+       iOS Safari, which resizes the visual viewport instead. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
 </head>
 <body>
