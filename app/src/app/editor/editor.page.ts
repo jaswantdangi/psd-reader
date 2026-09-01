@@ -8,16 +8,19 @@ import {
 } from '@angular/core';
 import { renderProject } from '@engine/render.js';
 import { isPreviewQuality } from '@engine/view.js';
+import { ExportService } from '../services/export.service';
 import { ProjectService } from '../services/project.service';
 import { AdjustSheet } from './adjust-sheet';
 import { CanvasStage } from './canvas-stage';
 import { FilterSheet } from './filter-sheet';
+import { HslSheet } from './hsl-sheet';
 import { Icon } from './icon';
 import { LayerSheet } from './layer-sheet';
 import { LayersSheet } from './layers-sheet';
+import { OverlaySheet } from './overlay-sheet';
 import { SheetShell } from './sheet-shell';
 
-type SheetId = 'layers' | 'layer' | 'adjust' | 'filter' | 'warnings' | 'export';
+type SheetId = 'layers' | 'layer' | 'adjust' | 'filter' | 'hsl' | 'overlay' | 'warnings' | 'export';
 
 /** The rail carries only tools that work. Phase 4-5 entries are absent, not greyed. */
 const RAIL: ReadonlyArray<{ id: SheetId; icon: string; label: string; needsLayer: boolean }> = [
@@ -25,16 +28,20 @@ const RAIL: ReadonlyArray<{ id: SheetId; icon: string; label: string; needsLayer
   { id: 'layer', icon: 'layer', label: 'Layer', needsLayer: true },
   { id: 'adjust', icon: 'adjust', label: 'Adjust', needsLayer: true },
   { id: 'filter', icon: 'filter', label: 'Filter', needsLayer: true },
+  { id: 'hsl', icon: 'hsl', label: 'HSL', needsLayer: true },
+  { id: 'overlay', icon: 'overlay', label: 'Overlay', needsLayer: true },
 ];
 
 /** Sheets whose `✕` rolls their whole session back. The layers sheet has no session. */
-const DISCARDABLE: ReadonlyArray<SheetId> = ['layer', 'adjust', 'filter'];
+const DISCARDABLE: ReadonlyArray<SheetId> = ['layer', 'adjust', 'filter', 'hsl', 'overlay'];
 
 const TITLES: Record<SheetId, string> = {
   layers: 'Layers',
   layer: 'Layer',
   adjust: 'Adjust',
   filter: 'Filter',
+  hsl: 'HSL',
+  overlay: 'Overlay',
   warnings: 'This file',
   export: 'Export',
 };
@@ -47,9 +54,11 @@ const TITLES: Record<SheetId, string> = {
     AdjustSheet,
     CanvasStage,
     FilterSheet,
+    HslSheet,
     Icon,
     LayerSheet,
     LayersSheet,
+    OverlaySheet,
     SheetShell,
   ],
   template: `
@@ -113,7 +122,14 @@ const TITLES: Record<SheetId, string> = {
           [disabled]="svc.state() !== 'ready'"
           (click)="open('export')"
         >
-          <app-icon name="export" />
+          <!-- The sheet says an export keeps running after it is closed, so a
+               running export has to be visible from outside the sheet or that
+               sentence is a claim with nothing behind it. -->
+          @if (exporter.running()) {
+            <span class="text-[11px] font-semibold tabular-nums">{{ exporter.percent() }}%</span>
+          } @else {
+            <app-icon name="export" />
+          }
         </button>
       </header>
 
@@ -270,6 +286,8 @@ const TITLES: Record<SheetId, string> = {
                 @case ('layer') { <app-layer-sheet /> }
                 @case ('adjust') { <app-adjust-sheet /> }
                 @case ('filter') { <app-filter-sheet /> }
+                @case ('hsl') { <app-hsl-sheet /> }
+                @case ('overlay') { <app-overlay-sheet /> }
                 @case ('warnings') {
                   <ul class="divide-y divide-white/5">
                     @for (warning of svc.warnings(); track $index) {
@@ -285,25 +303,118 @@ const TITLES: Record<SheetId, string> = {
                   <div class="space-y-4 px-4 py-4">
                     <div class="space-y-1 text-xs text-neutral-400">
                       <p>Document <b class="text-neutral-200">{{ docSize() }}</b></p>
-                      <p>This export <b class="text-neutral-200">{{ exportSize() }}</b></p>
+                      <p>Preview composite <b class="text-neutral-200">{{ exportSize() }}</b></p>
                     </div>
-                    <!-- Said plainly rather than discovered afterwards: the
-                         resident pixels ARE the proxy, so this is what there is
-                         to write. Full-resolution export re-reads the file and
-                         is not wired into this screen yet. -->
-                    <p class="rounded-lg bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-300">
-                      This writes the preview composite at proxy resolution, not the
-                      document's full resolution. Full-resolution export re-reads the
-                      source file and is not connected to this screen yet.
-                    </p>
-                    <button
-                      type="button"
-                      class="h-12 w-full rounded-xl bg-sky-500 text-sm font-medium text-white disabled:opacity-40"
-                      [disabled]="exporting()"
-                      (click)="exportPng()"
-                    >
-                      {{ exporting() ? 'Writing…' : 'Save PNG' }}
-                    </button>
+
+                    @if (exporter.running()) {
+                      <div class="space-y-3">
+                        <div class="flex items-baseline justify-between gap-3">
+                          <p class="text-sm text-neutral-200">{{ exporter.phaseLabel() }}…</p>
+                          @if (exporter.determinate()) {
+                            <span class="text-sm tabular-nums text-neutral-400">
+                              {{ exporter.percent() }}%
+                            </span>
+                          }
+                        </div>
+
+                        <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                          @if (exporter.determinate()) {
+                            <div
+                              class="h-full rounded-full bg-sky-400 transition-[width] duration-150"
+                              [style.width.%]="exporter.percent()"
+                            ></div>
+                          } @else {
+                            <!-- The engine marks this phase indeterminate: it is
+                                 one synchronous call with no interior yield
+                                 point, so a creeping bar here would be invented.
+                                 A bar that pretends to move during a freeze is
+                                 worse than one that admits it. -->
+                            <div class="h-full w-1/3 animate-pulse rounded-full bg-sky-400"></div>
+                          }
+                        </div>
+
+                        @if (exporter.detail()) {
+                          <p class="text-[11px] tabular-nums text-neutral-500">
+                            {{ exporter.detail() }} layers
+                          </p>
+                        } @else if (!exporter.determinate()) {
+                          <p class="text-[11px] leading-relaxed text-neutral-500">
+                            This step runs in one pass and cannot report progress. It has
+                            not stalled.
+                          </p>
+                        }
+
+                        <button
+                          type="button"
+                          class="h-12 w-full rounded-xl border border-white/15 text-sm text-neutral-200"
+                          (click)="exporter.cancel()"
+                        >
+                          Cancel
+                        </button>
+                        <p class="text-[11px] leading-relaxed text-neutral-500">
+                          Cancelling stops immediately and writes nothing. The export runs
+                          off the main thread, so you can close this sheet and keep
+                          editing while it finishes.
+                        </p>
+                      </div>
+                    } @else {
+                      @if (!sourceReady()) {
+                        <p class="rounded-lg bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-300">
+                          This session no longer holds the original file, so full
+                          resolution is unavailable. Reopen the file to export it at
+                          document size.
+                        </p>
+                      }
+
+                      <div class="space-y-2">
+                        <button
+                          type="button"
+                          class="h-12 w-full rounded-xl bg-sky-500 text-sm font-medium text-white disabled:opacity-40"
+                          [disabled]="!sourceReady() || exporting()"
+                          (click)="exportFull()"
+                        >
+                          Export at full resolution
+                        </button>
+                        <!-- Stated in units, before it is started, rather than
+                             discovered by watching a spinner. -->
+                        <p class="text-[11px] leading-relaxed text-neutral-500">
+                          Re-reads the original file and composites every layer at
+                          {{ docSize() }}. Measured at 3–4 s on a desktop; estimated
+                          12–20 s on a phone.
+                        </p>
+                      </div>
+
+                      <div class="space-y-2 border-t border-white/10 pt-4">
+                        <button
+                          type="button"
+                          class="h-12 w-full rounded-xl border border-white/15 text-sm text-neutral-200 disabled:opacity-40"
+                          [disabled]="exporting()"
+                          (click)="exportPng()"
+                        >
+                          {{ exporting() ? 'Writing…' : 'Quick export at preview size' }}
+                        </button>
+                        <p class="text-[11px] leading-relaxed text-neutral-500">
+                          Writes the preview composite at {{ exportSize() }} — instant, and
+                          exactly the pixels on screen. A check, not the finished image.
+                        </p>
+                      </div>
+                    }
+
+                    @if (exporter.note()) {
+                      <p
+                        class="text-[11px] leading-relaxed"
+                        [class]="exporter.failed() ? 'text-red-400' : 'text-neutral-400'"
+                      >
+                        {{ exporter.note() }}
+                      </p>
+                    }
+                    @if (exporter.spilledToMemory()) {
+                      <p class="text-[11px] leading-relaxed text-amber-300">
+                        No private filesystem was available, so layers waiting to be
+                        blended were held in memory. On a large reordered document that
+                        is the shape that runs the device out of memory.
+                      </p>
+                    }
                     @if (exportNote()) {
                       <p class="text-[11px] text-neutral-400">{{ exportNote() }}</p>
                     }
@@ -319,6 +430,7 @@ const TITLES: Record<SheetId, string> = {
 })
 export class EditorPage {
   protected svc = inject(ProjectService);
+  protected exporter = inject(ExportService);
   protected stage = viewChild(CanvasStage);
 
   protected readonly rail = RAIL;
@@ -353,6 +465,13 @@ export class EditorPage {
     return project ? `${project.width} × ${project.height}` : '—';
   });
 
+  /**
+   * Full resolution needs the file back, and `project.source.uri` is a
+   * synthetic `file://<name>` nothing can open — so the picker's handle is the
+   * only route to it. Checked here rather than after a 20-second export.
+   */
+  protected readonly sourceReady = computed(() => !!this.svc.sourceFile());
+
   protected readonly exportSize = computed(() => {
     const project = this.svc.project();
     if (!project) return '—';
@@ -385,6 +504,10 @@ export class EditorPage {
 
   protected back(): void {
     this.sheet.set(null);
+    // Closing the document abandons the thing being exported. Leaving the
+    // worker alive would hold the file, a copy of the project and a
+    // document-sized buffer for a PNG nobody is waiting for any more.
+    this.exporter.cancel();
     this.svc.close();
   }
 
@@ -425,6 +548,19 @@ export class EditorPage {
     // user would find it again by accident.
     if (this.discardable(id)) this.svc.discardTo(this.sessionStart);
     this.close();
+  }
+
+  /**
+   * The real one: `exportFullRes` re-reads the file and composites every layer
+   * at document resolution, in a worker. Nothing about the walk is decided
+   * here — this hands the engine a project, a file and a place to spill.
+   */
+  protected exportFull(): void {
+    const project = this.svc.project();
+    const file = this.svc.sourceFile();
+    if (!project || !file) return;
+    this.exportNote.set('');
+    this.exporter.start(project, file);
   }
 
   protected exportPng(): void {
