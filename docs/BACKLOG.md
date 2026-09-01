@@ -170,3 +170,39 @@ anything but reading. The user's first build and first device run settle them.
 - **Whether the 150 MB cap and 81.9 MB unknown-device fallback are calibrated
   correctly.** They are conservative guesses. This is a named open question in the
   Phase 1 spec and needs a real device to close.
+
+## Creative tools (Phase 4)
+
+- **Inserted and replaced image layers break full-resolution export.** Created
+  layers carry `sourceIndex: null` and `replaceImage` clears it, which is correct
+  -- a number there would claim another layer's pixels at export. But
+  `assertIdentifiable` (`src/export/order.js`) then refuses the WHOLE export with
+  `NO_IDENTITY` as soon as one such layer is present. Safe, never a wrong image,
+  and a hard stop. Fix: widen `isSelfRendering(layer)` to also cover
+  `layer.pixels && layer.sourceIndex === null`, and make
+  `createJsExportTarget.blend` fall back to `layer.pixels` when the streamed
+  `pixels` argument is null for such a layer. `planSpill`, `isFastPath` and
+  `stream.js`'s walk all branch on the same predicate and follow for free. Note
+  the resolution trap: a replaced image must be inserted at FULL document
+  resolution, or export upscales a proxy-sized bitmap into a correctly-sized,
+  blurred layer -- the failure `stream.js` exists to prevent.
+- **Adding and removing a layer is not undoable.** `applyCommand` in
+  `src/edit.js` knows only `set` and `reorder`, so `src/creative/layers.js` makes
+  insert/remove structural (both counters bumped, `future` cleared) rather than
+  pushing a command type that would undo to nothing. Closing it is an `insert`
+  command type and its inverse, ~10 lines in `edit.js`. Until then a UI must not
+  put "Add sticker" next to an undo button that will not undo it.
+- **A saved project cannot round-trip a created layer.** `applyProjectJson`
+  matches by index and throws on a layer-count mismatch, and the JSON carries no
+  pixels -- so a session with an inserted sticker reopens as a count mismatch,
+  and a created text layer would need both its geometry and its existence
+  written.
+- **An inserted image larger than the document overflows it.** `insertImageLayer`
+  places at natural pixel size deliberately (it is the only size that is not a
+  guess), so a phone photo lands as a 4000px layer in a 1000px document. The app
+  should pass `w`/`h`; a `maxFraction` option could live in `src/creative/image.js`.
+- **`replaceImage` has no `cover` fit.** `cover` overflows the box and there is no
+  source-rect/crop in the layer model to clip it with. Adding crop is a model change.
+- **`originalContent` is `''` on a created text layer** -- it means "what Photoshop
+  had", and Photoshop never had it. Any UI badging "edited" from
+  `content !== originalContent` will badge every created layer.
