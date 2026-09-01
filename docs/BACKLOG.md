@@ -309,17 +309,11 @@ The bug itself is fixed (`rasteriseTextAt` scales by one factor; `retypeText`
 re-fits a PSD text layer's box to our own measurement on the first edit). What
 it exposed and this change did not touch:
 
-- **`measureText`'s height is a convention, not a font metric.**
-  `lines * round(fontSize * 1.25)` is where the units mismatch comes from:
-  Photoshop's box is the INK extent of the glyphs, ours is a synthetic line box.
-  For "TEST" at 30px in `fixtures/text.src.psd` that is 21 against 38. Canvas
-  exposes `actualBoundingBoxAscent/Descent` and `fontBoundingBoxAscent/Descent`;
-  using them would make the two boxes the same KIND of quantity and let the
-  Photoshop-to-live re-fit be exact rather than the "centre the new box on the
-  old one" heuristic it is now. Not done because it changes the box of every
-  existing text layer, created ones included, and both test stubs
-  (`test/edit.mjs`, `test/creative.mjs`) would need real metrics to stay
-  meaningful.
+- ~~**`measureText`'s height is a convention, not a font metric.**~~ FIXED
+  2026-09-01. It composes `actualBoundingBox{Left,Right,Ascent,Descent}` into
+  an ink extent, the same quantity Photoshop stores; the fixture layer's height
+  is 21 on both sides of the first edit and its top no longer moves. Both stubs
+  now model bounding-box metrics.
 
 - **The PSD's typeface is still never read.** `toLayer` hardcodes
   `fontFamily: FONT_STACKS[0]`, `bold: false`, `italic: false` for every text
@@ -328,10 +322,13 @@ it exposed and this change did not touch:
   width of OUR font, so the re-fitted box is right for what we draw and not for
   what the file contained.
 
-- **PSD leading is ignored.** Line height is always `1.25 * fontSize` whatever
-  the file's `leading`/`autoLeading` says, so the re-fit of a multi-line PSD
-  text layer can be well off vertically. `fixtures/text.src.psd` is
-  single-line, so no test in the suite would catch it.
+- **PSD leading is ignored.** Line height is now the FONT's own advance
+  (`fontBoundingBoxAscent + Descent`), falling back to 1.2em. Better than the
+  old flat 1.25, but still not the file's: `paragraphStyle.autoLeading` and
+  `style.leading` are read by ag-psd and dropped by `toLayer`, so a PSD with
+  explicit leading re-flows at the font's spacing instead of the document's.
+  `fixtures/text.src.psd` is single-line, so no test in the suite would catch
+  it.
 
 - **The text layer's transform matrix is not applied to `fontSize`.** `toLayer`
   reads `style.fontSize` raw. PSD text can carry a scale in its transform, so a
@@ -350,3 +347,49 @@ it exposed and this change did not touch:
   stubs return transparent `getImageData`, so no assertion in this repo has ever
   looked at a glyph. Every claim about text APPEARANCE, before and after this
   change, rests on transform arithmetic alone.
+
+## Noticed while fixing the CR line break and the ink-extent metrics (2026-09-01)
+
+Both bugs are fixed: `measureText` splits on `/
+||
+/` and every door
+into the model normalises to LF; the box it returns is the glyphs' ink extent
+rather than an invented line box. What that surfaced and did not fix:
+
+- **The file's own baseline is read and thrown away.** `text.transform[5]` is
+  the first baseline in document coordinates — 66 in `fixtures/text.src.psd`,
+  exactly `bounds.bottom` — and `transform[4]` is the pen x, exactly
+  `bounds.left`. `toLayer` keeps neither. Anchoring our re-render on the file's
+  baseline instead of centring our box on the file's box would make the
+  switch to live rendering exact in POSITION even where the substituted
+  typeface's ink height differs, which is the one case `anchorBox`'s
+  `recentre` still exists to paper over.
+
+- **The typeface substitution is now the ONLY remaining first-edit jump, and it
+  is horizontal.** With both boxes measuring ink, height and top hold across
+  the first edit; the width still moves (60 in the file against ~77 from Arial
+  for "TEST" at 30px) purely because `toLayer` hardcodes `FONT_STACKS[0]`. The
+  fixture cannot even tell us better — its `style.font.name` is
+  `AdobeInvisFont`, a placeholder — but a real document usually can.
+
+- **Line advance is now platform-dependent.** `fontBoundingBoxAscent/Descent`
+  differs between engines for the same font, so a multi-line layer's box, and
+  the boxes stored in a saved project file, depend on which browser measured
+  them. Nothing detects or discloses that. The old 1.25 was wrong everywhere
+  but at least wrong identically.
+
+- **A leading blank line contributes no ascent.** `"
+AB"` puts its first
+  baseline at the very top of the box, because an empty line inks nothing.
+  Geometrically right, and arguably not what someone pressing Enter first
+  expects.
+
+- **`text-sheet.ts` still splits on `'
+'` by hand** for its "N line(s)"
+  readout. Correct today only because the model is normalised at every door; it
+  is a second splitter that can drift from `splitTextLines`.
+
+- **Still no browser-level pixel test for text.** The stubs now model
+  bounding-box metrics, which is a stronger assumption than the flat width they
+  modelled before, and nothing in this repo verifies any of it against a real
+  text engine. Every number in this change rests on that model.
