@@ -441,3 +441,55 @@ and did not fix:
   and deliberately not on the read path, where it would be a second decode of
   something already in hand. If it ever drifts from ag-psd, the test says so —
   which is the whole point — but no production path benefits from it.
+
+---
+
+## User-supplied fonts (2026-09-01, `src/fonts.js` + `app/.../fonts.service.ts`)
+
+Noticed while building font loading, deliberately not fixed.
+
+- **Weight and slant are matched by NAME, never by the file's own tables.** A
+  file called `MyFont.ttf` that is actually the bold cut registers as regular
+  and is reported as a style MATCH, which is a confident wrong answer of exactly
+  the kind the rest of the module refuses. The `OS/2` table has `usWeightClass`
+  and `fsSelection` and would settle it from the bytes. Reading it needs a font
+  parser this app deliberately does not have; `FontFace.weight`/`.style`
+  descriptors are also left unset, so every loaded face is registered at 400
+  normal.
+
+- **`bold` / `italic` on a layer still synthesise over the real face.** They are
+  hardcoded false at ingest (a pre-existing entry above), and `fontSpec` emits
+  `bold 17px "AachenBT-Bold", …`. Toggling **B** on a layer already drawing the
+  bold FILE asks the browser for faux bold on top of a bold face. Selecting the
+  bold file from a loaded family instead would need per-family face grouping,
+  which the registry has the data for (`stem` + `styleKey`) and does not do.
+
+- **Nothing survives a reload.** The registry dies with the tab — deliberate, so
+  nobody's licensed fonts are persisted — but `toProjectJson` writes
+  `fontFamily: '"AachenBT-Bold", Arial, …'` into the saved project. Reopening
+  restores a family the font set no longer has, canvas falls through to the
+  substitute, and NOTHING says so: the sheet reads "the file asks for
+  AachenBTBold" while the stored family still names a file. A load-time check
+  comparing saved families against the registry would catch it.
+
+- **A font load re-draws layers one undo step each.** `setLayer` only coalesces
+  commands targeting the same layer, so loading one font for six layers is six
+  history entries. Stated in the UI rather than hidden, and `✕ Discard changes`
+  backs the whole session out at once, but it is still six taps of Undo for
+  anyone who closes the sheet with `✓` first.
+
+- **Applying overwrites a hand-picked stack.** If a user chose Georgia on a
+  layer and then loads the file the document actually asks for, the load wins.
+  Defensible — they just picked the file — but their choice is gone with no
+  mention beyond the layer count in the note.
+
+- **`.dfont`, `.ttc` and bare `.pfb` are refused.** `FontFace` cannot parse a
+  collection or a PostScript Type 1 binary, and a Mac user's licensed fonts are
+  often exactly those. They are refused by extension with a message naming the
+  four formats, which is honest and still a dead end for that user.
+
+- **The style-word list is six words.** `SemiBold`, `Medium`, `Thin`,
+  `Condensed`, `Oblique` and the rest are NOT split off, so `Roboto-Medium.ttf`
+  has stem `robotomedium` and does not answer `Roboto-Regular`. Deliberate —
+  every added word is a chance to eat a family word — but it means a real family
+  can fail to match on a weight nobody thought to list.
