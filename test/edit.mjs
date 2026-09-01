@@ -201,12 +201,43 @@ test('rasterises at the requested size, not the natural one', () => {
 test('scales the canvas transform instead of resampling a bitmap', () => {
   calls.length = 0;
   const natural = measure(textLayer.text);
-  rasteriseTextAt(textLayer, natural.width * 10, natural.height * 4);
+  rasteriseTextAt(textLayer, natural.width * 4, natural.height * 4);
 
   const transform = calls.find((c) => c[0] === 'setTransform');
   assert.ok(transform, 'expected setTransform to be used');
-  assert.equal(Math.round(transform[1]), 10, 'horizontal scale should be 10x');
+  assert.equal(Math.round(transform[1]), 4, 'horizontal scale should be 4x');
   assert.equal(Math.round(transform[4]), 4, 'vertical scale should be 4x');
+});
+
+test('a box of the wrong aspect fits the glyphs inside it rather than squashing them', () => {
+  // sx and sy were independent here -- w/natural.width by h/natural.height --
+  // and that is what squashed a PSD text layer the moment it went live: the
+  // box is Photoshop's INK extent, our measurement is a LINE BOX, and the two
+  // ratios differ by ~1.4x with nothing resized at all. One scale, the smaller
+  // of the two, keeps glyph shape whatever rectangle this is handed.
+  calls.length = 0;
+  const natural = measure(textLayer.text);
+  rasteriseTextAt(textLayer, natural.width * 10, natural.height * 4);
+
+  const t = calls.find((c) => c[0] === 'setTransform');
+  assert.equal(t[1], t[4], 'one scale, on both axes');
+  assert.equal(t[1], 4, 'the axis with the least room decides it');
+  assert.deepEqual([t[2], t[3]], [0, 0], 'no shear');
+  assert.deepEqual([t[5], t[6]], [0, 0], 'left-aligned glyphs sit against the left edge');
+});
+
+test('the slack in an over-wide box goes where the alignment says', () => {
+  const natural = measure(textLayer.text);
+  const drawn = natural.width * 4;                       // uniform scale is 4x
+
+  for (const [align, expected] of [['left', 0], ['center', (natural.width * 10 - drawn) / 2],
+                                   ['right', natural.width * 10 - drawn]]) {
+    calls.length = 0;
+    rasteriseTextAt({ ...textLayer, text: { ...textLayer.text, align } },
+      natural.width * 10, natural.height * 4);
+    const t = calls.find((c) => c[0] === 'setTransform');
+    assert.equal(t[5], expected, align + '-aligned text is anchored wrong');
+  }
 });
 
 test('a 10x scale-up re-shapes glyphs rather than enlarging pixels', () => {

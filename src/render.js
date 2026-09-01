@@ -81,7 +81,17 @@ export function measureText(text) {
  * Text is vector, so drawing it once at its natural size and then resampling
  * the bitmap up is exactly how you get pixelated text. Scaling the canvas
  * transform instead re-shapes the glyphs at the target size, which stays sharp
- * at any scale — including a non-uniform one, since sx and sy are independent.
+ * at any scale.
+ *
+ * ONE scale, on both axes. sx and sy used to be independent, and that is not a
+ * feature anyone asked for: it is what squashed every text layer read from a
+ * PSD. Photoshop's bounds are the INK extent of the glyphs; `natural` below is
+ * a LINE BOX — the widest advance by lines * round(fontSize * 1.25). Two
+ * different quantities, so w/natural.width and h/natural.height differ by
+ * ~1.4x on a layer nobody has touched, and treating their ratio as a scale is
+ * a units error rather than a resize. The smaller ratio wins, so the glyphs
+ * always FIT the rect: the larger one would overflow and the canvas edge would
+ * clip it. Whatever rectangle this is handed, glyph shape survives.
  */
 export function rasteriseTextAt(layer, width, height) {
   const natural = measureText(layer.text);
@@ -94,7 +104,16 @@ export function rasteriseTextAt(layer, width, height) {
   if (!canvas) return null;
 
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx.setTransform(w / natural.width, 0, 0, h / natural.height, 0, 0);
+
+  const scale = Math.min(w / natural.width, h / natural.height);
+  // Slack on the roomier axis goes where the alignment says, so a box wider
+  // than the string cannot silently left-shift centred or right-aligned text.
+  // Vertically it stays at the top, which is where textBaseline 'top' draws
+  // from and where the box grows from as lines are added.
+  const drawn = natural.width * scale;
+  const offsetX = layer.text.align === 'center' ? (w - drawn) / 2
+    : layer.text.align === 'right' ? w - drawn : 0;
+  ctx.setTransform(scale, 0, 0, scale, offsetX, 0);
   ctx.font = fontSpec(layer.text, 1);
   ctx.fillStyle = layer.text.color;
   ctx.textBaseline = 'top';

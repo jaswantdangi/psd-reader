@@ -23,7 +23,7 @@ import { renderProject } from '../src/render.js';
 import { buildExportOrder, assertIdentifiable, isSelfRendering, drawsOwnPixels, wantedIndices } from '../src/export/order.js';
 import {
   removeLayer, nextLayerId,
-  naturalTextSize, insertTextLayer, retypeText,
+  naturalTextSize, insertTextLayer, retypeText, liveTextRect,
   insertImageLayer, replaceImage,
 } from '../src/creative/index.js';
 
@@ -472,6 +472,82 @@ test('retyping a PSD text layer switches it off Photoshop pixels', () => {
   assert.equal(isSelfRendering(layer), true, 'export must now generate it rather than await the file');
   assert.ok(undo(project));
   assert.equal(layer.rerendered, false, 'undo returns it to Photoshop pixels');
+});
+
+console.log('\nPhotoshop bounds are not our bounds\n');
+
+/**
+ * The distortion bug, in numbers.
+ *
+ * Photoshop bounds "TEST" at 30px as 60 x 21 -- the INK extent of the caps.
+ * Our own measurement of the same string is a LINE BOX: the widest advance by
+ * lines * round(fontSize * 1.25) = 38 tall. Two different quantities, so the
+ * ratio between them is a units error and not a scale, and applying it as one
+ * squashed the glyphs 1.4x harder vertically than horizontally.
+ *
+ * (Under the stub the width is 4 chars * 10px = 40 rather than the ~77 real
+ * Arial gives; the HEIGHT, where the distortion comes from, is the real number.)
+ */
+test('editing a PSD text layer re-fits the box to our metrics, not to Photoshop\'s', () => {
+  const project = createProject(textDoc, 'text.src.psd');
+  const layer = project.layers.find((l) => l.kind === 'text');
+  assert.deepEqual([layer.x, layer.y, layer.w, layer.h], [36, 45, 60, 21], 'the bounds the file carried');
+
+  retypeText(project, layer.id, { content: 'TEST!' });
+
+  assert.deepEqual([layer.w, layer.h], [50, 38], 'our natural size at scale 1, not 60/40 x 21/38 of it');
+  assert.equal(layer.x, 36, 'left-aligned, so the left edge is the anchor');
+  assert.equal(layer.y, 37, 're-centred on the old box, so the visible glyphs do not jump');
+});
+
+test('a second edit grows the box to fit the string, never re-applying a stale stretch', () => {
+  const project = createProject(textDoc, 'text.src.psd');
+  const layer = project.layers.find((l) => l.kind === 'text');
+  retypeText(project, layer.id, { content: 'TEST!' });
+  const y = layer.y;
+
+  retypeText(project, layer.id, { content: 'TE' });
+  assert.deepEqual([layer.w, layer.h], [20, 38], 'still scale 1 on both axes');
+  assert.equal(layer.y, y, 'the top is ours now and stays put');
+});
+
+test('undo puts the bounds the file carried back together with its pixels', () => {
+  const project = createProject(textDoc, 'text.src.psd');
+  const layer = project.layers.find((l) => l.kind === 'text');
+  retypeText(project, layer.id, { content: 'TEST!' });
+  assert.ok(undo(project));
+  assert.deepEqual([layer.x, layer.y, layer.w, layer.h], [36, 45, 60, 21]);
+  assert.equal(layer.rerendered, false);
+});
+
+test('liveTextRect is the rect a resize drag on a PSD text layer must start from', () => {
+  const project = createProject(textDoc, 'text.src.psd');
+  const layer = project.layers.find((l) => l.kind === 'text');
+
+  // Exactly the box the first edit would produce, without performing an edit:
+  // a corner drag reads it at pointer-down so the drag scales OUR rectangle
+  // rather than the file's, which the renderer would otherwise read as a 1.4x
+  // vertical squash on the very first frame.
+  assert.deepEqual(liveTextRect(layer), { x: 36, y: 37, w: 40, h: 38 });
+
+  retypeText(project, layer.id, { content: 'TEST' });
+  assert.equal(liveTextRect(layer), null, 'the box is already ours; there is nothing to re-fit');
+  assert.equal(liveTextRect(project.layers[0]), null, 'raster layers have no natural size');
+});
+
+test('a hand resize survives typing as ONE uniform scale, not an X/Y stretch', () => {
+  const project = synth();
+  const layer = insertTextLayer(project, { content: 'AB', x: 0, y: 0, fontSize: 20 });
+  setLayer(project, layer.id, { w: 60, h: 75 });            // 3x, uniform
+  retypeText(project, layer.id, { content: 'ABCD' });
+  assert.deepEqual([layer.w, layer.h], [120, 75], 'still 3x natural');
+
+  // A corner drag does not lock aspect, so a box CAN end up non-uniform. The
+  // glyphs are fitted inside it undistorted, and the next edit normalises the
+  // box back to one scale rather than carrying the stretch forward forever.
+  setLayer(project, layer.id, { w: 200, h: 75 });
+  retypeText(project, layer.id, { content: 'ABCD' });
+  assert.deepEqual([layer.w, layer.h], [120, 75], 'the extra width was empty space, not a stretch');
 });
 
 test('retyping a raster layer is refused', () => {

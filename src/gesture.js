@@ -88,8 +88,10 @@ export function anchorFor(handle, rect) {
  * The rect produced by dragging `handle` to a document point.
  *
  * Aspect ratio is NOT locked: there is no second finger free to unlock it, and
- * the model supports non-uniform w/h (as does rasteriseTextAt, deliberately --
- * sx and sy are independent there).
+ * the model supports non-uniform w/h. Text is the exception, and it is enforced
+ * downstream rather than here: rasteriseTextAt scales by ONE factor and fits
+ * the glyphs inside whatever rect it is handed, so a non-uniform drag on a text
+ * layer leaves empty space instead of squashing the letters.
  *
  * NO FLIPS. Dragging past the anchor clamps at `min` rather than mirroring the
  * layer to the other side. w/h have no sign in the project model, renderProject
