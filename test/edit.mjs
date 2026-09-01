@@ -212,7 +212,8 @@ globalThis.document = {
   },
 };
 
-const { rasteriseTextAt, measureText: measure } = await import('../src/index.js');
+const { rasteriseTextAt, measureText: measure, drawLayerInto, createBuffer, wrapsInBox } =
+  await import('../src/index.js');
 
 const textLayer = {
   kind: 'text', rerendered: true,
@@ -365,6 +366,91 @@ test('a Photoshop line break is a line break', () => {
   // then collapse to one line. Same string, same box, whichever separator.
   assert.equal(of('AB\rCD').height, of('AB\nCD').height, 'CR and LF must measure identically');
   assert.ok(of('AB\rCD').height > of('ABCD').height, 'two lines are taller than one');
+});
+
+/**
+ * Paragraph (box) text wraps; point text does not.
+ *
+ * PSD text is one of two shapes and ag-psd reports which. Point text breaks at
+ * the characters the author typed and nowhere else. BOX text is laid out inside
+ * a rectangle the author drew, and Photoshop wraps it to that rectangle's
+ * width — so every visual line break in a paragraph layer is one Photoshop
+ * COMPUTED, not one stored in the string. Nothing here wrapped, so a headline
+ * that reads as three lines in Photoshop arrived as one long line the instant
+ * we took over rendering. The user called that "line breaks not preserved";
+ * the CR-versus-LF fix above is a different bug that shares the symptom.
+ *
+ * The stub advances 10px per character at any size, so a box width of 100 is
+ * ten characters — spaces included, because a stub space is a 10px character
+ * like any other.
+ */
+const boxText = (content, boxWidth) =>
+  ({ ...textLayer.text, content, shapeType: 'box', boxWidth });
+
+test('point text is never wrapped, whatever box width is hanging off it', () => {
+  // The branch has to key on shapeType, not on the mere presence of a width.
+  const m = measure({ ...textLayer.text, content: 'ONE TWO THREE FOUR FIVE', boxWidth: 100 });
+  assert.equal(m.lines.length, 1, 'point text breaks only where the author typed a break');
+  assert.equal(wrapsInBox({ ...textLayer.text, boxWidth: 100 }), false);
+});
+
+test('box text wraps to the box width, on measured widths', () => {
+  const m = measure(boxText('ONE TWO THREE FOUR FIVE', 129));
+  assert.deepEqual(m.lines, ['ONE TWO', 'THREE FOUR', 'FIVE']);
+  assert.equal(m.width, 100, 'the block is as wide as its widest LINE, not as the box');
+  assert.equal(m.height, 14 + 2 * 22, 'first line ink plus two font-box advances');
+});
+
+test('a box with no usable width does not wrap — and does not loop', () => {
+  for (const width of [undefined, null, 0, -5, NaN]) {
+    const m = measure(boxText('ONE TWO THREE', width));
+    assert.equal(m.lines.length, 1, `boxWidth ${width} must fall back to no wrapping`);
+    assert.equal(wrapsInBox(boxText('ONE TWO THREE', width)), false);
+  }
+});
+
+test('explicit breaks and wrapping coexist — split first, then wrap each paragraph', () => {
+  // Both mechanisms are real and neither replaces the other: Photoshop wraps a
+  // paragraph AND honours the Return the author pressed inside it.
+  assert.deepEqual(measure(boxText('ONE TWO THREE\nFOUR', 100)).lines,
+    ['ONE TWO', 'THREE', 'FOUR']);
+  assert.deepEqual(measure(boxText('ONE TWO THREE\rFOUR', 100)).lines,
+    ['ONE TWO', 'THREE', 'FOUR'], "Photoshop's own separator is CR");
+  assert.deepEqual(measure(boxText('AB\n\nCD', 100)).lines, ['AB', '', 'CD'],
+    'an empty paragraph is still a line — it advances the baseline');
+});
+
+test('a word wider than the box overflows its line rather than being dropped or broken', () => {
+  // Three behaviours were available: break mid-word, drop it, or let it
+  // overhang. Photoshop overhangs when it cannot hyphenate, and we do not
+  // hyphenate at all — so a mid-word break would invent a break Photoshop never
+  // makes, and dropping is never an option. The greedy loop consumes one token
+  // per iteration whatever the widths, so an unfittable word cannot spin it.
+  const m = measure(boxText('AB LONGWORD CD', 40));
+  assert.deepEqual(m.lines, ['AB', 'LONGWORD', 'CD'], 'kept whole, on a line of its own');
+  assert.equal(m.width, 80, 'the block reports the overhang honestly rather than clipping to 40');
+});
+
+test('the render cache key follows the box width', () => {
+  // renderedKey is what stops a re-rasterise every frame. A width missing from
+  // it means a re-wrapped layer keeps drawing the OLD line breaks until
+  // something else in the key happens to move.
+  const layer = {
+    kind: 'text', rerendered: true, visible: true, opacity: 1, blendMode: 'normal',
+    x: 0, y: 0, w: 100, h: 60,
+    text: boxText('ONE TWO THREE', 100),
+  };
+  const dest = createBuffer(100, 60);
+  drawLayerInto(dest, layer, 1);
+  const first = layer.renderedKey;
+  assert.ok(first, 'the layer should have rasterised and cached');
+
+  drawLayerInto(dest, layer, 1);
+  assert.equal(layer.renderedKey, first, 'an unchanged layer must not re-rasterise');
+
+  layer.text = boxText('ONE TWO THREE', 200);
+  drawLayerInto(dest, layer, 1);
+  assert.notEqual(layer.renderedKey, first, 'a wider box is a different set of line breaks');
 });
 
 test('resizing a text layer switches it to live rendering', () => {

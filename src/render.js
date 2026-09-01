@@ -96,6 +96,113 @@ export const normaliseLineBreaks = (content) =>
 const finite = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
 /**
+ * Whether this layer's lines are the author's alone, or Photoshop's arithmetic.
+ *
+ * PSD text is one of two SHAPES and ag-psd reports which:
+ *
+ *   - **point** — an insertion point and a string. It breaks at the break
+ *     characters the author typed and NOWHERE else. `text.src.psd` is one.
+ *   - **box** (paragraph) — a rectangle the author drew, with the string poured
+ *     into it. Photoshop WRAPS it to that rectangle's width, so most of the
+ *     line breaks a reader sees were computed at layout time and appear
+ *     nowhere in the stored string. `text-box.src.psd` is one, and its
+ *     `boxBounds` is [0, 0, 128.99352, 49].
+ *
+ * Nothing here used to wrap, so a paragraph layer lost every computed break the
+ * moment we started drawing it ourselves: a three-line headline collapsed onto
+ * one line. That is a DIFFERENT bug from the CR/LF one above, with the same
+ * user-visible symptom — "my line breaks are gone" — which is why fixing the
+ * separators did not fix it.
+ *
+ * A width is required as well as a shape. `shapeType: 'box'` with no readable
+ * `boxBounds` is a paragraph layer whose box we cannot measure, and wrapping to
+ * a made-up width would produce confident, plausible, wrong line breaks — worse
+ * than not wrapping, because nothing on screen says which it is.
+ */
+export const wrapsInBox = (text) =>
+  text?.shapeType === 'box' && finite(text.boxWidth) !== null && text.boxWidth > 0;
+
+/**
+ * The width one line occupies, from the same metrics `measureText` composes its
+ * box out of.
+ *
+ * The INK extent, not the advance, because the box the wrapped block has to fit
+ * inside is an ink extent too — see the long note on measureText. Wrapping on
+ * the advance and then reporting an ink width would let a line that "fits" come
+ * out fractionally narrower than the box, which is harmless, or a line that
+ * fits on advances overflow on ink, which is not. One quantity, both places.
+ *
+ * Falls back to the advance where a platform reports no glyph bounds, exactly
+ * as measureText does.
+ */
+const lineWidth = (ctx, line) => {
+  const m = ctx.measureText(line);
+  const right = finite(m.actualBoundingBoxRight);
+  if (right === null) return finite(m.width) ?? 0;
+  return Math.max(0, finite(m.actualBoundingBoxLeft) ?? 0) + right;
+};
+
+/**
+ * Greedy word wrap of ONE paragraph, against a measured width.
+ *
+ * Greedy — fill a line until the next word does not fit — is Photoshop's
+ * single-line composer, which is what these fixtures use
+ * (`paragraphStyle.everyLineComposer: false`). The every-line composer
+ * rebalances a whole paragraph and would need a different algorithm; a file
+ * that asks for it is not detected here and is noted in docs/BACKLOG.md.
+ *
+ * Breaks at WHITESPACE only. A word wider than the box overhangs its own line
+ * rather than being split mid-word or dropped: we do not hyphenate, so a
+ * mid-word break would be one Photoshop never makes, and losing a word is never
+ * the better failure. The loop consumes exactly one token per iteration
+ * whatever the widths, so an unfittable word cannot spin it.
+ *
+ * COST: one `ctx.measureText` per token. Kerning crosses the space between two
+ * words, so a cached per-word width plus a space width is an approximation and
+ * this is not; a 60-word paragraph is ~120 measurements per `measureText()`
+ * call, which happens once per keystroke and once per cache miss in
+ * `textPixelsAt` — not once per frame.
+ */
+function wrapParagraph(ctx, paragraph, maxWidth) {
+  // An empty paragraph is still a line: it advances the baseline, and dropping
+  // it would silently close up a deliberate blank line.
+  if (!paragraph) return [''];
+
+  const tokens = paragraph.split(/(\s+)/).filter((t) => t !== '');
+  const lines = [];
+  let line = '';
+
+  for (const token of tokens) {
+    const candidate = line + token;
+    // Never break before the FIRST word on a line — that is the case where
+    // the word alone is wider than the box, and breaking there either loops
+    // forever or emits an empty line before every long word.
+    if (line !== '' && !/^\s+$/.test(token) && lineWidth(ctx, candidate) > maxWidth) {
+      lines.push(line.replace(/\s+$/, ''));
+      line = token;
+      continue;
+    }
+    line = candidate;
+  }
+  lines.push(line.replace(/\s+$/, ''));
+  return lines;
+}
+
+/**
+ * The lines this string actually draws as: the author's breaks, then the box's.
+ *
+ * Order matters and is not interchangeable. Photoshop composes each PARAGRAPH
+ * independently, so an explicit break always starts a new line even mid-box;
+ * wrapping first and splitting after would let a paragraph's tail share a line
+ * with the next paragraph's head.
+ */
+function layoutLines(ctx, text) {
+  const paragraphs = splitTextLines(text.content);
+  if (!wrapsInBox(text)) return paragraphs;
+  return paragraphs.flatMap((p) => wrapParagraph(ctx, p, text.boxWidth));
+}
+
+/**
  * Line advance where `fontBoundingBox*` is unavailable, as a multiple of the
  * font size.
  *
@@ -165,7 +272,7 @@ export function measureText(text) {
   const ctx = surface.getContext('2d');
   ctx.font = fontSpec(text);
 
-  const lines = splitTextLines(text.content);
+  const lines = layoutLines(ctx, text);
   const metrics = lines.map((line) => ctx.measureText(line));
 
   // Font-box metrics are a property of the FONT, so any line reports them.
@@ -275,8 +382,12 @@ export function rasteriseTextAt(layer, width, height) {
 
 /** Cached by target size — a resize drag re-rasterises, a static frame does not. */
 function textPixelsAt(layer, width, height) {
+  // shapeType and boxWidth are IN the key: they decide where the lines break,
+  // so a layer whose box changed and whose string did not would otherwise keep
+  // drawing the previous wrap until something else in the key happened to move.
   const key = `${width}x${height}|${layer.text.fontSize}|${layer.text.fontFamily}|${layer.text.color}` +
-    `|${layer.text.align}|${layer.text.bold}|${layer.text.italic}|${layer.text.content}`;
+    `|${layer.text.align}|${layer.text.bold}|${layer.text.italic}` +
+    `|${layer.text.shapeType}|${layer.text.boxWidth}|${layer.text.content}`;
   if (layer.renderedKey !== key) {
     layer.rendered = rasteriseTextAt(layer, width, height);
     layer.renderedKey = key;
