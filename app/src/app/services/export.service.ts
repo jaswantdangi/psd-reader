@@ -136,7 +136,8 @@ export class ExportService {
   /**
    * What crosses to the worker.
    *
-   * `layer.pixels` is dropped, for two reasons and not one.
+   * `layer.pixels` is dropped FOR EVERY LAYER THE FILE WILL SUPPLY, for two
+   * reasons and not one.
    *
    * MEMORY: structured clone COPIES every typed array it carries, so shipping
    * the proxy pixels would duplicate the editor's entire resident bitmap set at
@@ -161,11 +162,31 @@ export class ExportService {
    * a texture is capped at `OVERLAY_IMAGE_EDGE` (4 MB at the very worst) and
    * has no other route across. Structured clone also preserves shared
    * references, so one texture applied to twelve layers crosses once.
+   *
+   * A `selfSupplied` LAYER IS THE THIRD CASE, AND IT KEEPS ITS PIXELS. An
+   * added or replaced picture never came from the file: `sourceIndex` is null
+   * and no arrival is ever coming for it, so its own buffer IS its
+   * full-resolution material and `src/export/target-js.js` blends exactly that
+   * at scale 1. Both halves of the reasoning above invert for it. There is no
+   * memory saving — the worker has no other copy to fall back on — and
+   * dropping the pixels does not degrade the export, it BREAKS it:
+   * `drawsOwnPixels` in `src/export/order.js` is gated on `selfSupplied &&
+   * !!pixels`, so a stripped layer fails that test, then fails
+   * `assertIdentifiable` for having no `sourceIndex`, and the whole export is
+   * refused with NO_IDENTITY — for a document the user can see on screen.
+   *
+   * The cost is real and is disclosed where the decision is made: each added
+   * picture is copied once by structured clone for the duration of an export,
+   * which is why `image-actions.ts` caps a decode at 2048 px on the long edge
+   * rather than taking the file's own resolution.
    */
   private payloadFor(project: any): any {
     return {
       ...project,
-      layers: project.layers.map((layer: any) => ({ ...layer, pixels: null })),
+      layers: project.layers.map((layer: any) => ({
+        ...layer,
+        pixels: layer.selfSupplied === true ? layer.pixels : null,
+      })),
     };
   }
 
