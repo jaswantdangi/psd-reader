@@ -2,6 +2,7 @@ import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@a
 import { PANEL_FILTERS, panelRows } from '@engine/panel.js';
 import { ProjectService } from '../services/project.service';
 import { Icon } from './icon';
+import { ImageActions } from './image-actions';
 import { LayerThumb } from './layer-thumb';
 
 /** Row height in CSS px. The reorder drag converts pointer travel into rows with it. */
@@ -30,7 +31,7 @@ const FILTER_LABELS: Record<string, string> = {
   selector: 'app-layers-sheet',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [Icon, LayerThumb],
+  imports: [Icon, ImageActions, LayerThumb],
   styles: [
     `
       .is-selected {
@@ -40,6 +41,13 @@ const FILTER_LABELS: Record<string, string> = {
   ],
   template: `
     @if (model(); as panel) {
+      <!-- Adding a picture is a STACK operation, so it belongs where the stack
+           is owned rather than as a ninth entry on a rail that already scrolls
+           off the edge of a phone. Above the sticky search header, not inside
+           it: it is the first thing seen when the sheet opens, and it scrolls
+           away instead of permanently costing rows on a 60-layer file. -->
+      <app-image-actions />
+
       <!-- Findability first: a 60-layer file is not scrollable by eye. -->
       <div class="sticky top-0 z-10 space-y-3 border-b border-white/10 bg-neutral-900 px-3 py-3">
         <label class="flex h-11 items-center gap-2 rounded-xl bg-white/5 px-3">

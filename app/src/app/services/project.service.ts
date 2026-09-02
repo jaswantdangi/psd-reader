@@ -11,7 +11,12 @@ import {
   hitTest as engineHitTest,
   nextGestureKey as engineNextGestureKey,
 } from '@engine/edit.js';
-import { insertTextLayer, retypeText, resizeTextBox } from '@engine/creative/index.js';
+import {
+  insertTextLayer, retypeText, resizeTextBox, insertImageLayer,
+  // Aliased: the method below has the same name, and a bare `replaceImage`
+  // inside it would read as recursion to anyone skimming.
+  replaceImage as replaceImageCmd,
+} from '@engine/creative/index.js';
 import { createView } from '@engine/view.js';
 
 /**
@@ -285,6 +290,64 @@ export class ProjectService {
     }
     this.version.update((v) => v + 1);
     this.selectedId.set(layer.id);
+    return null;
+  }
+
+  /**
+   * Put a decoded picture into the stack as a layer of its own, and select it.
+   *
+   * The sibling of `insertText`, and deliberately the same shape: the engine
+   * mints the id, so only this can select the result, and a layer the user
+   * cannot then reach is a dead end. `insertImageLayer` goes through
+   * `insertLayer` -> `commit`, so the insert is one ordinary undo step.
+   *
+   * `pixels` must be decoded RGBA — the engine has no codec and refuses
+   * anything else by shape. What resolution to decode at is the caller's
+   * decision, and a consequential one: the buffer handed in here IS the
+   * layer's full-resolution material, because `selfSupplied` layers have no
+   * file to be re-read from at export. See `image-actions.ts`.
+   *
+   * @returns the engine's message when it refused, otherwise null
+   */
+  insertImage(options: any): string | null {
+    const project = this.project();
+    if (!project) return null;
+    let layer: any;
+    try {
+      layer = insertImageLayer(project, options);
+    } catch (error: any) {
+      return error?.message ?? String(error);
+    }
+    this.version.update((v) => v + 1);
+    this.selectedId.set(layer.id);
+    return null;
+  }
+
+  /**
+   * Swap the picture on an existing raster layer, keeping its place in the
+   * stack, its opacity, its blend mode and its mask.
+   *
+   * `fit: 'contain'` rather than `'stretch'`, and not offered as a choice: a
+   * replacement of a different aspect ratio squashed into the old box is the
+   * kind of wrong that looks like a rendering bug rather than a setting. The
+   * layer keeps the box it had and the picture is fitted inside it.
+   *
+   * The engine THROWS for a text layer rather than guessing — there is no
+   * image on it to replace — and that message is what comes back here. The
+   * caller does not offer the action for one in the first place; this is the
+   * backstop, not the explanation.
+   *
+   * @returns the engine's message when it refused, otherwise null
+   */
+  replaceImage(id: number, pixels: any): string | null {
+    const project = this.project();
+    if (!project) return null;
+    try {
+      replaceImageCmd(project, id, { pixels, fit: 'contain' });
+    } catch (error: any) {
+      return error?.message ?? String(error);
+    }
+    this.version.update((v) => v + 1);
     return null;
   }
 
