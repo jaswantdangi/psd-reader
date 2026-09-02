@@ -78,8 +78,12 @@ const TITLES: Record<SheetId, string> = {
   template: `
     <div class="fixed inset-0 flex flex-col overflow-hidden bg-neutral-950 text-neutral-100">
       <!-- ── top bar ─────────────────────────────────────────────── -->
+      <!-- relative z-40 so the header outranks the sheet layer below (z-30).
+           The Select toggle has to be reachable WHILE a sheet is open, and the
+           sheet overlay is inset-0 — without this it would cover the one
+           control that makes the canvas tappable again. -->
       <header
-        class="flex min-h-[56px] shrink-0 items-center gap-1 border-b border-white/10 bg-neutral-900 px-1"
+        class="relative z-40 flex min-h-[56px] shrink-0 items-center gap-1 border-b border-white/10 bg-neutral-900 px-1"
         style="padding-top: env(safe-area-inset-top)"
       >
         <button
@@ -109,6 +113,30 @@ const TITLES: Record<SheetId, string> = {
           (click)="svc.redo()"
         >
           <app-icon name="redo" />
+        </button>
+
+        <!-- The Select tool.
+             In the HEADER, not the rail, because it is the one control that
+             has to work WHILE a tool sheet is open — and the rail is behind
+             the sheet, already scrolls horizontally at eight tools, and would
+             put a mode switch among seven sheet openers that are not modes.
+             A sticky toggle rather than a press-and-hold: holding it needs the
+             second hand that is already holding the phone, and the whole point
+             is repeated taps on the canvas. It is left ON until turned off, so
+             it says so — lit, labelled, and echoed on the canvas. -->
+        <button
+          type="button"
+          class="flex h-12 min-w-[48px] items-center justify-center gap-1.5 rounded-xl px-2.5 disabled:opacity-30"
+          [class]="svc.selectMode() ? 'bg-sky-500 text-white' : 'text-neutral-300 active:bg-white/10'"
+          [disabled]="svc.state() !== 'ready'"
+          [attr.aria-pressed]="svc.selectMode()"
+          aria-label="Select tool — one tap picks the layer under it"
+          (click)="toggleSelectMode()"
+        >
+          <app-icon name="select" [size]="20" />
+          @if (svc.selectMode()) {
+            <span class="text-[11px] font-semibold">Select</span>
+          }
         </button>
 
         <span class="mx-1 min-w-0 flex-1 truncate text-center text-[13px] text-neutral-400">
@@ -279,6 +307,14 @@ const TITLES: Record<SheetId, string> = {
                   </button>
                 </div>
               }
+              <!-- The mode, where the taps it changes the meaning of land. The
+                   header button is lit too, but a thumb on the canvas is not
+                   looking at the top of the screen. -->
+              @if (svc.selectMode()) {
+                <span class="rounded-full bg-sky-500/20 px-2.5 py-1 text-[11px] text-sky-200 ring-1 ring-sky-400/40">
+                  Select · tap to pick
+                </span>
+              }
               @if (previewQuality()) {
                 <span class="rounded-full bg-black/70 px-2.5 py-1 text-[11px] text-amber-300">
                   {{ zoomLabel() }} · preview quality
@@ -444,16 +480,40 @@ const TITLES: Record<SheetId, string> = {
 
       <!-- ── sheets ──────────────────────────────────────────────── -->
       @if (sheet(); as id) {
+        <!-- In select mode the sheet stops being modal.
+             Normally this is a full-screen backdrop: it covers the canvas AND
+             swallows any tap on it as a dismiss, which is the concrete reason
+             selection did not work with a tool open — not pointer-events, an
+             element in the way. In select mode it shrinks to the sheet's own
+             footprint, so the canvas above it is live and a tap there picks a
+             layer instead of closing the sheet. -->
         <div
-          class="absolute inset-0 z-30 flex flex-col justify-end bg-black/50"
+          class="absolute z-30 flex flex-col justify-end"
+          [class]="svc.selectMode() ? 'inset-x-0 bottom-0' : 'inset-0 bg-black/50'"
           (click)="dismiss()"
         >
+          <!-- The pick has to be visible while the sheet is still open, or the
+               user is tapping into a mode with no feedback. The bottom-left
+               selection HUD is behind the sheet, so the name is repeated here,
+               directly above it. -->
+          @if (svc.selectMode()) {
+            <div class="px-3 pb-2" (click)="$event.stopPropagation()">
+              <div class="flex min-h-[44px] items-center gap-2 rounded-xl bg-neutral-900 px-3 py-2 ring-1 ring-sky-400/50">
+                <span class="shrink-0 text-sky-300"><app-icon name="select" [size]="16" /></span>
+                <span class="min-w-0 flex-1 text-[11px] leading-relaxed text-sky-100">
+                  {{ selectBanner() }}
+                </span>
+              </div>
+            </div>
+          }
+
           <!-- Stop a tap inside the sheet reaching the backdrop. -->
           <div (click)="$event.stopPropagation()">
             <app-sheet-shell
               [title]="titleOf(id)"
               [showConfirm]="id !== 'layers'"
               [cancelLabel]="discardable(id) ? 'Discard changes' : 'Close'"
+              [maxHeight]="svc.selectMode() ? '40vh' : '72vh'"
               (cancel)="cancel(id)"
               (confirm)="close()"
             >
@@ -683,8 +743,34 @@ export class EditorPage {
     return `${width} × ${height}`;
   });
 
+  /**
+   * What the select-mode strip above an open sheet says.
+   *
+   * It leads with the layer's NAME because that is the only proof the tap
+   * landed — the selection box is behind the sheet on a short document, and a
+   * pick with no visible result reads as a mode that does not work. The second
+   * clause is the only place the cycle is discoverable: nothing about a tap
+   * suggests that doing it again reaches the layer underneath.
+   */
+  protected readonly selectBanner = computed(() => {
+    const layer = this.svc.selected();
+    if (!layer) return 'Select mode — tap the canvas above to pick a layer.';
+    return `${layer.name} — tap the same spot again for the layer below it.`;
+  });
+
   protected percent(value: number): number {
     return Math.round(value * 100);
+  }
+
+  /**
+   * Turn select mode on or off.
+   *
+   * Nothing else is disarmed with it: the mode changes what ONE finger on the
+   * canvas means, and touches no sheet's session — so leaving it discards
+   * nothing and an open sheet keeps whatever it was doing.
+   */
+  protected toggleSelectMode(): void {
+    this.svc.selectMode.set(!this.svc.selectMode());
   }
 
   /** Spoken form of the fonts chip — the number alone tells a screen reader nothing. */

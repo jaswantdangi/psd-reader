@@ -80,8 +80,8 @@ export {
   ZOOM_MAX_FACTOR, MIN_DOC_SCALE, MIN_VISIBLE_PX,
 } from './view.js';
 export {
-  HANDLES, HANDLE_HIT_CSS_PX, TAP_SLOP_CSS_PX, MIN_LAYER_SIZE,
-  handleAt, arbitrate, anchorFor, resizeFrom, moveBy, isTap,
+  HANDLES, HANDLE_HIT_CSS_PX, TAP_SLOP_CSS_PX, MIN_LAYER_SIZE, RETAP_SLOP_CSS_PX,
+  handleAt, arbitrate, anchorFor, resizeFrom, moveBy, isTap, cycleFrom,
   chooseRenderMode, FRAME_BUDGET_MS, REDUCED_INTERACTION_SCALE,
 } from './gesture.js';
 export { PANEL_FILTERS, badgesFor, clipBaseFor, panelRows } from './panel.js';

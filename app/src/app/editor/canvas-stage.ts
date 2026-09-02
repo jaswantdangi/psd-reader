@@ -25,11 +25,13 @@ import {
 import {
   arbitrate,
   chooseRenderMode,
+  cycleFrom,
   isTap,
   moveBy,
   resizeFrom,
   HANDLES,
   HANDLE_HIT_CSS_PX,
+  RETAP_SLOP_CSS_PX,
 } from '@engine/gesture.js';
 import { liveTextRect } from '@engine/creative/index.js';
 import { ProjectService } from '../services/project.service';
@@ -111,8 +113,10 @@ type Gesture = {
         ></div>
 
         <!-- Handles hide while a gesture is in flight, so the finger is not
-             covering the corner it is dragging. -->
-        @if (!svc.gesturing()) {
+             covering the corner it is dragging — and in select mode, where a
+             drag on a corner picks rather than scales. A handle that cannot be
+             dragged is an offer the mode does not honour. -->
+        @if (!svc.gesturing() && !svc.selectMode()) {
           @for (h of handles(); track h.id) {
             <div
               class="pointer-events-none absolute -ml-3 -mt-3 h-6 w-6 rounded-[3px] border-2 border-sky-500 bg-white"
@@ -142,6 +146,15 @@ export class CanvasStage implements OnDestroy {
   private rect = { left: 0, top: 0, width: 1, height: 1 };
   private frame = 0;
   private lastTapAt = 0;
+
+  /**
+   * The select-mode run in flight: where it was anchored, in DOCUMENT
+   * coordinates, and the index the last tap of it picked.
+   *
+   * Dropped on anything that ends a run — leaving the mode, a drag, a pinch —
+   * so the next tap starts a fresh search from the top of the stack.
+   */
+  private pickRun: { x: number; y: number; index: number } | null = null;
   private fittedFor: any = null;
   /** Reused destination for putImageData. Allocated here, so writing into it is ours to do. */
   private image: ImageData | null = null;
@@ -314,6 +327,9 @@ export class CanvasStage implements OnDestroy {
       // A second pointer ENDS the layer drag rather than cancelling it: what it
       // did is already committed, so a stray finger never destroys work.
       this.gesture = null;
+      // A pinch is a different place by the time it ends, so the select-mode
+      // run it interrupted cannot still be "the same spot".
+      this.pickRun = null;
       this.svc.previewPill.set(null);
       // A pinch changes only how the composite is PRESENTED, so it starts from
       // the top of the ladder rather than inheriting a rung chosen for the last
@@ -338,6 +354,7 @@ export class CanvasStage implements OnDestroy {
       docPoint,
       // A 44px touch target in CSS px is this many document units.
       handleRadius: HANDLE_HIT_CSS_PX / view.docScale,
+      selectMode: this.svc.selectMode(),
     });
 
     // A scale drag re-draws a text layer, and a text layer still showing
@@ -394,8 +411,14 @@ export class CanvasStage implements OnDestroy {
     const dx = event.clientX - gesture.startClient.x;
     const dy = event.clientY - gesture.startClient.y;
 
-    if (gesture.kind === 'view-pan') {
-      if (!isTap(dx, dy)) gesture.moved = true;
+    // A drag in select mode PANS. Not a marquee: the project model holds one
+    // selected layer and has no multi-selection, so a rectangle that could
+    // only ever return a single layer would misrepresent what it does. Not
+    // "nothing", either — with a sheet open the canvas is a strip, and a mode
+    // that cannot scroll to the layer you are trying to pick is a mode that
+    // only works on layers that happen to be in view.
+    if (gesture.kind === 'view-pan' || gesture.kind === 'select') {
+      if (!isTap(dx, dy)) { gesture.moved = true; this.pickRun = null; }
       this.svc.view.set(
         clampView(
           { docScale: view.docScale, panX: gesture.startView.panX + dx, panY: gesture.startView.panY + dy },
@@ -483,6 +506,19 @@ export class CanvasStage implements OnDestroy {
   }
 
   private tap(event: PointerEvent): void {
+    const view = this.svc.view();
+    const doc = viewToDoc(view, event.clientX, event.clientY, this.rect);
+
+    if (this.svc.selectMode()) {
+      // No double-tap-to-zoom here, deliberately. In this mode the second tap
+      // in the same place IS the gesture — it picks the layer below — and
+      // letting it zoom instead would make the cycle unreachable by exactly
+      // the input that drives it.
+      this.lastTapAt = 0;
+      this.pick(doc, view.docScale);
+      return;
+    }
+
     const now = performance.now();
     if (now - this.lastTapAt < DOUBLE_TAP_MS) {
       this.lastTapAt = 0;
@@ -491,9 +527,49 @@ export class CanvasStage implements OnDestroy {
     }
     this.lastTapAt = now;
 
-    const doc = viewToDoc(this.svc.view(), event.clientX, event.clientY, this.rect);
     const hit = this.svc.hitTest(doc.x, doc.y);
     this.svc.select(hit ? hit.id : null);
+  }
+
+  /**
+   * One select-mode pick, and the run it belongs to.
+   *
+   * `cycleFrom` decides whether this tap continues the last one's run (search
+   * below what it picked) or starts a new one (search the whole stack). When
+   * the search below comes back empty the pile is exhausted, so the tap wraps
+   * to the top rather than dead-ending on nothing — otherwise a user who
+   * tapped once too often would find the mode had silently deselected.
+   */
+  private pick(doc: { x: number; y: number }, docScale: number): void {
+    // A run only continues while the layer it last picked is still the
+    // selected one at the index it was picked at. Anything that moved the
+    // selection from somewhere else — the layers sheet, an undo, a reorder,
+    // a discarded sheet session — invalidates it, and walking DOWN from a
+    // stale index would pick a layer with no relation to the last tap.
+    const run =
+      this.pickRun && this.svc.selectionIndex() === this.pickRun.index ? this.pickRun : null;
+
+    const { below } = cycleFrom(run, doc, {
+      // A finger-sized CSS distance in document units, like the handle radius.
+      slop: RETAP_SLOP_CSS_PX / docScale,
+    });
+
+    let hit = below === null ? null : this.svc.hitTestBelow(doc.x, doc.y, below);
+    if (!hit) hit = this.svc.hitTest(doc.x, doc.y);
+
+    this.svc.select(hit ? hit.id : null);
+
+    if (!hit) {
+      // A miss deselects, and there is no pile here to walk down.
+      this.pickRun = null;
+      return;
+    }
+
+    const index = this.svc.project()?.layers.findIndex((layer: any) => layer.id === hit.id) ?? -1;
+    // The anchor stays where the run STARTED, so a finger creeping a pixel per
+    // tap cannot walk the run off the pile it began on.
+    const anchor = below === null ? doc : run!;
+    this.pickRun = { x: anchor.x, y: anchor.y, index };
   }
 
   private toggleZoom(event: PointerEvent): void {

@@ -744,3 +744,42 @@ export worker inside `layer.adjust`.
   program-matrix problem; a texture adds a second per-layer sampler and its own
   upload on top. Nothing regresses today because `selectTier` returns TIER_JS
   for everything, but 1B-2 now has more to resolve than it did.
+
+## Select tool — noticed, not done
+
+Found while building the Select mode (`selectMode` in `arbitrate`, the header
+toggle, the non-modal sheet). None of these are regressions; all are gaps the
+mode makes visible.
+
+- **`hitTest` ignores `layer.mask`, so a cut-out layer is still pickable in the
+  area it no longer draws.** `src/edit.js` thresholds `layer.rendered ||
+  layer.pixels` alpha and never consults the coverage plane. Before the cut-out
+  tool this was academic; now a layer can be 90% erased and still swallow every
+  tap over its old bounding box — including the taps meant for the layer that
+  is now visible underneath it. Select mode's cycle is the workaround, not a
+  fix: the user has to tap twice to reach a layer that is the only thing
+  actually drawn at that point.
+
+- **The cycle is blind.** Repeated taps walk down the stack, but nothing says
+  how deep the pile is, which rung the current pick is on, or that the next tap
+  will wrap back to the top. Photoshop and Figma both offer a LIST of what is
+  under the pointer as well as a cycle. The layers sheet has the list; there is
+  no route from a canvas point to it.
+
+- **A sheet open in select mode leaves ~40% of the screen as canvas.** The
+  sheet is capped at 40vh instead of 72vh so the canvas is reachable, which
+  gives the sheet body about 265 CSS px on a 844px phone. The Layers and Fonts
+  sheets are lists and simply scroll in less room; the slider sheets fit. No
+  sheet was re-laid-out for the shorter height.
+
+- **Select mode hides the scale handles but still draws the selection box.**
+  Correct — the box is the identity readout the mode exists to move — but there
+  is no in-canvas statement that a corner drag will now pick instead of scale.
+  The only explanation is the lit header button and the pill.
+
+- **`hitTestBelow` reaches the layers below by handing the engine a shallow
+  project with a shorter `layers` array.** One object and one array of
+  references per TAP, and the engine's own hit rule applied unchanged. Cheap
+  and correct, but it is a trick: an engine-side `hitStack(project, x, y)`
+  would be the honest primitive, and would also make the cycle testable in
+  `test/` rather than only through the component.

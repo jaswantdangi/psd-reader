@@ -99,6 +99,16 @@ export class ProjectService {
   readonly previewPill = signal<string | null>(null);
   readonly gesturing = signal(false);
 
+  /**
+   * Select mode: one finger on the canvas PICKS a layer instead of moving or
+   * scaling the selected one.
+   *
+   * Held here rather than in the stage because two components read it — the
+   * stage arbitrates with it, and the top bar both sets it and has to show
+   * which mode is live. A mode the user cannot see is a mode they will fight.
+   */
+  readonly selectMode = signal(false);
+
   readonly selected = computed(() => {
     this.version();
     const project = this.project();
@@ -179,6 +189,8 @@ export class ProjectService {
     this.fileName.set('');
     this.previewPill.set(null);
     this.gesturing.set(false);
+    // A sticky mode must not outlive the document it was turned on for.
+    this.selectMode.set(false);
     this.lastLiveMs.set(null);
     this.lastSandwichMs.set(null);
   }
@@ -192,6 +204,28 @@ export class ProjectService {
   hitTest(docX: number, docY: number): any {
     const project = this.project();
     return project ? engineHitTest(project, docX, docY) : null;
+  }
+
+  /**
+   * The topmost layer at a point that sits STRICTLY BELOW `index` — what a
+   * repeated select-mode tap walks down through.
+   *
+   * The engine's `hitTest` searches from the top of `project.layers` down, so
+   * a shorter stack IS "below index": handing it a shallow project whose
+   * `layers` is `slice(0, index)` gets the engine's own hit rule, alpha
+   * threshold and crop-frame arithmetic applied to the rest of the pile,
+   * rather than a second copy of that logic living up here where it would
+   * drift. `frameOf` reads `project.frame`/`width`/`height`, all carried by
+   * the spread.
+   *
+   * The cost is one shallow object and one array of references per TAP — not
+   * per frame — and one alpha read per layer under the finger, which is what
+   * an ordinary `hitTest` already costs.
+   */
+  hitTestBelow(docX: number, docY: number, index: number): any {
+    const project = this.project();
+    if (!project || index <= 0) return null;
+    return engineHitTest({ ...project, layers: project.layers.slice(0, index) }, docX, docY);
   }
 
   /** One key per gesture, minted at pointer-down and reused for every frame of it. */

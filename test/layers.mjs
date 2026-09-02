@@ -8,8 +8,8 @@ import {
   toProjectJson, applyProjectJson,
   createView, viewToDoc, docToView, fitView, zoomAbout, clampView,
   renderScaleFor, cssZoomFor, maxDocScale, isPreviewQuality,
-  HANDLES, HANDLE_HIT_CSS_PX, TAP_SLOP_CSS_PX, MIN_LAYER_SIZE,
-  handleAt, arbitrate, anchorFor, resizeFrom, moveBy, isTap,
+  HANDLES, HANDLE_HIT_CSS_PX, TAP_SLOP_CSS_PX, MIN_LAYER_SIZE, RETAP_SLOP_CSS_PX,
+  handleAt, arbitrate, anchorFor, resizeFrom, moveBy, isTap, cycleFrom,
   chooseRenderMode, FRAME_BUDGET_MS, REDUCED_INTERACTION_SCALE,
   panelRows,
 } from '../src/index.js';
@@ -577,6 +577,73 @@ test('with nothing selected, one pointer always pans', () => {
   // The whole reason the first move of a layer is tap-then-drag.
   const g = arbitrate({ pointerCount: 1, selection: null, docPoint: inside, handleRadius: 20 });
   assert.equal(g.kind, 'view-pan');
+});
+
+test('select mode turns one pointer into a pick, wherever it lands', () => {
+  // The whole point of the mode: a layer UNDER the selection has to be
+  // reachable without deselecting first, so being inside the selection's box
+  // must stop meaning "move me".
+  for (const point of [inside, outside, corner]) {
+    const g = arbitrate({
+      pointerCount: 1, selection: SEL, docPoint: point, handleRadius: 20, selectMode: true,
+    });
+    assert.equal(g.kind, 'select', `${JSON.stringify(point)} should pick, not transform`);
+    assert.equal(g.handle, null, 'a pick has no handle');
+  }
+});
+
+test('select mode still lets two fingers work the view', () => {
+  // Navigating while choosing is the common case: the layer you want is
+  // usually the one you had to zoom in to tell apart from the one on top.
+  const g = arbitrate({
+    pointerCount: 2, selection: SEL, docPoint: corner, handleRadius: 20, selectMode: true,
+  });
+  assert.equal(g.kind, 'view-pinch');
+});
+
+test('select mode off is byte-for-byte the old arbitration', () => {
+  // The flag is opt-in. Passing it false must not be a second code path.
+  for (const point of [inside, outside, corner]) {
+    const off = arbitrate({ pointerCount: 1, selection: SEL, docPoint: point, handleRadius: 20, selectMode: false });
+    const absent = arbitrate({ pointerCount: 1, selection: SEL, docPoint: point, handleRadius: 20 });
+    assert.deepEqual(off, absent);
+  }
+});
+
+test('the first tap of a run searches the whole stack', () => {
+  assert.deepEqual(cycleFrom(null, inside, { slop: 3 }), { below: null });
+});
+
+test('a re-tap in the same place searches below the layer it just picked', () => {
+  // "Same place" is a distance in DOCUMENT pixels from the run's ANCHOR -- the
+  // first tap of the run, not the previous one -- so a finger creeping a pixel
+  // per tap cannot walk the cycle off the layer it started on.
+  const previous = { x: 150, y: 150, index: 4 };
+  assert.deepEqual(cycleFrom(previous, { x: 152, y: 151 }, { slop: 3 }), { below: 4 });
+  assert.deepEqual(cycleFrom(previous, { x: 150, y: 153 }, { slop: 3 }), { below: 4 }, 'on the boundary is still the same place');
+});
+
+test('a tap somewhere else ends the cycle and starts a new run', () => {
+  const previous = { x: 150, y: 150, index: 4 };
+  assert.deepEqual(cycleFrom(previous, { x: 150, y: 154 }, { slop: 3 }), { below: null });
+  assert.deepEqual(cycleFrom(previous, outside, { slop: 3 }), { below: null });
+});
+
+test('a run that has reached the bottom of the stack restarts at the top', () => {
+  // index 0 is the bottom layer, so there is nothing below it to search. The
+  // cycle wraps rather than dead-ending, which is what makes repeated tapping
+  // a way OUT of a pile rather than a way to get stuck under it.
+  assert.deepEqual(cycleFrom({ x: 150, y: 150, index: 0 }, inside, { slop: 3 }), { below: null });
+});
+
+test('the re-tap slop is a finger-sized CSS distance, converted by the caller', () => {
+  // Stated in CSS px like HANDLE_HIT_CSS_PX, because a fixed document distance
+  // is sub-pixel when a 4000px document is fitted to a phone -- no second tap
+  // would ever qualify. Bigger than the tap slop, so a tap that WAS a tap and
+  // landed next to the last one continues the run.
+  assert.ok(RETAP_SLOP_CSS_PX > TAP_SLOP_CSS_PX);
+  const slop = RETAP_SLOP_CSS_PX / 0.1;            // fitted at 10%: 120 doc px
+  assert.deepEqual(cycleFrom({ x: 150, y: 150, index: 4 }, { x: 200, y: 150 }, { slop }), { below: 4 });
 });
 
 test('handleAt picks the nearest corner inside the radius and nothing outside it', () => {

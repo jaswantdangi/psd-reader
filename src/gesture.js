@@ -20,6 +20,18 @@ export const HANDLE_HIT_CSS_PX = 22;
 /** Movement below this, in CSS px, is a tap rather than a drag. */
 export const TAP_SLOP_CSS_PX = 8;
 
+/**
+ * How near the run's anchor a select-mode re-tap must land to keep cycling
+ * DOWN the stack, in CSS px. Divide by docScale before use, like the handle
+ * radius: a fixed DOCUMENT distance is sub-pixel once a 4000px document is
+ * fitted to a phone, and no second tap would ever qualify.
+ *
+ * Larger than TAP_SLOP_CSS_PX on purpose. A gesture only reaches the cycle at
+ * all if it was already a tap, so a threshold at or below the tap slop would
+ * reject taps that a user cannot tell apart from the last one.
+ */
+export const RETAP_SLOP_CSS_PX = 12;
+
 /** A layer may not be shrunk below one document pixel, and may not cross zero. */
 export const MIN_LAYER_SIZE = 1;
 
@@ -46,7 +58,8 @@ export function handleAt(rect, docX, docY, radiusDoc) {
 /**
  * Which gesture a pointer-down begins.
  *
- * The only arbitration with no ambiguous case and no mode:
+ * With `selectMode` off -- the default, and the only behaviour there was --
+ * the arbitration has no ambiguous case and no mode:
  *
  *   2 pointers            -> the VIEW, always. Never a layer edit.
  *   1 on a handle         -> scale the selection from the opposite corner
@@ -59,13 +72,35 @@ export function handleAt(rect, docX, docY, radiusDoc) {
  * panning impossible, and turns every accidental drag across the canvas into an
  * undoable document mutation.
  *
+ * `selectMode` is the one mode, and it exists because the rules above have a
+ * dead end in them: once a layer is selected, EVERY touch inside its box moves
+ * it, so a layer underneath or overlapping it cannot be picked at all without
+ * first deselecting -- and there is nowhere to tap to deselect if the thing on
+ * top covers the canvas. In the mode, one pointer always means "pick what is
+ * under this point" and never means move or scale. Two pointers still work the
+ * view: the layer you are trying to tell apart from the one on top is usually
+ * the one you had to zoom in to see.
+ *
+ * A `select` gesture that turns out to have MOVED is the caller's to treat as a
+ * pan. It is not a marquee: the project model has a single selected layer and
+ * no multi-selection, so a rectangle that could only ever return one layer
+ * would be a lie about what the tool does.
+ *
  * @param {{pointerCount:number, selection:{x,y,w,h}|null,
- *          docPoint:{x:number,y:number}, handleRadius:number}} input
+ *          docPoint:{x:number,y:number}, handleRadius:number,
+ *          selectMode?:boolean}} input
  */
 export function arbitrate(input) {
-  const { pointerCount, selection, docPoint, handleRadius = HANDLE_HIT_CSS_PX } = input;
+  const {
+    pointerCount, selection, docPoint,
+    handleRadius = HANDLE_HIT_CSS_PX, selectMode = false,
+  } = input;
 
   if (pointerCount >= 2) return { kind: 'view-pinch', handle: null };
+
+  // Ahead of the selection branch, not inside it: the mode has to beat a
+  // handle as well as the box, or the four corners stay un-pickable holes.
+  if (selectMode) return { kind: 'select', handle: null };
 
   if (selection) {
     const handle = handleAt(selection, docPoint.x, docPoint.y, handleRadius);
@@ -76,6 +111,42 @@ export function arbitrate(input) {
   }
 
   return { kind: 'view-pan', handle: null };
+}
+
+/**
+ * Where a select-mode tap should start searching: the whole stack, or strictly
+ * below the layer the last tap picked.
+ *
+ * Overlapping layers are the normal case, and a picker that always returns the
+ * topmost one is a dead end -- there is no second way to reach what is under
+ * it. So a run of taps in the same place walks DOWN: tap once for the top
+ * layer, again for the one below it, again for the one below that.
+ *
+ * "The same place" is `slop` DOCUMENT pixels from the run's ANCHOR -- the first
+ * tap of the run -- and not from the previous tap. Measuring from the previous
+ * tap lets a finger drift a pixel per tap and walk the run clean off the pile
+ * it started on, without the user doing anything that felt like moving.
+ *
+ * The run RESETS in three ways, and each is a `{ below: null }` here or an
+ * anchor the caller drops:
+ *
+ *   - a tap further than `slop` from the anchor  -- a new place, a new run
+ *   - a pick at index 0                          -- nothing below the bottom
+ *     layer, so the next tap wraps to the top rather than dead-ending
+ *   - the caller forgetting the anchor           -- leaving select mode, a
+ *     drag, a pinch, or a selection made anywhere but here
+ *
+ * @param {{x:number, y:number, index:number}|null} previous the last pick of
+ *        this run: the anchor point, and the layer's index in `project.layers`
+ * @param {{x:number, y:number}} docPoint this tap, in document coordinates
+ * @returns {{below:number|null}} search strictly below this index, or `null`
+ *        for the whole stack
+ */
+export function cycleFrom(previous, docPoint, options = {}) {
+  const { slop = RETAP_SLOP_CSS_PX } = options;
+  if (!previous || previous.index <= 0) return { below: null };
+  const far = Math.hypot(docPoint.x - previous.x, docPoint.y - previous.y) > slop;
+  return { below: far ? null : previous.index };
 }
 
 /** The corner a scale gesture holds still. */

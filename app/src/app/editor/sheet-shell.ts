@@ -19,7 +19,8 @@ import { Icon } from './icon';
   imports: [Icon],
   template: `
     <section
-      class="flex max-h-[72vh] w-full flex-col rounded-t-2xl border-t border-white/10 bg-neutral-900 shadow-[0_-12px_40px_rgba(0,0,0,0.5)]"
+      class="flex w-full flex-col rounded-t-2xl border-t border-white/10 bg-neutral-900 shadow-[0_-12px_40px_rgba(0,0,0,0.5)]"
+      [style.max-height]="maxHeight()"
       role="dialog"
       [attr.aria-label]="title()"
     >
@@ -66,6 +67,16 @@ export class SheetShell {
    */
   readonly showConfirm = input(true);
   readonly cancelLabel = input('Close');
+
+  /**
+   * How tall the sheet may grow.
+   *
+   * A CSS length rather than a boolean, because the caller that shrinks it —
+   * select mode, which needs canvas left to tap on — is the only thing that
+   * knows how much canvas it needs. 72vh is the height every sheet has always
+   * had, so the default changes nothing.
+   */
+  readonly maxHeight = input('72vh');
 
   readonly cancel = output<void>();
   readonly confirm = output<void>();
