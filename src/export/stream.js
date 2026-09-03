@@ -14,6 +14,14 @@
  * Peak memory is `file bytes + one full-res layer + output buffer` on both the
  * fast and the spill path -- exactly one full-resolution layer is resident at a
  * time, and the file bytes are dropped before the readback.
+ *
+ * A CLIP RUN IS THE ONE EXCEPTION, and it is a real one. A run is composited as
+ * a unit, so every member's pixels have to be in hand at once; the layer term
+ * becomes `max(largest layer, largest run)` and a `w * h * 5` group-and-alpha
+ * pair joins it while a run is being drawn. `estimatePeakBytes` in
+ * src/budget.js carries both terms. A document with no clipping mask -- which
+ * is every one of the 21 fixtures -- pays neither: its runs are all of length
+ * one, which is the ordinary single-layer path and allocates nothing.
  */
 import { readDocument } from '../reader.js';
 import { ExportError } from './errors.js';
@@ -37,6 +45,8 @@ const EMPTY = { width: 0, height: 0, data: new Uint8ClampedArray(0) };
  *          dispose(): Promise<void>}} options.spill
  * @param {(width: number, height: number) => object} [options.createTarget]
  *   Defaults to the JS compositor. 1C-2 passes the tiled GPU target here.
+ *   An OPTIONAL `flush()` is called at every clip-run boundary; a target
+ *   without one draws the same picture and just holds one layer longer.
  * @param {(p: {phase: string, done: number, total: number, fraction: number}) => void} [options.onProgress]
  * @param {{cancelled: boolean}} [options.signal]
  *   Checked at every layer boundary. Cancel latency is therefore up to one full
@@ -72,7 +82,30 @@ export async function exportFullRes(options) {
   let need = 0;
   let drained = 0;
 
-  const blend = (layer, pixels) => { target.blend(layer, pixels); need++; };
+  /**
+   * Hand one layer to the target and close the run if this layer ended it.
+   *
+   * The target assembles clip runs itself -- `framedTarget` rewrites geometry one
+   * `blend` call at a time, so a run cannot be handed over whole -- and it
+   * cannot see a run END, only a run start. So the walk tells it, here, at the
+   * only place that knows: `order` keeps every run contiguous, so the run is
+   * over exactly when the next layer is not a clipped one.
+   *
+   * FLUSHING INSIDE A RUN WOULD BE A BUG, not a slowdown: the next clipped
+   * layer would open a run of its own and draw unclipped.
+   *
+   * `flush` is optional -- a target without one still flushes on the next
+   * unclipped blend and at `finish()` -- so this is a memory optimisation, not
+   * a correctness one. Without it the target holds the last blended layer's
+   * full-resolution pixels while the reader decodes the next, which is a second
+   * full-resolution layer resident on every export, clipped or not.
+   */
+  const blend = (layer, pixels) => {
+    target.blend(layer, pixels);
+    need++;
+    const next = order[need];
+    if ((!next || next.clipping !== true) && target.flush) target.flush();
+  };
 
   /**
    * Satisfy every layer that can be satisfied right now, in blend order:

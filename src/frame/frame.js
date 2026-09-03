@@ -144,6 +144,8 @@ export function framedTarget(frame, createTarget) {
     const inner = createTarget(frame.width, frame.height);
     return {
       blend: (layer, pixels) => inner.blend(framedLayer(layer, frame), pixels),
+      /** Forwarded so a cropped export releases a clip run's pixels as early as an uncropped one. */
+      flush: () => { if (inner.flush) inner.flush(); },
       finish: () => inner.finish(),
       dispose: () => inner.dispose(),
       /** Diagnostic seam, forwarded so the memory test can still reach it. */

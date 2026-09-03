@@ -375,6 +375,21 @@ test('a self-rendering layer at the bottom is satisfied before the first arrival
   assert.deepEqual(planSpill(order).spill, [], 'nothing needs parking -- the text draws itself first');
 });
 
+test('a spill boundary CAN fall inside a clip run, and the plan says so', () => {
+  // Swap two clipped layers and the run's own members arrive out of order, so
+  // one of them goes to disk while its base is already in hand. That is a
+  // MEMORY fact, not a correctness one: the run is composited once, when its
+  // last member is in hand, whether that member came off the stream or off the
+  // disk. Nothing splits.
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 0, name: 'base' },
+    { sourceIndex: 2, name: 'clip A', clipping: true },
+    { sourceIndex: 1, name: 'clip B', clipping: true },
+  ));
+  assert.deepEqual(planSpill(order).spill, [1],
+    'clip B arrives before clip A is needed, so clip B parks');
+});
+
 test('isFastPath and planSpill never disagree', () => {
   const cases = [[0, 1, 2], [2, 0, 1], [1, 0, 2], [0, 2, 1], [2, 1, 0], [0, 1, 2, 3], [3, 0, 1, 2]];
   for (const indices of cases) {
@@ -786,6 +801,155 @@ await atest('a moved layer exports at its new position', async () => {
   for (const project of [proxy, eager])
     setLayer(project, project.layers[2].id, { x: 40, y: 700 });
   matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
+});
+
+console.log('\nclipping at full resolution\n');
+
+/**
+ * NO FIXTURE CONTAINS A CLIPPED LAYER. All 21 were read and `clipping` is false
+ * on every one of the 82 nodes, so there is no fixture coverage here and none
+ * is claimed. `clipping` is a PROJECT field, though -- the file is streamed
+ * back by `sourceIndex` either way -- so stamping it onto both sides of the
+ * oracle builds a real clipped document out of a real file, and the comparison
+ * is the same one every unclipped test above makes.
+ *
+ * Shaped to be mean rather than convenient. The clipped layers overlap the base
+ * only PARTLY, so a run that is not clipped shows outside the base's alpha
+ * instead of coincidentally matching. The base carries its own opacity and
+ * blend mode, which belong to the WHOLE run and are spent once at the end, not
+ * per layer. One clipped layer is `multiply` at 0.8, so a run composited in
+ * the wrong order differs from one composited in the right one.
+ *
+ * `screen` and `overlay` are deliberately NOT used: this fixture's backdrop
+ * is white, both modes are identities against white, and a document shaped with
+ * them measured 0 divergence while the export was still ignoring clipping
+ * entirely -- a test that could never have failed.
+ */
+const clipShape = (project) => {
+  setLayer(project, project.layers[2].id, { x: 60, y: 60 });
+  setLayer(project, project.layers[3].id, { x: 150, y: 150 });
+  Object.assign(project.layers[1], { opacity: 0.7, blendMode: 'multiply' });
+  Object.assign(project.layers[2], { clipping: true, opacity: 0.8, blendMode: 'multiply' });
+  Object.assign(project.layers[3], { clipping: true });
+  return project;
+};
+
+/** The proxy under test and the full-resolution reference, shaped identically. */
+const clipPair = async (extra = null) => {
+  const proxy = clipShape(await openProxy());
+  const eager = clipShape(await openEager());
+  if (extra) { extra(proxy); extra(eager); }
+  return { proxy, eager };
+};
+
+await atest('a clip run exports the way the preview renders it', async () => {
+  const { proxy, eager } = await clipPair();
+  matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
+});
+
+await atest('a run whose members arrive out of order is still composited whole', async () => {
+  // The two clipped layers swap, so one of them is parked on disk while its
+  // base is already in hand. If a spill boundary split the run, the layer read
+  // back would draw unclipped.
+  const { proxy, eager } = await clipPair((p) => reorderLayer(p, 3, 2));
+  const spill = createMemorySpill();
+  matches(await runExport(proxy, spill), renderProject(eager, { scale: 1 }));
+  assert.deepEqual(spill.writes, planSpill(buildExportOrder(proxy)).spill.map((i) => i + '.rgba'));
+  assert.ok(spill.writes.length > 0, 'the spill path really was exercised inside the run');
+});
+
+await atest('a hidden base takes its whole run with it, exactly as the preview does', async () => {
+  const { proxy, eager } = await clipPair((p) => { p.layers[1].visible = false; });
+  matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
+});
+
+await atest('a zero-opacity base takes its whole run with it too', async () => {
+  const { proxy, eager } = await clipPair((p) => { p.layers[1].opacity = 0; });
+  matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
+});
+
+await atest('a hidden member is skipped and the rest of the run still clips', async () => {
+  const { proxy, eager } = await clipPair((p) => { p.layers[2].visible = false; });
+  matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
+});
+
+/** A ramp, so the base's alpha is partial and rounding cannot cancel out. */
+const rampMask = (w, h) => {
+  const data = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) data[y * w + x] = (x * 3 + y * 5) % 256;
+  return { width: w, height: h, data };
+};
+
+await atest('a MASKED base clips through its mask, to the last bit', async () => {
+  // The one case that separates a real `clipAlphaMap` from the shortcut of
+  // reading the group buffer's own alpha channel. With no mask the two agree
+  // exactly; with one, `blendInto` writes into a Uint8ClampedArray and ROUNDS
+  // where `clipAlphaMap` writes into a Uint8Array and TRUNCATES, and they part
+  // company by 1 on roughly half the partially covered pixels.
+  const mask = rampMask(310, 310);
+  const { proxy, eager } = await clipPair((p) => { p.layers[1].mask = mask; });
+  matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
+});
+
+await atest('a self-supplied sticker can be the BASE of a run, at full resolution', async () => {
+  const { proxy, eager } = await clipPair((p) => {
+    insertImageLayer(p, { pixels: sticker200(), name: 'sticker', x: 200, y: 200, index: 3 });
+    p.layers[4].clipping = true;               // the Circle now clips to the sticker
+  });
+  matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
+});
+
+await atest('a sticker clipped to a file layer is clipped, not drawn whole', async () => {
+  const { proxy, eager } = await clipPair((p) => {
+    insertImageLayer(p, { pixels: sticker200(), name: 'sticker', x: 120, y: 120, index: 2 }).clipping = true;
+  });
+  matches(await runExport(proxy, createMemorySpill()), renderProject(eager, { scale: 1 }));
+});
+
+/**
+ * The run is assembled INSIDE the target, from `clipping` alone, because
+ * `framedTarget` rewrites each layer's geometry one call at a time and that
+ * is all the interface offers. So the target cannot see a run END -- and the
+ * walk closes it, the moment the last member is blended.
+ *
+ * That is a memory rule, not a correctness one. Without it the target holds the
+ * last blended layer's full-resolution pixels while the reader decodes the next
+ * one, which is a second full-resolution layer resident on EVERY export,
+ * clipped or not.
+ */
+await atest('the walk closes each run as it ends, never one decode later', async () => {
+  const events = [];
+  const spy = (w, h) => {
+    const inner = createJsExportTarget(w, h);
+    return {
+      blend: (layer, pixels) => { events.push(layer.clipping === true ? 'clip' : 'base'); inner.blend(layer, pixels); },
+      flush: () => { events.push('flush'); inner.flush(); },
+      finish: () => inner.finish(),
+      dispose: () => inner.dispose(),
+    };
+  };
+  const { proxy } = await clipPair();
+  await runExport(proxy, createMemorySpill(), { createTarget: spy });
+  assert.deepEqual(events, ['base', 'flush', 'base', 'clip', 'clip', 'flush'],
+    'a flush INSIDE a run would strand the next clipped layer as a base of its own');
+});
+
+await atest('the clip scratch is one lazily grown pair, and an unclipped export never allocates it', async () => {
+  let plain = null;
+  await runExport(await openProxy(), createMemorySpill(),
+    { createTarget: (w, h) => (plain = createJsExportTarget(w, h)) });
+  assert.equal(plain.clipScratch.allocations, 0,
+    'every document with no clipping mask -- which is all 21 fixtures -- must pay nothing');
+
+  let clipped = null;
+  const { proxy } = await clipPair((p) => {
+    insertImageLayer(p, { pixels: sticker200(), name: 'sticker', x: 200, y: 200, index: 3 });
+    p.layers[4].clipping = true;               // a SECOND run, so two runs in one export
+  });
+  await runExport(proxy, createMemorySpill(), { createTarget: (w, h) => (clipped = createJsExportTarget(w, h)) });
+  assert.equal(clipped.clipScratch.allocations, 1, 'two runs, one pair of buffers');
+  assert.equal(clipped.clipScratch.group, null, 'finish() drops them before the encode peak');
+  assert.equal(clipped.clipScratch.alpha, null);
 });
 
 console.log('\ntile arithmetic\n');
