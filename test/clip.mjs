@@ -7,11 +7,20 @@
  * nothing on screen said which was Photoshop's.
  *
  * NO FIXTURE IN `fixtures/` CONTAINS A CLIPPED LAYER. That was checked before
- * anything here was written: ag-psd reports `clipping` on all 82 nodes of all
+ * anything here was written: ag-psd reports `clipping` on all 80 nodes of all
  * 21 files and it is `false` on every one of them. So the documents below are
  * hand-built, and they are hand-built to be MEAN -- partial alpha on the base,
  * non-normal modes and sub-1 opacity inside the run, a mask on a clipped layer,
  * a run at the very bottom of the stack with no base under it.
+ *
+ * Hand-built documents skip the parser entirely, though, so not one of them
+ * could show that a clipping flag survives a real PSD at all. The file under
+ * tools/clipping-fixture.mjs closes that half: one PSD written in memory and
+ * read back through the streaming loader the app itself uses. It is built in
+ * memory rather than dropped into `fixtures/` because both harnesses there glob `fixtures/*.src.psd`, and since its
+ * composite is written by our own compositor, scoring it against ourselves
+ * would hand the 12/5/4 accuracy table a free pass. Photoshop parity for
+ * clipping is still unproven and needs a genuine Photoshop-saved file.
  *
  * The oracle is `compositeDocument`, which is the same one the 21-fixture
  * accuracy table has always used. `percentReal === 0` is the bar the mask fix
@@ -28,6 +37,30 @@ import {
   createSandwichCache, renderSandwiched, sandwichStateFor,
   SANDWICH_FLAT_ABOVE, SANDWICH_BELOW_ONLY,
 } from '../src/index.js';
+import { clippingFixtureBytes } from '../tools/clipping-fixture.mjs';
+import { installPlainPixelBackend, loadProjectProxy, readDocument } from '../src/index.js';
+
+installPlainPixelBackend();
+
+/**
+ * The generated clipped file, loaded the way the app loads one.
+ *
+ * `readDocument` alone will not do: it releases each layer's `imageData` the
+ * moment `onLayer` returns, so `createProject` sees four layers with no pixels
+ * and drops all four. Capturing them during the callback is the whole reason
+ * the streaming loader exists.
+ *
+ * Loaded once, up here, because `test` below is SYNCHRONOUS -- it calls fn()
+ * inside a try/catch, so an async body would hand it a promise, the catch would
+ * never fire, and a failing assertion would report as a pass.
+ */
+const bytes = clippingFixtureBytes;
+const loaded = await loadProjectProxy(bytes(), { fileName: 'clipping.src.psd' });
+const filePlan = loaded.project ?? loaded;
+// Eager, not the default: streaming releases each layer's imageData as soon as
+// onLayer returns, so compositeDocument would stack four empty buffers and
+// report 100% divergence against a renderer that is in fact correct.
+const fileDoc = await readDocument(bytes(), { pixels: 'eager', embedded: true, metadata: false });
 
 let passed = 0;
 const test = (name, fn) => {
@@ -447,6 +480,41 @@ test('the clip scratch is one growing pair, not one buffer per layer', () => {
   releaseClipScratch(clipScratch);
   assert.equal(clipScratch.group, null);
   assert.equal(clipScratch.alpha, null);
+});
+
+// ------------------------------------------------- the real binary path
+// Everything above builds project.layers in memory. These three go through
+// writePsd -> reader.js -> toLayer, the only path that can show the flag is
+// not merely something our own object literals set.
+
+test('a written PSD carries `clipping` back through the streaming loader', () => {
+  assert.equal(filePlan.layers.length, 4, 'all four layers survive the load');
+  assert.deepEqual(
+    filePlan.layers.map((l) => l.clipping === true), [false, false, true, true],
+    'the flag lands on exactly the two layers written with it',
+  );
+  // Not a tautology: the multiply layer shows blendMode and clipping are
+  // carried independently, which a single-flag round trip could not.
+  assert.equal(filePlan.layers[3].blendMode, 'multiply');
+});
+
+test('runs form from a parsed file the way they form in memory', () => {
+  const runOf = (i) => {
+    const start = clipRunStart(filePlan.layers, i);
+    return [start, clipRunEnd(filePlan.layers, start) - 1];
+  };
+  assert.deepEqual(runOf(0), [0, 0], 'the unclipped backdrop is a run of one');
+  for (const i of [1, 2, 3])
+    assert.deepEqual(runOf(i), [1, 3], 'base and both clipped layers are one atomic run');
+});
+
+test('the editor renders the parsed file exactly as the compositor does', () => {
+  const { percentReal } = compareBuffers(
+    flattenOnto(compositeDocument(fileDoc)),
+    flattenOnto(renderProject(filePlan, { scale: 1 })),
+    1,
+  );
+  assert.equal(percentReal, 0, 'renderer and compositor agree on a real file');
 });
 
 console.log(`\n${passed} passed`);
