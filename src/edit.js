@@ -247,11 +247,28 @@ function toLayer(source, warnings) {
      */
     mask: maskOf(source, pixelSource),
     /**
-     * The file clips this layer to the one below it. NOT APPLIED: clipping is a
+     * The file clips this layer to the one directly below it. APPLIED.
+     *
+     * The note that stood here said clipping was "NOT APPLIED: clipping is a
      * nested composite, not an alpha multiply, and it collides with the free
-     * reorder this panel exists to offer. The field exists so the UI can say so
-     * -- a per-row chip, a filter, and a document warning -- rather than
-     * rendering the layer in full and saying nothing.
+     * reorder this panel exists to offer". Half of that was right and half of
+     * it was the reason nothing got fixed for two phases:
+     *
+     *   - it IS a nested composite. render.js builds one, ported step for step
+     *     from the walk composite.js has always run: the base into a
+     *     full-canvas group buffer, the base's alpha as a clip plane, each
+     *     clipped layer blended into the group through it, the group into the
+     *     canvas with the base's own opacity and blend mode.
+     *   - it does NOT collide with reorder. A clipping mask is POSITIONAL, not
+     *     a group: a clipped layer clips to whatever layer ends up below it.
+     *     So a reorder simply recomputes the runs from the new order. Nothing
+     *     is locked, nothing drags as a unit, and there is no new UI concept --
+     *     `reorderLayer` needed no change at all, and undo restores the
+     *     previous arrangement through the same inverse splice as ever.
+     *
+     * The flag is still carried for the panel's per-row chip and Clipped
+     * filter, which say WHICH rows are clipped. That is still worth saying;
+     * "and therefore wrong" no longer is.
      */
     clipping: source.clipping === true,
     /** ' / '-joined names of the groups this layer was flattened out of. Assigned by flatten(). */
@@ -413,17 +430,17 @@ export function createProject(doc, fileName = 'untitled.psd', options = {}) {
   // is the real bug: createProject takes a doc and ignores a field on it.
   for (const warning of doc.warnings || []) warnings.add(warning);
 
-  // Clipping is CARRIED but NOT APPLIED. This is one of three disclosure
-  // surfaces the spec requires; the per-row chip and the Clipped filter are the
-  // other two. None of them is dismissible, because the file's clip runs are a
-  // permanent property of the document and reordering silently destroys them.
-  const clipped = layers.filter((l) => l.clipping).length;
-  if (clipped)
-    warnings.add(
-      `${clipped} layer${clipped === 1 ? ' is' : 's are'} clipped to the layer below. ` +
-      `Clipping is not applied — ${clipped === 1 ? 'it is' : 'they are'} drawn in full and will ` +
-      `differ from Photoshop. Reordering will not restore the relationship.`,
-    );
+  // NO CLIPPING WARNING. There used to be one here -- "N layers are clipped to
+  // the layer below. Clipping is not applied [...] Reordering will not restore
+  // the relationship." -- and every clause of it is now false: render.js draws
+  // the clip runs, a reorder recomputes them, and undo puts them back.
+  //
+  // Deleted rather than reworded. A warning discloses a DIVERGENCE from
+  // Photoshop, and there is no longer one to disclose; leaving it would tell
+  // the user to distrust a picture that is now correct, which is a worse
+  // failure than the silence it originally replaced. The two disclosure
+  // surfaces that say something still true -- the panel's per-row chip and the
+  // Clipped filter, both driven off `layer.clipping` -- are untouched.
 
   const vectorMasked = countUnrasterisedVectorMasks(doc.children);
   if (vectorMasked)

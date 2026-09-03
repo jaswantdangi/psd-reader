@@ -190,6 +190,28 @@ test('clipping is carried onto the layer', () => {
   assert.deepEqual(layers.map((l) => l.clipping), [false, true]);
 });
 
+test('a dropped pixel-less leaf moves the clip base, and that is a known divergence', () => {
+  // `grouped()` is Sky, then a pixel-less `empty`, then a layer clipped to
+  // whatever is under it. The two renderers disagree about that middle layer,
+  // and the disagreement is structural rather than a bug in either:
+  //
+  //   compositeDocument keeps `empty` as the clip base. It has no imageData, so
+  //   the whole clipped block is skipped and the clipped layer is not drawn.
+  //   flatten() DROPS `empty` -- there is nothing to edit on it, which is what
+  //   `skippedLeaves` counts -- so in the project the clipped layer sits
+  //   directly on Sky and clips to Sky's alpha.
+  //
+  // Pinned here rather than fixed, because "fixing" it means choosing which of
+  // the two is Photoshop and neither has been measured against a real file:
+  // no fixture in fixtures/ contains a clipped layer at all. Recorded in
+  // .superpowers/sdd/clipping-report.md. If this assertion ever changes, the
+  // change was a decision and needs to be a deliberate one.
+  const layers = createProject(grouped(), 'grouped.psd').layers;
+  assert.equal(layers.length, 2, 'the pixel-less leaf between them is gone');
+  assert.equal(layers[0].name, 'Sky');
+  assert.equal(layers[1].name, 'Clipped to sky');
+});
+
 test('groupPath records the groups a layer was flattened out of', () => {
   const layers = createProject(grouped(), 'grouped.psd').layers;
   assert.equal(layers[0].groupPath, 'Backgrounds');
@@ -330,12 +352,20 @@ test('the reader\'s own warnings reach the project', () => {
   for (const w of maskedDoc.warnings) assert.ok(project.warnings.includes(w), `dropped: ${w}`);
 });
 
-test('clipped layers raise a warning that says clipping is not applied', () => {
+test('clipped layers raise no warning, because clipping is now applied', () => {
+  // This test used to assert the opposite: that the document warned "1 layer is
+  // clipped to the layer below. Clipping is not applied [...] Reordering will
+  // not restore the relationship." Every clause of that is now false --
+  // render.js draws the clip runs against the same walk composite.js uses, a
+  // reorder recomputes them, and undo puts them back. See test/clip.mjs.
+  //
+  // Inverted rather than deleted. A warning that describes a fixed defect tells
+  // the user to distrust a correct picture, which is worse than the silence it
+  // originally replaced, so its ABSENCE is the thing worth pinning.
   const project = createProject(grouped(), 'grouped.psd');
-  const w = project.warnings.find((x) => /clipped/i.test(x));
-  assert.ok(w, 'a clipped layer must raise a document warning');
-  assert.match(w, /1 layer/);
-  assert.match(w, /not applied/i);
+  assert.equal(project.layers.some((l) => l.clipping), true, 'the fixture must still be clipped');
+  assert.equal(project.warnings.some((x) => /clip/i.test(x)), false,
+    `still warning: ${JSON.stringify(project.warnings.filter((x) => /clip/i.test(x)))}`);
 });
 
 test('a document with nothing clipped raises no clipping warning', () => {

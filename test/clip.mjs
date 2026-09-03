@@ -23,7 +23,7 @@ import {
   compositeDocument, compareBuffers, flattenOnto,
   createProject, renderProject, reorderLayer, undo, redo,
   toProjectJson, applyProjectJson,
-  clipAlphaMap, clipRunStart, clipRunEnd,
+  clipAlphaMap, clipRunStart, clipRunEnd, createClipScratch, releaseClipScratch,
   setLayer,
   createSandwichCache, renderSandwiched, sandwichStateFor,
   SANDWICH_FLAT_ABOVE, SANDWICH_BELOW_ONLY,
@@ -309,6 +309,144 @@ test('one drag of a clipped layer still builds the cache once', () => {
     renderSandwiched(cache, project, 3, { scale: 1 });
   }
   assert.equal(cache.builds, 2, 'the coalesced frames of one gesture must not rebuild it');
+});
+
+console.log('\nreorder recomputes the runs, and undo puts them back\n');
+
+/**
+ * A clipping mask is POSITIONAL. It clips to whatever layer ends up directly
+ * below it, so moving one changes what it clips to and there is nothing to
+ * lock, drag as a unit, or store. The oracle is therefore the same document
+ * with its children in the new order: if the two agree, `reorderLayer` needed
+ * nothing beyond the splice it already does.
+ */
+const moved = (list, from, to) => {
+  const next = [...list];
+  next.splice(to, 0, next.splice(from, 1)[0]);
+  return next;
+};
+
+const reorderMatchesComposite = (from, to) => {
+  const doc = clippedDoc();
+  const project = createProject(doc, 'synthetic.psd');
+  reorderLayer(project, from, to);
+  const reference = { ...doc, children: moved(doc.children, from, to) };
+  const stat = compareBuffers(
+    flattenOnto(compositeDocument(reference)),
+    flattenOnto(renderProject(project, { scale: 1 })), 1);
+  assert.equal(stat.percentReal, 0,
+    `${from} -> ${to}: ${stat.beyondRounding} px beyond rounding, maxDelta ${stat.maxDelta}`);
+};
+
+test('a clipped layer dragged out of its run stops clipping', () => {
+  // layer 2 ("clip A") to the very bottom: nothing is under it there, so it
+  // becomes its own base and draws unclipped — and "base" keeps clip B.
+  reorderMatchesComposite(2, 0);
+});
+
+test('a clipped layer dragged onto a different base clips to that one', () => {
+  // layer 3 ("clip B") up to sit directly on "base 2".
+  reorderMatchesComposite(3, 5);
+});
+
+test('a base dragged out from under its run leaves the run to the next layer down', () => {
+  reorderMatchesComposite(1, 6);
+});
+
+test('a plain layer dropped into the middle of a run cuts it in two', () => {
+  // "over" (4) between the two clipped layers. Everything above the cut clips
+  // to `over` instead, which is exactly what Photoshop does.
+  reorderMatchesComposite(4, 2);
+});
+
+test('undo restores the previous clipping arrangement, pixel for pixel', () => {
+  // The command model's inverse should already handle this -- a reorder's
+  // inverse is the opposite splice -- but "should" is not a test.
+  const project = createProject(clippedDoc(), 'synthetic.psd');
+  const before = Array.from(renderProject(project, { scale: 1 }).data);
+  const order = project.layers.map((l) => l.id);
+
+  reorderLayer(project, 3, 5);
+  assert.notDeepEqual(project.layers.map((l) => l.id), order, 'the reorder must actually move something');
+  assert.notDeepEqual(Array.from(renderProject(project, { scale: 1 }).data), before,
+    'and moving a clipped layer onto a different base must actually change the picture');
+
+  undo(project);
+  assert.deepEqual(project.layers.map((l) => l.id), order);
+  assert.deepEqual(Array.from(renderProject(project, { scale: 1 }).data), before);
+
+  redo(project);
+  undo(project);
+  assert.deepEqual(Array.from(renderProject(project, { scale: 1 }).data), before, 'redo then undo too');
+});
+
+test('the clipping flag survives a project save and reload', () => {
+  const project = createProject(clippedDoc(), 'synthetic.psd');
+  const flags = project.layers.map((l) => l.clipping);
+  assert.deepEqual(flags, [false, false, true, true, false, false, true], 'the fixture must have runs');
+
+  const json = JSON.parse(JSON.stringify(toProjectJson(project)));
+  const reopened = createProject(clippedDoc(), 'synthetic.psd');
+  // Prove the assertion is not vacuous: break the flags first, then restore.
+  for (const layer of reopened.layers) layer.clipping = false;
+  applyProjectJson(reopened, json);
+  assert.deepEqual(reopened.layers.map((l) => l.clipping), flags);
+  assert.deepEqual(
+    Array.from(renderProject(reopened, { scale: 1 }).data),
+    Array.from(renderProject(project, { scale: 1 }).data));
+});
+
+test('a clipped document no longer warns that clipping is not applied', () => {
+  // The warning existed to disclose a divergence from Photoshop. There is no
+  // longer one, and a warning that describes a fixed defect is worse than no
+  // warning: it tells the user to distrust a correct picture.
+  const project = createProject(clippedDoc(), 'synthetic.psd');
+  assert.equal(project.warnings.some((w) => /clip/i.test(w)), false,
+    `still warning: ${JSON.stringify(project.warnings)}`);
+  // The panel's per-row chip and Clipped filter are unaffected -- they say
+  // WHICH rows are clipped, which is still true and still worth saying.
+  assert.deepEqual(project.layers.filter((l) => l.clipping).length, 3);
+});
+
+console.log('\na clip run at preview scale\n');
+
+test('the group buffer follows the CANVAS, not the document', () => {
+  // The preview renders at proxyScale, so `dest` is smaller than the project.
+  // Sizing the group buffer or the alpha plane off project.width would index
+  // past the end of one of them and mask the run with arithmetic noise, which
+  // is the failure shape applyProjectJson already guards a saved mask against.
+  const project = clipProject();
+  const half = renderProject(project, { scale: 0.5 });
+  assert.equal(half.width, W / 2);
+  assert.equal(half.height, H / 2);
+
+  // And the clip is really applied down there, not merely non-crashing: the
+  // same stack with the flags cleared draws the clipped layers in full and
+  // must not come out the same.
+  const unclipped = clipProject();
+  for (const layer of unclipped.layers) layer.clipping = false;
+  assert.notDeepEqual(Array.from(half.data),
+    Array.from(renderProject(unclipped, { scale: 0.5 }).data));
+});
+
+test('the clip scratch is one growing pair, not one buffer per layer', () => {
+  // The reason this is a scratch at all. Two runs per frame, ten frames, and
+  // the store must have allocated exactly once -- at w*h*5 bytes, one
+  // allocation per clipped layer is what turns a 5 MB preview into 50.
+  const project = clipProject();
+  const clipScratch = createClipScratch();
+  for (let f = 0; f < 10; f++) renderProject(project, { scale: 1, clipScratch });
+  assert.equal(clipScratch.allocations, 1);
+  assert.equal(clipScratch.pixels, W * H, 'sized to the canvas, once');
+
+  // It grows and never shrinks, so a larger canvas reallocates and a smaller
+  // one reuses -- the same monotonic rule as the adjustment scratch.
+  renderProject(project, { scale: 0.5, clipScratch });
+  assert.equal(clipScratch.allocations, 1, 'a smaller canvas must reuse the buffer it has');
+
+  releaseClipScratch(clipScratch);
+  assert.equal(clipScratch.group, null);
+  assert.equal(clipScratch.alpha, null);
 });
 
 console.log(`\n${passed} passed`);
