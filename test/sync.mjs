@@ -10,6 +10,11 @@ import assert from 'node:assert/strict';
 import {
   matchLayers, MATCH_TIERS, UNMATCHED_REASONS, boundsOf, groupPathOf,
 } from '../src/sync/identity.js';
+import {
+  MESSAGE_TYPES, PROTOCOL_ERRORS, PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH,
+  validateMessage, parseMessage, classifyChange, UNMAPPABLE_CHANGES,
+  translateEvent, translateEvents,
+} from '../src/sync/protocol.js';
 
 let passed = 0;
 const test = (name, fn) => {
@@ -227,6 +232,214 @@ test('the tier list and the reason list are exported, so the UI can name them', 
   assert.deepEqual(MATCH_TIERS, ['exact', 'renamed', 'regrouped']);
   assert.ok(UNMATCHED_REASONS.includes('ambiguous'));
   assert.ok(UNMATCHED_REASONS.includes('no-candidate'));
+});
+
+console.log('\nprotocol: validating every inbound frame\n');
+
+const helloOk = { type: 'hello', role: 'plugin', version: '1.0.0' };
+
+test('each of the five frame types validates and normalises', () => {
+  assert.deepEqual(MESSAGE_TYPES, ['hello', 'pair', 'paired', 'event', 'error']);
+  assert.deepEqual(validateMessage(helloOk).message, helloOk);
+  assert.deepEqual(validateMessage({ type: 'pair', code: 'K7M2PQ' }).message, { type: 'pair', code: 'K7M2PQ' });
+  assert.deepEqual(
+    validateMessage({ type: 'paired', sessionId: 's1', peer: { role: 'app', version: '2' } }).message,
+    { type: 'paired', sessionId: 's1', peer: { role: 'app', version: '2' } },
+  );
+  assert.deepEqual(
+    validateMessage({ type: 'event', change: 'move', layerID: 7, props: { x: 40, y: 12 } }).message,
+    { type: 'event', change: 'move', layerID: 7, props: { x: 40, y: 12 } },
+  );
+  assert.deepEqual(validateMessage({ type: 'error', code: 'nope', message: 'why' }).message,
+    { type: 'error', code: 'nope', message: 'why' });
+});
+
+test('anything that is not a plain object is refused before any field is read', () => {
+  for (const bad of [null, undefined, 42, 'hello', [], [{ type: 'hello' }], true]) {
+    const r = validateMessage(bad);
+    assert.equal(r.ok, false, `${JSON.stringify(bad)} must be refused`);
+    assert.equal(r.error.code, PROTOCOL_ERRORS.NOT_AN_OBJECT);
+  }
+});
+
+test('an unknown type is refused EXPLICITLY, never ignored', () => {
+  const r = validateMessage({ type: 'doc-chunk', bytes: 1 });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, PROTOCOL_ERRORS.UNKNOWN_TYPE);
+  assert.match(r.error.message, /doc-chunk/);
+  assert.equal(validateMessage({ role: 'app' }).error.code, PROTOCOL_ERRORS.MISSING_TYPE);
+});
+
+test('every field of every type is type-checked', () => {
+  const bad = [
+    { type: 'hello', role: 'relay', version: '1' },
+    { type: 'hello', role: 'plugin' },
+    { type: 'hello', role: 'plugin', version: 3 },
+    { type: 'pair' },
+    { type: 'paired', sessionId: '', peer: { role: 'app', version: '1' } },
+    { type: 'paired', sessionId: 's', peer: { role: 'nope', version: '1' } },
+    { type: 'paired', sessionId: 's' },
+    { type: 'event', change: 'move', layerID: 7 },
+    { type: 'event', change: 'move', layerID: 7, props: 'x=40' },
+    { type: 'event', layerID: 7, props: {} },
+    { type: 'error', code: 'x' },
+    { type: 'error', message: 'x' },
+  ];
+  for (const m of bad) {
+    const r = validateMessage(m);
+    assert.equal(r.ok, false, `${JSON.stringify(m)} must be refused`);
+    assert.equal(r.error.code, PROTOCOL_ERRORS.BAD_FIELD, JSON.stringify(m));
+  }
+});
+
+test('fields nobody declared are stripped, not carried through', () => {
+  const r = validateMessage({ type: 'hello', role: 'app', version: '1', token: 'secret', __proto__x: 1 });
+  assert.deepEqual(Object.keys(r.message).sort(), ['role', 'type', 'version']);
+});
+
+test('a pair code is checked against the unambiguous alphabet and upper-cased', () => {
+  assert.equal(PAIR_CODE_LENGTH, 6);
+  assert.equal(PAIR_CODE_ALPHABET.includes('0'), false, '0/O and 1/I are why the alphabet exists');
+  assert.equal(PAIR_CODE_ALPHABET.includes('O'), false);
+  assert.equal(PAIR_CODE_ALPHABET.includes('1'), false);
+  assert.equal(PAIR_CODE_ALPHABET.includes('I'), false);
+  assert.equal(validateMessage({ type: 'pair', code: 'k7m2pq' }).message.code, 'K7M2PQ');
+  for (const code of ['K7M2P', 'K7M2PQR', 'K0M2PQ', 'K7M2P!', '', 7]) {
+    assert.equal(validateMessage({ type: 'pair', code }).ok, false, `code ${code} must be refused`);
+  }
+});
+
+test('a malformed JSON frame is an error return, never a throw', () => {
+  const r = parseMessage('{"type":"hello"');
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, PROTOCOL_ERRORS.BAD_JSON);
+  assert.equal(parseMessage(JSON.stringify(helloOk)).ok, true);
+  assert.equal(parseMessage('"just a string"').error.code, PROTOCOL_ERRORS.NOT_AN_OBJECT);
+});
+
+console.log('\nprotocol: Photoshop changes onto the editor command set\n');
+
+/** Two layers matched, so translation has something to resolve against. */
+const mapping = matchLayers(
+  [ps(7, 'Photo', 'pixel', [0, 0, 40, 30]), ps(9, 'Title', 'text', [4, 4, 20, 12]), ps(11, 'Base', 'pixel', [0, 0, 80, 60])],
+  [app(101, 0, 'Photo', 'raster', [0, 0, 40, 30]), app(102, 1, 'Title', 'text', [4, 4, 16, 8]), app(103, 2, 'Base', 'raster', [0, 0, 80, 60])],
+);
+const ORDER = [103, 101, 102]; // project.layers order: index 0 is the BOTTOM layer
+
+const ev = (change, layerID, props) => ({ type: 'event', change, layerID, props });
+
+test('the representable changes each become an EXISTING command', () => {
+  const cases = [
+    [ev('move', 7, { x: 40, y: 12 }), { type: 'set', id: 101, to: { x: 40, y: 12 } }],
+    [ev('transform', 7, { x: 1, y: 2, w: 30, h: 20 }), { type: 'set', id: 101, to: { x: 1, y: 2, w: 30, h: 20 } }],
+    [ev('opacity', 7, { opacity: 0.5 }), { type: 'set', id: 101, to: { opacity: 0.5 } }],
+    [ev('blendMode', 7, { blendMode: 'multiply' }), { type: 'set', id: 101, to: { blendMode: 'multiply' } }],
+    [ev('visibility', 7, { visible: false }), { type: 'set', id: 101, to: { visible: false } }],
+    [ev('rename', 7, { name: 'Hero' }), { type: 'set', id: 101, to: { name: 'Hero' } }],
+    [ev('retype', 9, { text: { content: 'Hi', fontSize: 30 } }), { type: 'set', id: 102, to: { text: { content: 'Hi', fontSize: 30 } } }],
+    [ev('delete', 7, {}), { type: 'remove', id: 101 }],
+  ];
+  for (const [event, command] of cases) {
+    const r = translateEvent(event, mapping, { order: ORDER });
+    assert.equal(r.ok, true, `${event.change}: ${r.reason || ''}`);
+    assert.deepEqual(r.command, command, event.change);
+  }
+});
+
+test('a crop is a document-level frame command and carries no layer', () => {
+  const r = translateEvent({ type: 'event', change: 'crop', props: { x: 2, y: 3, width: 20, height: 10 } }, mapping, {});
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.command, { type: 'frame', to: { x: 2, y: 3, width: 20, height: 10 } });
+  assert.equal(translateEvent({ type: 'event', change: 'canvasSize', props: { x: 0, y: 0, width: 90, height: 70 } }, mapping, {}).ok, true);
+});
+
+test('a reorder is resolved through the mapping, never through a Photoshop index', () => {
+  // "Photo (7) now sits directly above Title (9)". In the app array -- which is
+  // bottom-to-top -- that is index 2 once Photo has been spliced out.
+  const r = translateEvent(ev('reorder', 7, { belowLayerID: 9 }), mapping, { order: ORDER });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(r.command, { type: 'reorder', from: 1, to: 2 });
+
+  const toBottom = translateEvent(ev('reorder', 9, { belowLayerID: null }), mapping, { order: ORDER });
+  assert.deepEqual(toBottom.command, { type: 'reorder', from: 2, to: 0 });
+});
+
+test('a reorder naming an unmatched neighbour is refused, not approximated', () => {
+  const r = translateEvent(ev('reorder', 7, { belowLayerID: 999 }), mapping, { order: ORDER });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'unknown-layer');
+});
+
+test('an event for a layer that never matched is refused', () => {
+  const r = translateEvent(ev('move', 999, { x: 1, y: 2 }), mapping, { order: ORDER });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'unknown-layer');
+  assert.equal(r.layerID, 999);
+});
+
+test('props are validated per change, so a command is never half-built', () => {
+  const bad = [
+    ev('move', 7, { x: 'left' }),
+    ev('move', 7, { y: 2 }),
+    ev('opacity', 7, { opacity: 4 }),
+    ev('visibility', 7, { visible: 'no' }),
+    ev('rename', 7, { name: 12 }),
+    ev('retype', 9, { text: 'Hi' }),
+    { type: 'event', change: 'crop', props: { x: 0, y: 0, width: -4, height: 10 } },
+  ];
+  for (const event of bad) {
+    const r = translateEvent(event, mapping, { order: ORDER });
+    assert.equal(r.ok, false, JSON.stringify(event));
+    assert.equal(r.reason, 'bad-props', JSON.stringify(event));
+  }
+});
+
+test('pixel changes have no command, and say so instead of vanishing', () => {
+  assert.deepEqual(UNMAPPABLE_CHANGES.sort(), ['adjustment', 'brush', 'filter', 'layerEffect', 'maskPaint']);
+  for (const change of UNMAPPABLE_CHANGES) {
+    const r = translateEvent(ev(change, 7, {}), mapping, { order: ORDER });
+    assert.equal(r.ok, false, change);
+    assert.equal(r.reason, 'needs-pixels', change);
+    assert.equal(r.requiresPixels, true, change);
+    assert.equal(classifyChange(change).known, true, `${change} is a change we KNOW we cannot map`);
+  }
+});
+
+test('a layer added in Photoshop needs pixels before any insert can be built', () => {
+  const r = translateEvent(ev('add', 7, {}), mapping, { order: ORDER });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'needs-pixels');
+  assert.equal(classifyChange('add').command, 'insert');
+});
+
+test('an unrecognised change is refused explicitly, not ignored', () => {
+  const r = translateEvent(ev('smartFilterEdited', 7, {}), mapping, { order: ORDER });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'unknown-change');
+  assert.equal(classifyChange('smartFilterEdited').known, false);
+});
+
+test('a batch reports every refusal beside the commands it did produce', () => {
+  const result = translateEvents([
+    ev('move', 7, { x: 40, y: 12 }),
+    ev('brush', 7, {}),
+    ev('opacity', 999, { opacity: 0.2 }),
+    ev('somethingElse', 9, {}),
+    ev('rename', 9, { name: 'Heading' }),
+  ], mapping, { order: ORDER });
+
+  assert.equal(result.commands.length, 2);
+  assert.deepEqual(result.commands[0], { type: 'set', id: 101, to: { x: 40, y: 12 } });
+  assert.equal(result.refused.length, 3, 'three events could not be applied and all three must be reported');
+  assert.deepEqual(result.refused.map((r) => r.reason), ['needs-pixels', 'unknown-layer', 'unknown-change']);
+  assert.equal(result.refused[0].change, 'brush');
+  assert.equal(result.needsPixels.length, 1, 'the pixel path needs its own list to debounce against');
+});
+
+test('a batch validates its frames, so one bad message does not take the batch down', () => {
+  const result = translateEvents([{ type: 'event', change: 'move', layerID: 7 }, ev('move', 7, { x: 1, y: 1 })], mapping, { order: ORDER });
+  assert.equal(result.commands.length, 1);
+  assert.equal(result.refused[0].reason, 'invalid-message');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

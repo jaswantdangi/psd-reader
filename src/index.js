@@ -103,3 +103,8 @@ export { ADJUST_GLSL, ADJUST_UNIFORMS, ADJUST_STAGE } from './adjust/glsl.js';
 export {
   matchLayers, appIdFor, boundsOf, groupPathOf, MATCH_TIERS, UNMATCHED_REASONS,
 } from './sync/identity.js';
+export {
+  MESSAGE_TYPES, PROTOCOL_ERRORS, PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH,
+  validateMessage, parseMessage, errorFrame,
+  CHANGE_KINDS, UNMAPPABLE_CHANGES, classifyChange, translateEvent, translateEvents,
+} from './sync/protocol.js';
