@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { HSL_BANDS, HSL_HUE_DEGREES, NEUTRAL_HSL } from '@engine/adjust/ops.js';
 import { ProjectService } from '../services/project.service';
+import { Segmented, SegmentedOption } from './segmented';
 import { Slider } from './slider';
 
 type Band = { h: number; s: number; l: number };
@@ -35,39 +36,31 @@ const FIELDS: ReadonlyArray<{ key: 'h' | 's' | 'l'; label: string }> = [
   selector: 'app-hsl-sheet',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [Slider],
+  imports: [Segmented, Slider],
   template: `
     @if (svc.selected(); as layer) {
       <div class="space-y-4 px-4 py-4">
-        <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
-          @for (band of bands; track band.id; let i = $index) {
-            <button
-              type="button"
-              class="relative flex h-[60px] min-w-[72px] shrink-0 flex-col items-center justify-center gap-1.5 rounded-xl border px-3"
-              [class]="
-                index() === i
-                  ? 'border-sky-400 bg-sky-400/15 text-sky-300'
-                  : 'border-white/15 text-neutral-300'
-              "
-              (click)="index.set(i)"
-            >
-              <span
-                class="h-3 w-3 rounded-full"
-                [style.background]="swatch(band.centre)"
-              ></span>
-              <span class="text-[11px] capitalize">{{ band.id }}</span>
+        <!-- Which bands carry an edit is reported by each option's own dot:
+             otherwise the only way to find one is to tap all eight. -->
+        <ng-template #swatchDot let-option>
+          <span class="h-3 w-3 rounded-full" [style.background]="swatchOf(option.id)"></span>
+        </ng-template>
 
-              <!-- Which bands carry an edit has to be visible from the strip:
-                   otherwise the only way to find one is to tap all eight. -->
-              @if (touched(i)) {
-                <span
-                  class="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-sky-400"
-                  aria-label="edited"
-                ></span>
-              }
-            </button>
-          }
-        </div>
+        <app-segmented
+          variant="scroll"
+          ariaLabel="Hue band"
+          [options]="options()"
+          [selected]="current().id"
+          [media]="swatchDot"
+          (pick)="choose($event)"
+        />
+
+        <!-- Proximity: three sliders labelled Hue, Saturation and Luminance say
+             nothing about WHICH of the eight bands they move. The answer has to
+             sit between the strip and the sliders, not in the user's memory. -->
+        <p class="text-[11px] text-neutral-400">
+          Editing <b class="capitalize text-neutral-200">{{ current().id }}</b>
+        </p>
 
         @for (field of fields; track field.key) {
           <app-slider
@@ -148,8 +141,26 @@ export class HslSheet {
     return hsl.saturation !== 0 || hsl.bands.some((b) => b.h !== 0 || b.s !== 0 || b.l !== 0);
   });
 
-  protected swatch(centre: number): string {
-    return `hsl(${centre} 85% 55%)`;
+  /** The band the sliders are pointed at. Always one of the eight. */
+  protected readonly current = computed(() => this.bands[this.index()] ?? this.bands[0]);
+
+  /**
+   * The strip as options. The swatch is per-band and the dot is per-edit, so
+   * both are drawn from this sheet rather than becoming fields on the shared
+   * control.
+   */
+  protected readonly options = computed<SegmentedOption[]>(() =>
+    this.bands.map((band, i) => ({ id: band.id, label: band.id, marked: this.touched(i) })),
+  );
+
+  protected swatchOf(id: string): string {
+    const band = this.bands.find((b) => b.id === id);
+    return band ? `hsl(${band.centre} 85% 55%)` : 'transparent';
+  }
+
+  protected choose(id: string): void {
+    const i = this.bands.findIndex((b) => b.id === id);
+    if (i >= 0) this.index.set(i);
   }
 
   protected touched(i: number): boolean {

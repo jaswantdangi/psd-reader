@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { BLEND_MODES } from '@engine/edit.js';
 import { ProjectService } from '../services/project.service';
+import { Segmented, SegmentedOption } from './segmented';
 import { Slider } from './slider';
 
 /**
@@ -42,6 +43,10 @@ export const BLEND_GROUPS = (() => {
   return rest.length > 0 ? [...groups, { label: 'Other', modes: rest }] : groups;
 })();
 
+/** A mode id IS its label — the picker capitalises it, the engine does not. */
+export const asOptions = (modes: readonly string[]): SegmentedOption[] =>
+  modes.map((mode) => ({ id: mode, label: mode }));
+
 /**
  * Opacity and blend mode for the selected layer.
  *
@@ -52,7 +57,7 @@ export const BLEND_GROUPS = (() => {
   selector: 'app-layer-sheet',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [Slider],
+  imports: [Segmented, Slider],
   template: `
     @if (svc.selected(); as layer) {
       <div class="space-y-5 px-4 py-4">
@@ -78,25 +83,22 @@ export const BLEND_GROUPS = (() => {
           (knobEnd)="endOpacity()"
         />
 
-        <!-- A mask toggle is ABSENT when the layer has none, not disabled. -->
+        <!-- A mask toggle is ABSENT when the layer has none, not disabled.
+             Two segments rather than one button whose label IS its state: a
+             button reading "On" is read half the time as the state and half the
+             time as what tapping it will do. -->
         @if (layer.mask) {
-          <label class="flex min-h-[44px] items-center justify-between gap-3">
-            <span class="text-[11px] font-medium uppercase tracking-wider text-neutral-400">
+          <div>
+            <p class="mb-2 text-[11px] font-medium uppercase tracking-wider text-neutral-400">
               Layer mask
-            </span>
-            <button
-              type="button"
-              class="h-11 rounded-xl border px-4 text-sm"
-              [class]="
-                layer.mask.disabled
-                  ? 'border-white/15 text-neutral-400'
-                  : 'border-sky-400 bg-sky-400/15 text-sky-300'
-              "
-              (click)="toggleMask(layer)"
-            >
-              {{ layer.mask.disabled ? 'Off' : 'On' }}
-            </button>
-          </label>
+            </p>
+            <app-segmented
+              ariaLabel="Layer mask"
+              [options]="maskOptions"
+              [selected]="layer.mask.disabled ? 'off' : 'on'"
+              (pick)="setMask(layer, $event)"
+            />
+          </div>
         }
 
         <div>
@@ -121,22 +123,17 @@ export const BLEND_GROUPS = (() => {
                 <p class="mb-1 text-[10px] uppercase tracking-[0.18em] text-neutral-600">
                   {{ group.label }}
                 </p>
-                <div class="flex flex-wrap gap-2">
-                  @for (mode of group.modes; track mode) {
-                    <button
-                      type="button"
-                      class="h-11 rounded-xl border px-3 text-sm capitalize"
-                      [class]="
-                        layer.blendMode === mode
-                          ? 'border-sky-400 bg-sky-400/15 text-sky-300'
-                          : 'border-white/15 text-neutral-300'
-                      "
-                      (click)="setBlend(layer, mode)"
-                    >
-                      {{ mode }}
-                    </button>
-                  }
-                </div>
+                <!-- Wrapping, not scrolling. Every mode in a group was visible
+                     at once before this was a shared control and trading that
+                     for a tidier row would cost findability to buy tidiness. -->
+                <app-segmented
+                  variant="scroll"
+                  [wrap]="true"
+                  [ariaLabel]="group.label + ' blend modes'"
+                  [options]="group.options"
+                  [selected]="layer.blendMode"
+                  (pick)="setBlend(layer, $event)"
+                />
               </div>
             }
           </div>
@@ -147,7 +144,15 @@ export const BLEND_GROUPS = (() => {
 })
 export class LayerSheet {
   protected svc = inject(ProjectService);
-  protected readonly groups = BLEND_GROUPS;
+  protected readonly groups = BLEND_GROUPS.map((group) => ({
+    label: group.label,
+    options: asOptions(group.modes),
+  }));
+
+  protected readonly maskOptions: SegmentedOption[] = [
+    { id: 'on', label: 'On' },
+    { id: 'off', label: 'Off' },
+  ];
 
   private opacityKey = signal<string | undefined>(undefined);
 
@@ -181,12 +186,12 @@ export class LayerSheet {
     this.svc.setLayer(layer.id, { blendMode: mode });
   }
 
-  protected toggleMask(layer: any): void {
+  protected setMask(layer: any, state: string): void {
+    const disabled = state === 'off';
+    if (!!layer.mask.disabled === disabled) return;
     // The mask object is replaced rather than mutated: `setLayer` captures the
     // previous VALUE for undo, and for an object field that is the same
     // reference — mutating in place destroys the undo entry before it is written.
-    this.svc.setLayer(layer.id, {
-      mask: { ...layer.mask, disabled: !layer.mask.disabled },
-    });
+    this.svc.setLayer(layer.id, { mask: { ...layer.mask, disabled } });
   }
 }

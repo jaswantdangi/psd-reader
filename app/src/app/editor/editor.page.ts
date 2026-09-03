@@ -13,6 +13,7 @@ import { BundleService } from '../services/bundle.service';
 import { ExportService } from '../services/export.service';
 import { FontsService } from '../services/fonts.service';
 import { ProjectService } from '../services/project.service';
+import { SegmentService } from '../services/segment.service';
 import { AdjustSheet } from './adjust-sheet';
 import { CanvasStage } from './canvas-stage';
 import { CutoutPanel } from './cutout-panel';
@@ -43,6 +44,36 @@ const RAIL: ReadonlyArray<{ id: SheetId; icon: string; label: string; needsLayer
 
 /** Sheets whose `✕` rolls their whole session back. The layers sheet has no session. */
 const DISCARDABLE: ReadonlyArray<SheetId> = ['layer', 'text', 'adjust', 'filter', 'hsl', 'overlay', 'fonts'];
+
+/**
+ * Sheets that change what the canvas looks like while they are open.
+ *
+ * A sheet that changes the canvas must never obscure the canvas. Every control
+ * on these exists to be judged against the picture, so a 50% black wash over it
+ * is not a focus aid — it is the tool not working. The Layers sheet is here for
+ * the same reason: hiding, reordering and adding a layer all redraw the
+ * document, and a reorder you cannot see the result of is a guess.
+ *
+ * The four that are absent report rather than edit. Fonts, This file and Export
+ * change nothing behind them while they are up, so the tint costs them nothing
+ * and buys the focus a modal report wants.
+ */
+const UNDIMMED: ReadonlyArray<SheetId> = [
+  'layers', 'layer', 'text', 'adjust', 'filter', 'hsl', 'overlay',
+];
+
+/**
+ * Of those, the ones driven by a slider or a preview tile.
+ *
+ * Not dimming the canvas is only half the fix: at 72vh a sheet leaves about a
+ * finger's width of picture above it, which is not a preview either. These give
+ * a sixth of the screen back. They all scroll, so nothing becomes unreachable —
+ * it becomes one flick further away, which is the right price. The Layers sheet
+ * keeps its full height: it is a list being read, not a picture being judged.
+ */
+const SHARES_CANVAS: ReadonlyArray<SheetId> = [
+  'layer', 'text', 'adjust', 'filter', 'hsl', 'overlay',
+];
 
 const TITLES: Record<SheetId, string> = {
   layers: 'Layers',
@@ -434,6 +465,43 @@ const TITLES: Record<SheetId, string> = {
              NOTE: no backticks in this comment. The whole template is a
              template literal, so a backtick here terminates it and the file
              stops parsing — which is exactly what happened. -->
+        <!-- Cut-out progress.
+             On the STAGE rather than in the panel, and above it (z-30 against
+             the panel's z-20): a CPU cut takes several seconds, the panel
+             scrolls, and a spinner the user has scrolled past is a spinner that
+             is not doing its job. pointer-events-none everywhere except the
+             card, so it explains the wait without blocking a pinch. -->
+        @if (seg.running()) {
+          <div class="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
+            <div class="pointer-events-auto flex min-w-[220px] max-w-[80%] flex-col items-center gap-3
+                        rounded-2xl border border-white/10 bg-neutral-900/95 px-6 py-5
+                        shadow-[0_12px_40px_rgba(0,0,0,0.5)] backdrop-blur-sm"
+                 role="status" aria-live="polite">
+              <!-- Determinate while the model downloads, because the total is
+                   known; indeterminate during inference, because it is not.
+                   A bar that pretends to know is worse than a spinner. -->
+              @if (seg.downloadPercent() >= 0) {
+                <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                  <div class="h-full rounded-full bg-sky-400 transition-[width]"
+                       [style.width.%]="seg.downloadPercent()"></div>
+                </div>
+                <p class="text-[13px] font-medium text-neutral-200">
+                  Downloading model — {{ seg.downloadPercent() }}%
+                </p>
+                <p class="text-center text-[11px] leading-relaxed text-neutral-500">
+                  One time only. It stays cached for the rest of this session.
+                </p>
+              } @else {
+                <span class="h-7 w-7 animate-spin rounded-full border-2 border-white/15 border-t-sky-400"></span>
+                <p class="text-[13px] font-medium text-neutral-200">Cutting out…</p>
+                <p class="text-center text-[11px] leading-relaxed text-neutral-500">
+                  This runs on the CPU, so it takes a few seconds.
+                </p>
+              }
+            </div>
+          </div>
+        }
+
         @if (cutout()) {
           <app-cutout-panel
             [layerId]="svc.selectedId()"
@@ -480,16 +548,20 @@ const TITLES: Record<SheetId, string> = {
 
       <!-- ── sheets ──────────────────────────────────────────────── -->
       @if (sheet(); as id) {
-        <!-- In select mode the sheet stops being modal.
-             Normally this is a full-screen backdrop: it covers the canvas AND
-             swallows any tap on it as a dismiss, which is the concrete reason
-             selection did not work with a tool open — not pointer-events, an
-             element in the way. In select mode it shrinks to the sheet's own
-             footprint, so the canvas above it is live and a tap there picks a
-             layer instead of closing the sheet. -->
+        <!-- The layer between the canvas and the sheet.
+             In select mode it shrinks to the sheet's own footprint, so the
+             canvas above it is live and a tap there picks a layer instead of
+             closing the sheet. That was the concrete reason selection did not
+             work with a tool open — not pointer-events, an element in the way.
+
+             Otherwise it stays full-screen, because tap-to-close is worth a
+             very large target and losing it would leave the tick as the only
+             way out. What it no longer does is TINT: see UNDIMMED. The
+             separation a tint was providing is drawn at the sheet's own edge
+             instead, by the shell's border and lift shadow. -->
         <div
           class="absolute z-30 flex flex-col justify-end"
-          [class]="svc.selectMode() ? 'inset-x-0 bottom-0' : 'inset-0 bg-black/50'"
+          [class]="scrimClass()"
           (click)="dismiss()"
         >
           <!-- The pick has to be visible while the sheet is still open, or the
@@ -513,7 +585,7 @@ const TITLES: Record<SheetId, string> = {
               [title]="titleOf(id)"
               [showConfirm]="id !== 'layers'"
               [cancelLabel]="discardable(id) ? 'Discard changes' : 'Close'"
-              [maxHeight]="svc.selectMode() ? '40vh' : '72vh'"
+              [maxHeight]="sheetMaxHeight()"
               (cancel)="cancel(id)"
               (confirm)="close()"
             >
@@ -699,6 +771,7 @@ export class EditorPage {
   protected readonly cutout = signal(false);
   /** Which meaning a canvas tap currently has: '', 'add', 'subtract', 'erase', 'restore'. */
   protected readonly cutMode = signal('');
+  protected readonly seg = inject(SegmentService);
   protected readonly prompt = signal('');
   protected readonly exporting = signal(false);
   protected readonly exportNote = signal('');
@@ -756,6 +829,26 @@ export class EditorPage {
     const layer = this.svc.selected();
     if (!layer) return 'Select mode — tap the canvas above to pick a layer.';
     return `${layer.name} — tap the same spot again for the layer below it.`;
+  });
+
+  /**
+   * Position and tint for the layer under the sheet.
+   *
+   * Select mode shrinks it to the sheet's footprint; everything else keeps a
+   * full-screen tap target and only the reporting sheets darken what is behind
+   * it.
+   */
+  protected readonly scrimClass = computed(() => {
+    if (this.svc.selectMode()) return 'inset-x-0 bottom-0';
+    const id = this.sheet();
+    return id && UNDIMMED.includes(id) ? 'inset-0' : 'inset-0 bg-black/50';
+  });
+
+  /** How much of the screen the sheet may take. See SHARES_CANVAS. */
+  protected readonly sheetMaxHeight = computed(() => {
+    if (this.svc.selectMode()) return '40vh';
+    const id = this.sheet();
+    return id && SHARES_CANVAS.includes(id) ? '56vh' : '72vh';
   });
 
   protected percent(value: number): number {
@@ -869,7 +962,7 @@ export class EditorPage {
   protected toggleCutout(): void {
     const next = !this.cutout();
     this.cutout.set(next);
-    if (!next) this.cutMode.set('');
+    if (!next) { this.cutMode.set(''); this.seg.tool.set(''); }
   }
 
   protected open(id: SheetId): void {

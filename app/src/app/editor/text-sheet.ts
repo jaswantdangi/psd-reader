@@ -3,6 +3,7 @@ import { FONT_STACKS } from '@engine/edit.js';
 import { FontsService } from '../services/fonts.service';
 import { ProjectService } from '../services/project.service';
 import { FontPicker } from './font-picker';
+import { Segmented } from './segmented';
 import { Slider } from './slider';
 
 const STACKS: string[] = FONT_STACKS;
@@ -64,7 +65,7 @@ const BASE_MAX_SIZE = 200;
   selector: 'app-text-sheet',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [FontPicker, Slider],
+  imports: [FontPicker, Segmented, Slider],
   template: `
     @if (svc.selected(); as layer) {
       @if (layer.kind === 'text' && layer.text) {
@@ -199,17 +200,13 @@ const BASE_MAX_SIZE = 200;
             </span>
             <!-- Alignment is also the ANCHOR the box grows from, which is why
                  changing it can move the layer as well as re-flow it. -->
-            @for (option of alignments; track option.id) {
-              <button
-                type="button"
-                class="h-11 flex-1 rounded-xl border px-3 text-sm"
-                [class]="pill(layer.text.align === option.id)"
-                [attr.aria-pressed]="layer.text.align === option.id"
-                (click)="apply({ align: option.id })"
-              >
-                {{ option.label }}
-              </button>
-            }
+            <app-segmented
+              class="min-w-0 flex-1"
+              ariaLabel="Alignment"
+              [options]="alignments"
+              [selected]="layer.text.align"
+              (pick)="apply({ align: $event })"
+            />
           </div>
 
           <div>

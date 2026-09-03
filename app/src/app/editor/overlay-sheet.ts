@@ -1,11 +1,14 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy, Component, ElementRef, computed, inject, signal, viewChild,
+} from '@angular/core';
 import {
   OVERLAY_FITS, OVERLAY_IMAGE_EDGE, OVERLAY_KINDS, overlayNeedsImage,
 } from '@engine/adjust/ops.js';
 import { proxyScaleFor } from '@engine/proxy.js';
 import { SUPPORTED_BLEND_MODES } from '@engine/composite.js';
 import { ProjectService } from '../services/project.service';
-import { BLEND_GROUPS } from './layer-sheet';
+import { BLEND_GROUPS, asOptions } from './layer-sheet';
+import { Segmented, SegmentedOption } from './segmented';
 import { Slider } from './slider';
 
 const KINDS = OVERLAY_KINDS as string[];
@@ -21,7 +24,8 @@ const needsImage = overlayNeedsImage as (overlay: any) => boolean;
  */
 const GROUPS = BLEND_GROUPS
   .map((group) => ({ label: group.label, modes: group.modes.filter((m) => SUPPORTED.includes(m)) }))
-  .filter((group) => group.modes.length > 0);
+  .filter((group) => group.modes.length > 0)
+  .map((group) => ({ label: group.label, options: asOptions(group.modes) }));
 
 /** A starter that is visible immediately: black at the top, fading down. */
 const STARTER = {
@@ -88,43 +92,24 @@ const FIT_NOTES: Record<string, string> = {
   selector: 'app-overlay-sheet',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [Slider],
+  imports: [Segmented, Slider],
   template: `
     @if (svc.selected(); as layer) {
       @if (overlay(); as value) {
         <div class="space-y-5 px-4 py-4">
-          <div class="flex gap-2">
-            @for (kind of kinds; track kind) {
-              @if (kind === 'image' && !image()) {
-                <label
-                  class="flex h-11 flex-1 cursor-pointer items-center justify-center rounded-xl border text-sm capitalize"
-                  [class]="
-                    value.kind === 'image'
-                      ? 'border-sky-400 bg-sky-400/15 text-sky-300'
-                      : 'border-white/15 text-neutral-300'
-                  "
-                  [class.pointer-events-none]="busy()"
-                  [class.opacity-60]="busy()"
-                >
-                  {{ busy() ? 'Reading…' : 'image' }}
-                  <input type="file" class="hidden" [accept]="accept"
-                         [disabled]="busy()" (change)="pick($event)" />
-                </label>
-              } @else {
-                <button
-                  type="button"
-                  class="h-11 flex-1 rounded-xl border text-sm capitalize"
-                  [class]="
-                    value.kind === kind
-                      ? 'border-sky-400 bg-sky-400/15 text-sky-300'
-                      : 'border-white/15 text-neutral-300'
-                  "
-                  (click)="setKind(kind)"
-                >
-                  {{ kind }}
-                </button>
-              }
-            }
+          <!-- The image segment opens the file picker whenever there are no
+               pixels to switch back to. The input is hidden and clicked rather
+               than wrapping that one segment in a label, so all three kinds are
+               ONE control instead of two that happen to sit side by side. -->
+          <div>
+            <input #kindPicker type="file" class="hidden" [accept]="accept"
+                   [disabled]="busy()" (change)="pick($event)" />
+            <app-segmented
+              ariaLabel="Overlay kind"
+              [options]="kindOptions()"
+              [selected]="value.kind"
+              (pick)="chooseKind($event)"
+            />
           </div>
 
           @if (value.kind === 'image') {
@@ -174,22 +159,12 @@ const FIT_NOTES: Record<string, string> = {
                 <p class="mb-2 text-[11px] font-medium uppercase tracking-wider text-neutral-400">
                   Fit
                 </p>
-                <div class="flex gap-2">
-                  @for (fit of fits; track fit) {
-                    <button
-                      type="button"
-                      class="h-11 flex-1 rounded-xl border text-sm capitalize"
-                      [class]="
-                        value.fit === fit
-                          ? 'border-sky-400 bg-sky-400/15 text-sky-300'
-                          : 'border-white/15 text-neutral-300'
-                      "
-                      (click)="patch({ fit: fit })"
-                    >
-                      {{ fit }}
-                    </button>
-                  }
-                </div>
+                <app-segmented
+                  ariaLabel="Picture fit"
+                  [options]="fitOptions"
+                  [selected]="value.fit"
+                  (pick)="patch({ fit: $event })"
+                />
                 <p class="mt-2 text-[11px] leading-relaxed text-neutral-500">
                   {{ fitNote(value.fit) }} Either way the rule is read from the layer's
                   proportions, not its pixel size, so the export is framed exactly as this
@@ -304,22 +279,14 @@ const FIT_NOTES: Record<string, string> = {
                   <p class="mb-1 text-[10px] uppercase tracking-[0.18em] text-neutral-600">
                     {{ group.label }}
                   </p>
-                  <div class="flex flex-wrap gap-2">
-                    @for (mode of group.modes; track mode) {
-                      <button
-                        type="button"
-                        class="h-11 rounded-xl border px-3 text-sm capitalize"
-                        [class]="
-                          value.mode === mode
-                            ? 'border-sky-400 bg-sky-400/15 text-sky-300'
-                            : 'border-white/15 text-neutral-300'
-                        "
-                        (click)="patch({ mode: mode })"
-                      >
-                        {{ mode }}
-                      </button>
-                    }
-                  </div>
+                  <app-segmented
+                    variant="scroll"
+                    [wrap]="true"
+                    [ariaLabel]="group.label + ' blend modes'"
+                    [options]="group.options"
+                    [selected]="value.mode"
+                    (pick)="patch({ mode: $event })"
+                  />
                 </div>
               }
             </div>
@@ -386,8 +353,9 @@ const FIT_NOTES: Record<string, string> = {
 export class OverlaySheet {
   protected svc = inject(ProjectService);
   protected readonly kinds = KINDS;
-  protected readonly fits = FITS;
+  protected readonly fitOptions: SegmentedOption[] = asOptions(FITS);
   protected readonly groups = GROUPS;
+  private readonly kindPicker = viewChild<ElementRef<HTMLInputElement>>('kindPicker');
   protected readonly accept = IMAGE_ACCEPT;
   protected readonly edge = OVERLAY_IMAGE_EDGE;
   /** Templates cannot reach globals; rounding an angle needs one. */
@@ -408,6 +376,18 @@ export class OverlaySheet {
 
   /** Reopened from a saved project: the kind is `image` and the pixels are gone. */
   protected readonly missing = computed(() => needsImage(this.overlay()));
+
+  /**
+   * The three kinds as segments. Only the image one can be busy — it is the
+   * only one that reads a file — so only it reports and disables itself.
+   */
+  protected readonly kindOptions = computed<SegmentedOption[]>(() =>
+    this.kinds.map((kind) => ({
+      id: kind,
+      label: kind === 'image' && this.busy() ? 'Reading…' : kind,
+      disabled: kind === 'image' && this.busy(),
+    })),
+  );
 
   /** The first and last stop — the two ends a two-colour editor can address. */
   protected readonly ends = computed(() => {
@@ -470,6 +450,15 @@ export class OverlaySheet {
    */
   protected setKind(kind: string): void {
     this.patch({ kind });
+  }
+
+  /** Tapping `image` with no pixels asks for a file instead of switching kind. */
+  protected chooseKind(kind: string): void {
+    if (kind === 'image' && !this.image()) {
+      this.kindPicker()?.nativeElement.click();
+      return;
+    }
+    this.setKind(kind);
   }
 
   /** Rebuild the whole overlay from clones — see the class comment. */

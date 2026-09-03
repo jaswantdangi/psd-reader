@@ -65,7 +65,7 @@ const FILTER_LABELS: Record<string, string> = {
           @for (id of filterIds; track id) {
             <button
               type="button"
-              class="h-9 shrink-0 rounded-full border px-3 text-xs font-medium"
+              class="h-11 shrink-0 rounded-full border px-3 text-xs font-medium"
               [class]="
                 filters().includes(id)
                   ? 'border-sky-400 bg-sky-400/15 text-sky-300'
@@ -190,7 +190,7 @@ const FILTER_LABELS: Record<string, string> = {
                 <!-- A dedicated grip, not a long-press: long-press adds half a
                      second to every reorder and fights scroll-versus-drag. -->
                 <span
-                  class="flex h-11 w-8 shrink-0 touch-none items-center justify-center rounded-lg"
+                  class="flex h-11 w-11 shrink-0 touch-none items-center justify-center rounded-lg"
                   [class]="reorderable() ? 'text-neutral-400' : 'text-neutral-700'"
                   (pointerdown)="onGripDown($event, i, row.index)"
                   (pointermove)="onGripMove($event)"

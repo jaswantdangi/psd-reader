@@ -11,6 +11,12 @@ import { Icon } from './icon';
  * `✓` closes. `✕` asks the page to roll the sheet's whole session back through
  * `discardTo` — nothing bakes in this editor, so there is no apply step for the
  * tick to perform.
+ *
+ * The border and the lift shadow are the whole of the separation between a
+ * sheet and the artwork behind it. Most sheets no longer sit on a dimmed
+ * canvas — a tool that repaints the picture cannot be judged through a 50%
+ * black wash — so the boundary the Law of Common Region asks for has to be
+ * drawn at this edge rather than paid for by tinting everything else.
  */
 @Component({
   selector: 'app-sheet-shell',
@@ -19,7 +25,7 @@ import { Icon } from './icon';
   imports: [Icon],
   template: `
     <section
-      class="flex w-full flex-col rounded-t-2xl border-t border-white/10 bg-neutral-900 shadow-[0_-12px_40px_rgba(0,0,0,0.5)]"
+      class="flex w-full flex-col rounded-t-2xl border-t border-white/20 bg-neutral-900 shadow-[0_-18px_48px_rgba(0,0,0,0.7)]"
       [style.max-height]="maxHeight()"
       role="dialog"
       [attr.aria-label]="title()"

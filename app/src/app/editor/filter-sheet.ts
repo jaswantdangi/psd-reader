@@ -3,6 +3,7 @@ import { NEUTRAL_ADJUST, isNeutralHsl, isNeutralOverlay } from '@engine/adjust/o
 import { PRESETS, presetAdjust } from '@engine/adjust/presets.js';
 import { ProjectService } from '../services/project.service';
 import { LayerThumb } from './layer-thumb';
+import { Segmented, SegmentedOption } from './segmented';
 import { Slider } from './slider';
 
 const NEUTRAL = NEUTRAL_ADJUST as Record<string, any>;
@@ -22,7 +23,7 @@ const NEUTRAL = NEUTRAL_ADJUST as Record<string, any>;
   selector: 'app-filter-sheet',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [LayerThumb, Slider],
+  imports: [LayerThumb, Segmented, Slider],
   template: `
     @if (svc.selected(); as layer) {
       <div class="space-y-4 py-4">
@@ -38,28 +39,50 @@ const NEUTRAL = NEUTRAL_ADJUST as Record<string, any>;
           </p>
         }
 
-        <div class="flex gap-3 overflow-x-auto px-4 pb-1">
-          <button
-            type="button"
-            class="flex w-[68px] shrink-0 flex-col items-center gap-1.5 rounded-xl border p-1.5"
-            [class]="highlight() === 'none' ? 'border-sky-400 bg-sky-400/10' : 'border-transparent'"
-            (click)="clear(layer)"
-          >
-            <app-layer-thumb [layer]="layer" [size]="56" [previewAdjust]="neutral" />
-            <span class="text-[11px] text-neutral-300">None</span>
-          </button>
+        <!-- Every tile previews the preset on THE USER'S OWN LAYER, through the
+             same drawLayerInto the canvas uses. -->
+        <ng-template #preview let-option>
+          <app-layer-thumb [layer]="layer" [size]="56" [previewAdjust]="adjustFor(option.id)" />
+        </ng-template>
 
-          @for (chip of chips; track chip.id) {
-            <button
-              type="button"
-              class="flex w-[68px] shrink-0 flex-col items-center gap-1.5 rounded-xl border p-1.5"
-              [class]="highlight() === chip.id ? 'border-sky-400 bg-sky-400/10' : 'border-transparent'"
-              (click)="apply(layer, chip.id)"
-            >
-              <app-layer-thumb [layer]="layer" [size]="56" [previewAdjust]="chip.adjust" />
-              <span class="truncate text-[11px] text-neutral-300">{{ chip.label }}</span>
-            </button>
-          }
+        <!-- Hick's law: fifteen tiles in one undifferentiated row is a scan, not
+             a choice. The split is not invented for the sake of splitting — it
+             is the one the engine already draws, and it is the one that costs
+             the user something: nine of these fold into the same lookup table
+             the Adjust sheet builds, and five carry an HSL block that is
+             evaluated per pixel. Naming that here is the only place a user can
+             learn it before their phone tells them on a 40-megapixel layer. -->
+        <div class="space-y-4 px-4">
+          <div>
+            <p class="mb-2 text-[11px] font-medium uppercase tracking-wider text-neutral-400">
+              Looks
+            </p>
+            <app-segmented
+              variant="scroll"
+              ariaLabel="Filter"
+              [options]="plain"
+              [selected]="highlight()"
+              [media]="preview"
+              (pick)="choose(layer, $event)"
+            />
+          </div>
+
+          <div>
+            <p class="mb-2 text-[11px] font-medium uppercase tracking-wider text-neutral-400">
+              Colour shift
+              <span class="ml-1 font-normal normal-case tracking-normal text-neutral-500">
+                — slower on a large layer
+              </span>
+            </p>
+            <app-segmented
+              variant="scroll"
+              ariaLabel="Colour-shift filter"
+              [options]="shifting"
+              [selected]="highlight()"
+              [media]="preview"
+              (pick)="choose(layer, $event)"
+            />
+          </div>
         </div>
 
         <div class="px-4">
@@ -93,14 +116,33 @@ const NEUTRAL = NEUTRAL_ADJUST as Record<string, any>;
 })
 export class FilterSheet {
   protected svc = inject(ProjectService);
-  protected readonly neutral = NEUTRAL;
 
-  /** Built once: `presetAdjust` at full strength is what each swatch shows. */
-  protected readonly chips = PRESETS.map((preset: any) => ({
-    id: preset.id as string,
-    label: preset.label as string,
-    adjust: presetAdjust(preset.id, 1),
-  }));
+  /**
+   * Built once: `presetAdjust` at full strength is what each swatch shows.
+   *
+   * The adjustments are held in a Map and read back by id rather than carried
+   * on the option, so a tile's `previewAdjust` is the SAME object on every
+   * change detection pass and fourteen thumbnails do not redraw when an
+   * unrelated signal moves.
+   */
+  private readonly adjusts = ((): Map<string, any> => {
+    const map = new Map<string, any>([['none', NEUTRAL]]);
+    for (const preset of PRESETS as any[]) map.set(preset.id, presetAdjust(preset.id, 1));
+    return map;
+  })();
+
+  /** The nine that fold into the lookup table — a table lookup per pixel. */
+  protected readonly plain: SegmentedOption[] = [
+    { id: 'none', label: 'None' },
+    ...(PRESETS as any[])
+      .filter((preset) => !preset.hsl)
+      .map((preset) => ({ id: preset.id as string, label: preset.label as string })),
+  ];
+
+  /** The five that also carry an HSL block — the expensive per-pixel pass. */
+  protected readonly shifting: SegmentedOption[] = (PRESETS as any[])
+    .filter((preset) => preset.hsl)
+    .map((preset) => ({ id: preset.id as string, label: preset.label as string }));
 
   protected readonly chosen = signal<string>('none');
   protected readonly intensityPercent = signal(100);
@@ -140,6 +182,16 @@ export class FilterSheet {
     if (preset === 'custom') return null;
     return this.chosen();
   });
+
+  protected adjustFor(id: string): any {
+    return this.adjusts.get(id) ?? NEUTRAL;
+  }
+
+  /** One handler for both rows. `none` is a clear, everything else an apply. */
+  protected choose(layer: any, id: string): void {
+    if (id === 'none') this.clear(layer);
+    else this.apply(layer, id);
+  }
 
   protected apply(layer: any, id: string): void {
     this.chosen.set(id);
