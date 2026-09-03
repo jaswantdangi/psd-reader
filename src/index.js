@@ -100,3 +100,6 @@ export {
 export { applyOverlay } from './adjust/apply.js';
 export { PRESETS, PRESET_IDS, presetAdjust } from './adjust/presets.js';
 export { ADJUST_GLSL, ADJUST_UNIFORMS, ADJUST_STAGE } from './adjust/glsl.js';
+export {
+  matchLayers, appIdFor, boundsOf, groupPathOf, MATCH_TIERS, UNMATCHED_REASONS,
+} from './sync/identity.js';
