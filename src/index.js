@@ -49,7 +49,7 @@ export {
 export { VERTEX_SHADER, fragmentShaderFor } from './gpu/glsl.js';
 export { create2dSurface } from './surface.js';
 export {
-  createSandwichCache, renderSandwiched, sandwichStateFor,
+  createSandwichCache, renderSandwiched, sandwichStateFor, sandwichRunFor,
   SANDWICH_FLAT_ABOVE, SANDWICH_BELOW_ONLY,
 } from './sandwich.js';
 export {

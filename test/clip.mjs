@@ -24,6 +24,7 @@ import {
   createProject, renderProject, reorderLayer, undo, redo,
   toProjectJson, applyProjectJson,
   clipAlphaMap, clipRunStart, clipRunEnd,
+  setLayer,
   createSandwichCache, renderSandwiched, sandwichStateFor,
   SANDWICH_FLAT_ABOVE, SANDWICH_BELOW_ONLY,
 } from '../src/index.js';
@@ -224,6 +225,90 @@ test('a run reaching the bottom of the stack has its lowest member as the base',
   const layers = [{ clipping: true }, { clipping: true }, {}];
   assert.equal(clipRunStart(layers, 1), 0, 'index 0 cannot clip to anything, so it IS the base');
   assert.equal(clipRunEnd(layers, 0), 2);
+});
+
+
+console.log('\nthe sandwich cache never splits a clip run\n');
+
+/**
+ * A clipped layer is not independent of its base, so the three-way split the
+ * drag cache is built on -- below / live / above -- must not land inside a run.
+ * `below` would already hold the base flattened into the backdrop, and no
+ * amount of re-blending the clipped layer on top can recover the alpha it was
+ * supposed to be masked by.
+ *
+ * Every selection index is checked, not a chosen one: the interesting indices
+ * are precisely the ones nobody thinks to pick.
+ */
+const clipProject = () => createProject(clippedDoc(), 'synthetic.psd');
+
+test('every selection in a clipped document renders what a full render renders', () => {
+  const project = clipProject();
+  const full = renderProject(project, { scale: 1 });
+  for (let i = 0; i < project.layers.length; i++) {
+    const frame = renderSandwiched(createSandwichCache(), project, i, { scale: 1 });
+    // The SAME bound test/gpu.mjs pins the cache at, and for the same reason:
+    // `above` quantises to 8 bits twice. Anything above 2 LSB is a real defect.
+    const stat = compareBuffers(flattenOnto(frame), flattenOnto(full), 2);
+    assert.equal(stat.percentReal, 0,
+      `selection ${i} (${project.layers[i].name}): ${stat.beyondRounding} px beyond rounding, ` +
+      `maxDelta ${stat.maxDelta}`);
+    assert.ok(stat.maxDelta <= 2, `selection ${i} drifted to ${stat.maxDelta} LSB`);
+  }
+});
+
+test('selecting a clipped layer caches below its BASE, not below itself', () => {
+  // The load-bearing assertion. Selecting layer 3 ("clip B") must roll the
+  // `below` boundary down to layer 1 ("base"), because layers 1..3 are one run.
+  const project = clipProject();
+  const cache = createSandwichCache();
+  renderSandwiched(cache, project, 3, { scale: 1 });
+  assert.equal(cache.runStart, 1);
+  assert.equal(cache.runEnd, 3);
+  assert.equal(cache.below.data.filter((v, i) => i % 4 === 3 && v > 0).length > 0, true,
+    'below must still hold the backdrop');
+});
+
+test('an unclipped document splits exactly where it always did', () => {
+  // The guarantee that makes this change invisible to every existing caller:
+  // with no clipping anywhere, start === end === the selection.
+  const project = createProject({
+    width: W, height: H,
+    children: [leaf('a', [0, 0, W, H], flat(10, 20, 30)), leaf('b', [4, 4, 20, 20], flat(200, 0, 0)),
+      leaf('c', [8, 8, 30, 30], flat(0, 200, 0))],
+  }, 'plain.psd');
+  const cache = createSandwichCache();
+  renderSandwiched(cache, project, 1, { scale: 1 });
+  assert.equal(cache.runStart, 1);
+  assert.equal(cache.runEnd, 1);
+});
+
+test('the state rule is unchanged, and is asked about what is actually in `above`', () => {
+  // sandwichStateFor still means "is everything above this index normal". The
+  // snap decides WHICH index it is asked about -- the end of the run, because
+  // the layers inside the run are drawn live and are not in `above` at all.
+  const project = clipProject();
+  assert.equal(sandwichStateFor(project, 6), SANDWICH_FLAT_ABOVE, 'nothing above the top run');
+  const cache = createSandwichCache();
+  renderSandwiched(cache, project, 5, { scale: 1 });
+  assert.equal(cache.runEnd, 6);
+  assert.equal(cache.above, null, 'the run reaches the top, so there is no above slice');
+});
+
+test('one drag of a clipped layer still builds the cache once', () => {
+  const project = clipProject();
+  const cache = createSandwichCache();
+  const id = project.layers[3].id;
+  renderSandwiched(cache, project, 3, { scale: 1 });
+  assert.equal(cache.builds, 1);
+  setLayer(project, id, { x: 1 }, 'drag');
+  renderSandwiched(cache, project, 3, { scale: 1 });
+  assert.equal(cache.builds, 2);
+  for (let f = 2; f <= 8; f++) {
+    setLayer(project, id, { x: f }, 'drag');
+    renderSandwiched(cache, project, 3, { scale: 1 });
+  }
+  assert.equal(cache.builds, 2, 'the coalesced frames of one gesture must not rebuild it');
 });
 
 console.log(`\n${passed} passed`);
