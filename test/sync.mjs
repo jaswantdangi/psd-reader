@@ -7,6 +7,9 @@
  * matcher is allowed to see.
  */
 import assert from 'node:assert/strict';
+import fs from 'fs';
+import { readDocument } from '../src/index.js';
+import { createProject } from '../src/edit.js';
 import {
   matchLayers, MATCH_TIERS, UNMATCHED_REASONS, boundsOf, groupPathOf,
 } from '../src/sync/identity.js';
@@ -440,6 +443,85 @@ test('a batch validates its frames, so one bad message does not take the batch d
   const result = translateEvents([{ type: 'event', change: 'move', layerID: 7 }, ev('move', 7, { x: 1, y: 1 })], mapping, { order: ORDER });
   assert.equal(result.commands.length, 1);
   assert.equal(result.refused[0].reason, 'invalid-message');
+});
+
+console.log('\nidentity: the matcher against all 21 real fixture documents\n');
+
+/**
+ * Everything above is a hand-built descriptor pair, which proves the algorithm
+ * and nothing about real files. This runs it over every fixture in the repo:
+ * the app side is a genuine `createProject`, and the Photoshop side is
+ * synthesised from the same ag-psd tree the way the UXP plugin would enumerate
+ * it -- groups as layers, adjustment layers included, empty leaves included.
+ * Names, bounds, kinds and group paths all come from the actual file. Only the
+ * layerID counter is synthetic, and Photoshop mints those per session anyway.
+ *
+ * Costs about 150ms and 86MB RSS for 21 eager decodes.
+ */
+let nextSyntheticID = 1000;
+const enumerateLikePhotoshop = (children, out = [], path = []) => {
+  for (const node of children || []) {
+    const kind = node.children ? 'group'
+      : node.adjustment ? 'adjustment'
+        : node.text ? 'text' : 'pixel';
+    out.push({
+      layerID: nextSyntheticID++,
+      // Mirrors flatten()/toLayer()'s own fallbacks, so an unnamed layer is not
+      // scored as a mismatch when the only difference is which placeholder ran.
+      name: node.name || (node.children ? 'unnamed' : '(unnamed)'),
+      kind,
+      bounds: { left: node.left ?? 0, top: node.top ?? 0, right: node.right ?? 0, bottom: node.bottom ?? 0 },
+      groupPath: [...path],
+    });
+    if (node.children) enumerateLikePhotoshop(node.children, out, [...path, node.name || 'unnamed']);
+  }
+  return out;
+};
+
+const fixtures = fs.readdirSync('fixtures').filter((f) => /\.src\.(psd|psb)$/.test(f)).sort();
+const tally = { psEntries: 0, appLayers: 0, matched: 0, tiers: {}, reasons: {} };
+for (const file of fixtures) {
+  const doc = await readDocument(new Uint8Array(fs.readFileSync('fixtures/' + file)), { pixels: 'eager' });
+  const project = createProject(doc, file);
+  const result = matchLayers(enumerateLikePhotoshop(doc.children), project.layers);
+  tally.psEntries += result.matched.length + result.unmatched.filter((u) => u.side === 'photoshop').length;
+  tally.appLayers += project.layers.length;
+  tally.matched += result.matched.length;
+  for (const m of result.matched) tally.tiers[m.tier] = (tally.tiers[m.tier] ?? 0) + 1;
+  for (const u of result.unmatched) tally.reasons[u.reason] = (tally.reasons[u.reason] ?? 0) + 1;
+}
+console.log(`  ${tally.appLayers} app layers, ${tally.psEntries} Photoshop entries, ` +
+  `${tally.matched} matched ${JSON.stringify(tally.tiers)}, unmatched ${JSON.stringify(tally.reasons)}`);
+
+test('the corpus is actually being read, so an empty run cannot pass silently', () => {
+  assert.ok(fixtures.length >= 21, `expected the 21 fixtures, saw ${fixtures.length}`);
+  assert.ok(tally.appLayers >= 50, `expected the fixtures to yield layers, saw ${tally.appLayers}`);
+});
+
+test('every app layer in every fixture finds its Photoshop layer', () => {
+  assert.equal(tally.matched, tally.appLayers);
+});
+
+test('nothing needs a relaxed tier when both sides just opened the same file', () => {
+  assert.deepEqual(Object.keys(tally.tiers), ['exact'],
+    'renamed/regrouped exist for a document that has since diverged, not for pairing');
+});
+
+test('no real fixture produces an ambiguous pair', () => {
+  assert.equal(tally.reasons.ambiguous ?? 0, 0);
+});
+
+test('every Photoshop entry with no app layer has a STRUCTURAL reason', () => {
+  // Groups and adjustment layers do not exist in the app model at all, and a
+  // pixel-less leaf was dropped by flatten(). None of those is a matching
+  // failure -- but each one is a layer that will not sync, and the UI has to
+  // say so rather than the user finding out by moving it.
+  const structural = ['group', 'adjustment', 'no-candidate'];
+  for (const reason of Object.keys(tally.reasons)) {
+    assert.ok(structural.includes(reason), `unexpected unmatched reason "${reason}" on real files`);
+  }
+  assert.ok((tally.reasons.group ?? 0) > 0, 'the fixtures include grouped documents');
+  assert.ok((tally.reasons.adjustment ?? 0) > 0, 'the fixtures include adjustment layers');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
