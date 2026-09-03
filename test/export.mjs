@@ -6,6 +6,7 @@ import {
   ExportError, isSelfRendering, buildExportOrder, wantedIndices, assertIdentifiable, isFastPath, planSpill,
   spillHeader, encodeSpill, decodeSpill, createMemorySpill, SPILL_MAGIC, SPILL_VERSION, SPILL_HEADER_BYTES,
   createBuffer, drawLayerInto, renderProject,
+  estimatePeakBytes,
   EXPORT_PHASES, phaseFraction, isDeterminate,
   exportFullRes, createJsExportTarget,
   compareBuffers, flattenOnto,
@@ -950,6 +951,42 @@ await atest('the clip scratch is one lazily grown pair, and an unclipped export 
   assert.equal(clipped.clipScratch.allocations, 1, 'two runs, one pair of buffers');
   assert.equal(clipped.clipScratch.group, null, 'finish() drops them before the encode peak');
   assert.equal(clipped.clipScratch.alpha, null);
+});
+
+console.log('\nwhat a clip run costs\n');
+
+const MB = 1024 * 1024;
+
+/**
+ * The documented peak was `file bytes + one full-res layer + proxy total`,
+ * and it held because exactly ONE full-resolution layer was ever resident: the
+ * walk blended each arrival and released it.
+ *
+ * A clip run breaks that, and there is no way around it that is not a second
+ * clipping implementation. The run is composited as a unit, so every member's
+ * pixels have to be in hand at the same moment -- and the group and alpha
+ * buffers join them while it is drawn.
+ */
+test('the peak is unchanged, to the byte, for a document with no clip run', () => {
+  const base = { fileBytes: 303 * MB, largestLayerBytes: 66.4 * MB, proxyTotalBytes: 17 * MB };
+  assert.equal(estimatePeakBytes(base), 303 * MB + 66.4 * MB + 17 * MB);
+  assert.equal(estimatePeakBytes({ ...base, clipRunBytes: 0, clipScratchBytes: 0 }), estimatePeakBytes(base),
+    'a document with no clipping mask must pay nothing for one');
+});
+
+test('the largest clip run REPLACES the single-layer term, and never shrinks it', () => {
+  assert.equal(estimatePeakBytes({ largestLayerBytes: 10 * MB, clipRunBytes: 25 * MB }), 25 * MB,
+    'three 8 MB layers in one run are 25 MB resident, not 10');
+  assert.equal(estimatePeakBytes({ largestLayerBytes: 30 * MB, clipRunBytes: 25 * MB }), 30 * MB,
+    'the biggest single layer can sit outside every run, and still has to fit');
+});
+
+test('the group and alpha pair is w * h * 5 and is a term of its own', () => {
+  const poster = 4961 * 3508 * 5;
+  assert.equal(poster, 87015940, '83.0 MiB on the measured 4961x3508 poster');
+  assert.equal(estimatePeakBytes({ fileBytes: 303 * MB, largestLayerBytes: 66.4 * MB, clipScratchBytes: poster }),
+    303 * MB + 66.4 * MB + poster,
+    'the pair is live at the same time as the run, so the terms add');
 });
 
 console.log('\ntile arithmetic\n');

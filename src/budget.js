@@ -8,6 +8,15 @@
  * to within 1%. The file term dominates at 68-78%, and is irreducible during
  * decode because ag-psd's readPsd() requires one contiguous ArrayBuffer.
  * The practical ceiling is therefore set by file size.
+ *
+ * A CLIPPING MASK WIDENS THE MIDDLE TERM, and only for the export path. A clip
+ * run is composited as a unit -- the base into a group buffer, the base's alpha
+ * taken from it, each clipped layer blended through that alpha -- so every
+ * member's full-resolution pixels are resident at the same moment instead of
+ * one at a time, and a group-and-alpha pair of `w * h * 5` bytes is live while
+ * the run is drawn. Both are zero for a document that uses no clipping mask,
+ * which is every one of the 21 fixtures: its runs are all of length one, which
+ * takes the ordinary single-layer path and allocates nothing.
  */
 
 const MB = 1024 * 1024;
@@ -36,8 +45,28 @@ export function memoryBudgetBytes(deviceMemoryGB) {
   return Math.min(HARD_FILE_CAP_BYTES, Math.round(gb * 1024 * MB * BUDGET_FRACTION));
 }
 
-export function estimatePeakBytes({ fileBytes = 0, largestLayerBytes = 0, proxyTotalBytes = 0 }) {
-  return fileBytes + largestLayerBytes + proxyTotalBytes;
+/**
+ * @param {object} terms
+ * @param {number} [terms.fileBytes]         The source file, held whole during decode.
+ * @param {number} [terms.largestLayerBytes] The biggest single full-resolution layer.
+ * @param {number} [terms.proxyTotalBytes]   Every proxy layer the editor keeps.
+ * @param {number} [terms.clipRunBytes]
+ *   The biggest clip run: the SUM of its members' full-resolution pixels, all
+ *   of which are resident together while the run is composited. It REPLACES the
+ *   single-layer term rather than adding to it -- the same bytes, counted once
+ *   -- but never shrinks it, because the largest single layer may sit outside
+ *   every run and still has to fit. Zero when nothing is clipped.
+ * @param {number} [terms.clipScratchBytes]
+ *   `width * height * 5`: the run's group buffer (RGBA) and its alpha plane.
+ *   One growing pair per export, live only while a run is being drawn and
+ *   dropped before the encode peak, so it is one term and not one per run.
+ *   Zero when nothing is clipped. 87,015,940 bytes on a 4961x3508 poster.
+ */
+export function estimatePeakBytes({
+  fileBytes = 0, largestLayerBytes = 0, proxyTotalBytes = 0,
+  clipRunBytes = 0, clipScratchBytes = 0,
+}) {
+  return fileBytes + Math.max(largestLayerBytes, clipRunBytes) + proxyTotalBytes + clipScratchBytes;
 }
 
 export function guardFileSize(fileBytes, budgetBytes) {
