@@ -37,6 +37,8 @@ export {
 export {
   renderProject, resample, rasteriseTextAt, measureText, drawLayerInto, createRenderStats,
   splitTextLines, normaliseLineBreaks, wrapsInBox,
+  drawClipRunInto, clipRunStart, clipRunEnd, clipAlphaMap,
+  createClipScratch, acquireClipScratch, releaseClipScratch, DEFAULT_CLIP_SCRATCH,
 } from './render.js';
 export { proxyScaleFor, downscaleImage, DEFAULT_PROXY_EDGE } from './proxy.js';
 export { memoryBudgetBytes, estimatePeakBytes, guardFileSize, HARD_FILE_CAP_BYTES } from './budget.js';

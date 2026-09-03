@@ -436,15 +436,43 @@ export const createRenderStats = () => ({ layers: 0, lut: 0, hsl: 0, overlay: 0 
  */
 export function drawLayerInto(dest, layer, scale = 1, options = {}) {
   if (!layer.visible || layer.opacity <= 0) return;
+  const prepared = prepareLayer(dest, layer, scale, options);
+  if (!prepared) return;
+  blendInto(dest, prepared.pixels.data, prepared.rect, layer.opacity, layer.blendMode);
+}
 
+/**
+ * Everything drawLayerInto does EXCEPT the final blend: the destination rect,
+ * the resampled mask, the pixels (resampled, or re-rasterised for live text),
+ * and the adjustment pass.
+ *
+ * Split out for exactly one caller -- `drawClipRunInto` below, which has to
+ * blend the same pixels into a scratch group buffer rather than into `dest`,
+ * and has to read the base layer's alpha AFTER the adjustment pass rather than
+ * before it. Writing that second path out again is how this project ended up
+ * needing a pinning assertion between `planSpill` and the export walk; one
+ * body, two blend targets, no second implementation to drift.
+ *
+ * `dest` is consulted only for its dimensions, to reject a rect that lands
+ * entirely off-canvas.
+ *
+ * WHAT IT RETURNS IS BORROWED. `pixels` may be `layer.pixels` itself (resample
+ * identity-returns on the common path), `layer.rendered`, or a view into the
+ * shared adjustment scratch -- which the NEXT prepareLayer call overwrites.
+ * Blend it before preparing anything else, and never write into it.
+ *
+ * @returns {{pixels:{width:number,height:number,data:Uint8ClampedArray},
+ *            rect:{left:number,top:number,width:number,height:number,mask?:Uint8Array}} | null}
+ */
+function prepareLayer(dest, layer, scale, options) {
   const rect = {
     left: Math.round(layer.x * scale),
     top: Math.round(layer.y * scale),
     width: Math.max(1, Math.round(layer.w * scale)),
     height: Math.max(1, Math.round(layer.h * scale)),
   };
-  if (rect.left >= dest.width || rect.top >= dest.height) return;
-  if (rect.left + rect.width <= 0 || rect.top + rect.height <= 0) return;
+  if (rect.left >= dest.width || rect.top >= dest.height) return null;
+  if (rect.left + rect.width <= 0 || rect.top + rect.height <= 0) return null;
 
   // A layer mask is a per-layer alpha multiplier and nothing else -- blendInto
   // multiplies `as` by it. It lives on exactly the same grid as `pixels`, so it
@@ -470,7 +498,7 @@ export function drawLayerInto(dest, layer, scale = 1, options = {}) {
   }
   if (!pixels) {
     if (options.onMissing) options.onMissing(layer, reason);
-    return;
+    return null;
   }
 
   if (options.stats) options.stats.layers++;
@@ -506,27 +534,216 @@ export function drawLayerInto(dest, layer, scale = 1, options = {}) {
     }
   }
 
-  blendInto(dest, pixels.data, rect, layer.opacity, layer.blendMode);
+  return { pixels, rect };
+}
+
+// ---------------------------------------------------------------- clipping
+
+/**
+ * Alpha coverage of a rendered layer, over the whole canvas.
+ *
+ * A LINE-FOR-LINE PORT of `alphaMap` in src/composite.js, which is the oracle
+ * the 21-fixture accuracy table is measured against. Every detail of it is
+ * load-bearing and none of it is idiomatic:
+ *
+ *   - `Uint8Array`, so a fractional coverage TRUNCATES. A Uint8ClampedArray
+ *     would round instead, and the two renderers would disagree by 1 LSB on
+ *     every partially covered pixel of every clipped layer.
+ *   - `pixels[si + 3] * opacity` with NO /255 -- the plane is already 0..255.
+ *   - the mask divides by 255 because it is a separate 0..255 plane.
+ *
+ * It is a port and not a call because composite.js does not export it, and this
+ * module is not that module's owner. test/clip.mjs pins the two against each
+ * other byte for byte on random input, exactly as test/layers.mjs pins
+ * projectMask against the implementation it was moved out of.
+ *
+ * The ONE deliberate difference: the map is passed in, already zeroed, instead
+ * of being allocated here. A full-canvas plane per clip run is precisely the
+ * per-layer allocation the scratch below exists to stop.
+ *
+ * @param {Uint8Array} map  w*h, zeroed. Only the rect is written.
+ */
+export function clipAlphaMap(map, width, height, rect, pixels, mask, opacity) {
+  const x1 = Math.min(width, rect.left + rect.width);
+  const y1 = Math.min(height, rect.top + rect.height);
+  for (let y = Math.max(0, rect.top); y < y1; y++) {
+    for (let x = Math.max(0, rect.left); x < x1; x++) {
+      const si = ((y - rect.top) * rect.width + (x - rect.left)) * 4;
+      let a = pixels[si + 3] * opacity;
+      if (mask) a *= mask[(y - rect.top) * rect.width + (x - rect.left)] / 255;
+      map[y * width + x] = a;
+    }
+  }
+  return map;
+}
+
+/**
+ * The two full-canvas buffers one clip run needs, reused across every run of
+ * every frame.
+ *
+ * Same rule as src/adjust/scratch.js and for the same reason: a buffer per
+ * clipped layer is O(layers) allocations of the WHOLE CANVAS. One pair, grown
+ * monotonically, is O(1). It is a separate store from the adjustment scratch
+ * for two reasons that are not stylistic -- the alpha plane must be a
+ * `Uint8Array` and `acquireScratch` hands back `Uint8ClampedArray`, and these
+ * two must be ZEROED on acquire where the adjustment scratch is fully
+ * overwritten by its pass and must not be.
+ *
+ * COST, at the sizes that actually occur: `w * h * 5` bytes. 5 MB for a
+ * 1024x1024 proxy, 87 MB for a 4961x3508 poster at scale 1. EXACTLY ONE PAIR
+ * IS EVER LIVE: clip runs are consecutive spans of a flat list, so they are
+ * sequential and can never nest, and `renderProject` finishes one before it
+ * starts the next.
+ *
+ * ALLOCATED LAZILY. A document with no clipped layer never calls this, so it
+ * pays nothing at all -- which is every one of the 21 fixtures.
+ */
+export const createClipScratch = () => ({ group: null, alpha: null, pixels: 0, allocations: 0 });
+
+/** @returns {{group:{width:number,height:number,data:Uint8ClampedArray}, alpha:Uint8Array}} */
+export function acquireClipScratch(store, width, height) {
+  const need = width * height;
+  if (!store.group || store.pixels < need) {
+    store.group = new Uint8ClampedArray(need * 4);
+    store.alpha = new Uint8Array(need);
+    store.pixels = need;
+    store.allocations++;
+  }
+  // Zeroed, not merely rect-sized: `createBuffer` in the compositor hands the
+  // group a transparent canvas, and a reused buffer still holding the previous
+  // run would blend that run's pixels into this one.
+  const group = { width, height, data: store.group.subarray(0, need * 4) };
+  group.data.fill(0);
+  const alpha = store.alpha.subarray(0, need);
+  alpha.fill(0);
+  return { group, alpha };
+}
+
+/** Drop both buffers. Export calls this before the encode peak, as 1C does. */
+export function releaseClipScratch(store) {
+  store.group = null;
+  store.alpha = null;
+  store.pixels = 0;
+}
+
+/** The preview path's clip scratch. Module-level for the same reason DEFAULT_SCRATCH is. */
+export const DEFAULT_CLIP_SCRATCH = createClipScratch();
+
+/**
+ * How far the clip run starting at `index` extends: the index one PAST its last
+ * member.
+ *
+ * A clipping mask is POSITIONAL, not a group. A clipped layer clips to whatever
+ * lies directly below it, so a run is simply a base plus the consecutive
+ * `clipping` layers above it, read off the current order every time. There is
+ * nothing stored, nothing to keep in step with a reorder, and no run to lock:
+ * move a layer and it clips to its new neighbour, which is what Photoshop does.
+ */
+export function clipRunEnd(layers, index) {
+  let end = index + 1;
+  while (end < layers.length && layers[end].clipping === true) end++;
+  return end;
+}
+
+/**
+ * The index of the base of the run CONTAINING `index` -- itself, when it is not
+ * a clipped layer.
+ *
+ * A run whose members reach the bottom of the stack has no base under it. Its
+ * lowest member becomes its own base and draws unclipped, which is both what
+ * Photoshop does and what `renderList` in composite.js has always done.
+ */
+export function clipRunStart(layers, index) {
+  let start = index;
+  while (start > 0 && layers[start].clipping === true) start--;
+  return start;
+}
+
+/**
+ * Draw the layer at `index` together with every layer clipped to it.
+ *
+ * PORTED FROM `renderList` in src/composite.js, step for step, because a
+ * second differently-written clipping implementation is the failure this
+ * project keeps hitting. The order of the four steps is the whole algorithm:
+ *
+ *   1. blend the base into a full-canvas group buffer at opacity 1, mode
+ *      `normal` -- its own opacity and blend mode belong to the WHOLE run and
+ *      are spent in step 4;
+ *   2. take the base's alpha, after its mask and after its adjustments;
+ *   3. blend each clipped layer into the group with that as `clipAlpha`, which
+ *      `blendInto` has always accepted;
+ *   4. blend the group into `dest` with the base's opacity and blend mode.
+ *
+ * A HIDDEN BASE TAKES THE WHOLE RUN WITH IT. In composite.js the clipped block
+ * sits inside `if (layer.hidden !== true)`, so nothing in the run is drawn --
+ * and that is right, not incidental: the clipped layers are visible only
+ * through the base's alpha, and a hidden base has none.
+ *
+ * `options.pixels` is deliberately NOT honoured here. It names ONE layer's
+ * pixels and a run is several, so there is no reading of it that is not a
+ * guess; the streaming export path calls `drawLayerInto` per layer instead.
+ *
+ * @returns {number} the index to continue the walk from -- one past the run.
+ */
+export function drawClipRunInto(dest, layers, index, scale = 1, options = {}) {
+  const base = layers[index];
+  const end = clipRunEnd(layers, index);
+
+  // No clipped layers above: the ordinary single-layer path, byte for byte.
+  if (end === index + 1) {
+    drawLayerInto(dest, base, scale, options);
+    return end;
+  }
+
+  if (!base.visible || base.opacity <= 0) return end;
+  const prepared = prepareLayer(dest, base, scale, options);
+  if (!prepared) return end;
+
+  const { group, alpha } = acquireClipScratch(
+    options.clipScratch || DEFAULT_CLIP_SCRATCH, dest.width, dest.height);
+
+  blendInto(group, prepared.pixels.data, prepared.rect, 1, 'normal');
+  // BEFORE any further prepareLayer call. `prepared.pixels` can be a view into
+  // the shared adjustment scratch, which the next clipped layer overwrites.
+  clipAlphaMap(alpha, dest.width, dest.height, prepared.rect,
+    prepared.pixels.data, prepared.rect.mask, 1);
+
+  for (let i = index + 1; i < end; i++) {
+    const layer = layers[i];
+    if (!layer.visible || layer.opacity <= 0) continue;
+    const clipped = prepareLayer(group, layer, scale, options);
+    if (!clipped) continue;
+    blendInto(group, clipped.pixels.data, clipped.rect, layer.opacity, layer.blendMode, alpha);
+  }
+
+  blendInto(dest, group.data, { left: 0, top: 0, width: dest.width, height: dest.height },
+    base.opacity, base.blendMode);
+  return end;
 }
 
 /**
  * @param {object} project
- * @param {{scale?: number, stats?: object|null, scratch?: object|null}} [options]
+ * @param {{scale?: number, stats?: object|null, scratch?: object|null,
+ *          clipScratch?: object|null}} [options]
  *   `scale` 1 renders at document resolution; lower values are for interactive preview.
  *   `stats` counts the adjustment passes this frame actually ran.
  *   `scratch` overrides the shared adjustment destination buffer.
+ *   `clipScratch` overrides the shared clip-run group and alpha buffers.
  * @returns {{width:number,height:number,data:Uint8ClampedArray}}
  */
 export function renderProject(project, options = {}) {
-  const { scale = 1, stats = null, scratch = null } = options;
+  const { scale = 1, stats = null, scratch = null, clipScratch = null } = options;
   const width = Math.max(1, Math.round(project.width * scale));
   const height = Math.max(1, Math.round(project.height * scale));
   const dest = createBuffer(width, height);
 
-  // bottom to top. `pixels` is deliberately ABSENT from the options object --
-  // drawLayerInto reads it with `in`, so passing it as undefined would replace
-  // every layer's pixels with nothing.
-  for (const layer of project.layers) drawLayerInto(dest, layer, scale, { stats, scratch });
+  // bottom to top, one CLIP RUN at a time -- a run of one, which is every layer
+  // in a document that uses no clipping mask, is the plain single-layer draw.
+  // `pixels` is deliberately ABSENT from the options object -- drawLayerInto
+  // reads it with `in`, so passing it as undefined would replace every layer's
+  // pixels with nothing.
+  for (let i = 0; i < project.layers.length; )
+    i = drawClipRunInto(dest, project.layers, i, scale, { stats, scratch, clipScratch });
 
   return dest;
 }
