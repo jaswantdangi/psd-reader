@@ -159,6 +159,7 @@ const orderOf = (...specs) => specs.map((s, i) => ({
   rerendered: s.rerendered ?? false,
   sourceIndex: s.sourceIndex,
   selfSupplied: s.selfSupplied ?? false,
+  clipping: s.clipping ?? false,
   pixels: s.pixels ?? null,
 }));
 const projectOf = (...specs) => ({ width: 10, height: 10, layers: orderOf(...specs) });
@@ -171,6 +172,89 @@ test('the order is bottom to top, minus the invisible and the zero-opacity', () 
     { sourceIndex: 3 },
   ));
   assert.deepEqual(order.map((l) => l.sourceIndex), [0, 3]);
+});
+
+/**
+ * A clipping mask is POSITIONAL: a clipped layer is visible only through the
+ * alpha of whatever lies directly under it. So the order has to be built out of
+ * RUNS, not out of layers.
+ *
+ * Filtering layer by layer is the trap. Dropping a hidden BASE leaves its
+ * clipped layers behind, and they then attach to whatever lands underneath --
+ * a different picture, and a plausible-looking one, which is why nothing would
+ * have caught it. `renderProject` drops the whole run, and export is the same
+ * renderer or it is a bug.
+ */
+test('a hidden BASE takes its whole clip run with it, instead of re-attaching it', () => {
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 0, name: 'backdrop' },
+    { sourceIndex: 1, name: 'base', visible: false },
+    { sourceIndex: 2, name: 'clipped', clipping: true },
+    { sourceIndex: 3, name: 'top' },
+  ));
+  assert.deepEqual(order.map((l) => l.name), ['backdrop', 'top'],
+    'dropping only the base silently re-clips "clipped" to "backdrop"');
+});
+
+test('a zero-opacity base takes its run with it too, for the same reason', () => {
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 0, name: 'backdrop' },
+    { sourceIndex: 1, name: 'base', opacity: 0 },
+    { sourceIndex: 2, name: 'clip A', clipping: true },
+    { sourceIndex: 3, name: 'clip B', clipping: true },
+  ));
+  assert.deepEqual(order.map((l) => l.name), ['backdrop']);
+});
+
+test('a hidden MEMBER is dropped alone, and the rest of the run still clips', () => {
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 0, name: 'backdrop' },
+    { sourceIndex: 1, name: 'base' },
+    { sourceIndex: 2, name: 'clip A', clipping: true, visible: false },
+    { sourceIndex: 3, name: 'clip B', clipping: true },
+  ));
+  assert.deepEqual(order.map((l) => l.name), ['backdrop', 'base', 'clip B']);
+});
+
+test('a run reaching the bottom of the stack has its lowest member as its base', () => {
+  const specs = [
+    { sourceIndex: 0, name: 'orphan', clipping: true },
+    { sourceIndex: 1, name: 'also clipped', clipping: true },
+    { sourceIndex: 2, name: 'plain' },
+  ];
+  assert.deepEqual(buildExportOrder(projectOf(...specs)).map((l) => l.name),
+    ['orphan', 'also clipped', 'plain']);
+
+  // Hiding it hides the run it is the base of, exactly as a base anywhere else.
+  specs[0].visible = false;
+  assert.deepEqual(buildExportOrder(projectOf(...specs)).map((l) => l.name), ['plain']);
+});
+
+test('a hidden base costs the stream nothing: neither it nor its run is decoded', () => {
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 0 },
+    { sourceIndex: 1, visible: false },
+    { sourceIndex: 2, clipping: true },
+    { sourceIndex: 3, clipping: true },
+    { sourceIndex: 4 },
+  ));
+  assert.deepEqual([...wantedIndices(order)], [0, 4],
+    'decoding a layer that will never be drawn is pure waste on the critical path');
+});
+
+test('the members of a run stay contiguous in the order, whatever is hidden', () => {
+  const order = buildExportOrder(projectOf(
+    { sourceIndex: 0, name: 'base 1' },
+    { sourceIndex: 1, name: 'clip 1', clipping: true },
+    { sourceIndex: 2, name: 'base 2', visible: false },
+    { sourceIndex: 3, name: 'clip 2', clipping: true },
+    { sourceIndex: 4, name: 'base 3' },
+    { sourceIndex: 5, name: 'clip 3', clipping: true },
+  ));
+  assert.deepEqual(order.map((l) => l.name), ['base 1', 'clip 1', 'base 3', 'clip 3']);
+  // The blend target reconstructs runs from `clipping` alone, so a clipped
+  // layer must never land directly after a run it does not belong to.
+  assert.deepEqual(order.map((l) => l.clipping), [false, true, false, true]);
 });
 
 test('a hidden layer is not wanted from the stream at all', () => {

@@ -11,6 +11,7 @@
  * be parked. This module decides which, and how few.
  */
 import { ExportError } from './errors.js';
+import { clipRunEnd } from '../render.js';
 
 /**
  * A retyped or restyled text layer draws itself at the final size, so it is
@@ -49,9 +50,51 @@ export function drawsOwnPixels(layer) {
   return isSelfRendering(layer) || (layer.selfSupplied === true && !!layer.pixels);
 }
 
-/** The layers export will actually draw, bottom to top. */
+/** A layer that draws nothing at all, wherever it sits. */
+const drawsNothing = (layer) => !layer.visible || layer.opacity <= 0;
+
+/**
+ * The layers export will actually draw, bottom to top -- one CLIP RUN at a
+ * time, because a run is what `renderProject` draws and export is the same
+ * renderer or it is a bug.
+ *
+ * A plain `filter` is the trap, and it was what stood here. A clipping mask is
+ * POSITIONAL: a clipped layer is visible only through the alpha of whatever
+ * lies DIRECTLY under it. Drop a hidden BASE on its own and its clipped layers
+ * close the gap and attach to whatever lands underneath -- a different picture,
+ * and a plausible one, which is exactly why nothing downstream would catch it.
+ *
+ * So the two cases are not the same case:
+ *
+ *   - a base that draws nothing takes its WHOLE RUN with it. `drawClipRunInto`
+ *     returns at `!base.visible || base.opacity <= 0` before it draws anything,
+ *     and `renderList` in the compositor has always had the clipped block
+ *     inside `if (layer.hidden !== true)`. The clipped layers have no alpha to
+ *     be seen through.
+ *   - a hidden MEMBER is skipped alone; the run's other members still clip to
+ *     the same base.
+ *
+ * Run bounds come from `clipRunEnd`, the same function the renderer walks with,
+ * so there is no second definition of where a run ends. The walk starts at 0
+ * and steps run by run, which also makes a clipped layer at the very bottom of
+ * the stack its own base -- what Photoshop does, and what the preview does.
+ *
+ * The result keeps every run CONTIGUOUS, which is what lets the blend target
+ * reconstruct runs from `clipping` alone as the layers stream past it.
+ */
 export function buildExportOrder(project) {
-  return project.layers.filter((layer) => layer.visible && layer.opacity > 0);
+  const layers = project.layers;
+  const order = [];
+  for (let i = 0; i < layers.length; ) {
+    const end = clipRunEnd(layers, i);
+    if (!drawsNothing(layers[i])) {
+      order.push(layers[i]);
+      for (let j = i + 1; j < end; j++)
+        if (!drawsNothing(layers[j])) order.push(layers[j]);
+    }
+    i = end;
+  }
+  return order;
 }
 
 /** The sourceIndex values the stream has to decode. Hidden layers are absent. */
