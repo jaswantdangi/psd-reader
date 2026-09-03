@@ -783,3 +783,33 @@ mode makes visible.
   and correct, but it is a trick: an engine-side `hitStack(project, x, y)`
   would be the honest primitive, and would also make the cycle testable in
   `test/` rather than only through the component.
+
+## Clipping masks — landed, with two gaps left open
+
+Clipping is implemented in the preview (`2e61d43`, `b608f86`, `ae95239`) and in
+full-resolution export (`0d74b09`, `649b9fd`, `79daed1`). What follows is what
+was NOT closed.
+
+- **No fixture exercises clipping.** Verified by walking every layer of all 21
+  documents: **80 nodes, zero with `clipping === true`.** Every assertion behind
+  both changes therefore runs against hand-shaped documents, and the real-file
+  corpus cannot catch a regression here. An earlier backlog note implying real
+  files were rendering wrong was never evidenced. Getting one genuine clipped
+  PSD into `fixtures/` is the single highest-value follow-up — it would convert
+  ~29 hand-built assertions into corpus-backed ones.
+
+- **A GPU export target must assemble clip runs itself, and nothing enforces
+  it.** `exportFullRes` hands a whole run to the target and closes it with
+  `flush()`; `createJsExportTarget` composites the run through the preview's own
+  `drawClipRunInto`. A future GPU target that ignores the run boundary would
+  silently reproduce the exact bug just fixed. The browser makes this nearly
+  free — `globalCompositeOperation = 'source-atop'` is the native equivalent —
+  but the contract is currently a convention, not an assertion. Pin it the way
+  `planSpill` and the export walk are pinned to each other.
+
+- **Export peak grew, deliberately and only for clipped documents:**
+  `fileBytes + max(largestLayerBytes, clipRunBytes) + proxyTotalBytes +
+  clipScratchBytes`. The scratch is `w·h·5` = **83.0 MiB on a 4961×3508
+  poster**, one lazily grown pair per export. Both new terms are 0 on an
+  unclipped document, asserted by `allocations === 0`, so all 21 fixtures cost
+  what they cost before, to the byte.
