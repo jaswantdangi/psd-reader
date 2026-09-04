@@ -277,11 +277,68 @@ test('loopback without TLS still starts -- it is the default and it is not reach
 
 test('a public bind starts once TLS terminates here, or once upstream termination is declared', () => withCertFiles(
   ({ certPath, keyPath }) => {
-    assert.ok(createRelay({ port: 0, host: '0.0.0.0', tlsCertPath: certPath, tlsKeyPath: keyPath }).config.tlsCertPath);
-    assert.equal(createRelay({ port: 0, host: '0.0.0.0', behindProxy: true }).config.behindProxy, true,
+    const reachable = { port: 0, host: '0.0.0.0', allowedOrigins: ['https://psd-editor.pages.dev'] };
+    assert.ok(createRelay({ ...reachable, tlsCertPath: certPath, tlsKeyPath: keyPath }).config.tlsCertPath);
+    assert.equal(createRelay({ ...reachable, behindProxy: true }).config.behindProxy, true,
       'the reverse-proxy deployment is supported, but only as an explicit statement');
   },
 ));
+
+// ---------------------------------------------------------------- origin
+
+const ALLOWED = 'https://psd-editor.pages.dev';
+
+test('a disallowed origin is rejected before pairing, not after', () => withRelay(
+  { allowedOrigins: [ALLOWED] },
+  async (ctx) => {
+    const evil = ctx.client(ctx.url, { origin: 'https://evil.example' });
+    await assert.rejects(evil.open(), /403/, 'the upgrade is refused with a status, not accepted and then closed');
+
+    // The point of refusing at the upgrade: there is nothing to clean up. No
+    // socket was ever admitted, so no pairing code can be presented to it.
+    assert.equal(ctx.relay.stats().connections, 0, 'no connection was admitted');
+    assert.equal(ctx.relay.stats().pendingCodes, 0, 'and no pairing state exists to attack');
+    assert.equal(ctx.relay.stats().originRefusals, 1);
+  },
+));
+
+test('an allowed origin pairs and routes, and matching ignores case and a trailing slash', () => withRelay(
+  { allowedOrigins: [ALLOWED] },
+  async (ctx) => {
+    const app = ctx.client(ctx.url, { origin: `${ALLOWED.toUpperCase()}/` });
+    await app.open();
+    app.send({ type: 'hello', role: 'app', version: '1.0.0' });
+    const { code } = await app.next();
+
+    // The plugin is not a browser and sends no Origin at all. It must still
+    // get in, or the allowlist locks out the half of the pair it was never
+    // meant to govern.
+    const plugin = ctx.client();
+    await plugin.open();
+    plugin.send({ type: 'hello', role: 'plugin', version: '1.0.0' });
+    plugin.send({ type: 'pair', code });
+    await app.next();
+    await plugin.next();
+    plugin.send({ type: 'event', change: 'visibility', layerID: 2, props: { visible: false } });
+    assert.equal((await app.next()).change, 'visibility');
+    assert.equal(ctx.relay.stats().originRefusals, 0);
+  },
+));
+
+test('an unset allowlist admits every origin -- and only loopback may leave it unset', () => withRelay({}, async (ctx) => {
+  assert.deepEqual(ctx.relay.config.allowedOrigins, [], 'unset is the loopback default');
+  const anywhere = ctx.client(ctx.url, { origin: 'https://anything.example' });
+  await anywhere.open();
+  anywhere.send({ type: 'hello', role: 'app', version: '1.0.0' });
+  assert.equal((await anywhere.next()).type, 'pair', 'a developer on their own machine is not made to configure this');
+
+  // What makes that safe is that the same unset list refuses to start anywhere
+  // a stranger's browser could reach. An allowlist that admits everything is
+  // worse than none: it reads as a control that exists.
+  assert.throws(() => createRelay({ port: 0, host: '0.0.0.0', behindProxy: true }), /RELAY_ALLOWED_ORIGINS is unset/);
+  assert.throws(() => createRelay({ port: 0, host: '127.0.0.1', behindProxy: true }), /RELAY_ALLOWED_ORIGINS is unset/,
+    'a loopback bind published by a reverse proxy is reachable too');
+}));
 
 // --------------------------------------------------------------- pairing
 

@@ -8,7 +8,7 @@
  * does on its behalf.
  */
 
-import { isLoopbackHost } from './net.js';
+import { isLoopbackHost, parseOriginList } from './net.js';
 
 export const DEFAULTS = {
   host: '127.0.0.1',
@@ -65,6 +65,17 @@ export const DEFAULTS = {
    * relay happens.
    */
   behindProxy: false,
+
+  /**
+   * Which browser origins may open a socket. Comma-separated in the
+   * environment, exact match, no wildcards -- a wildcard here is how an
+   * allowlist becomes decorative.
+   *
+   * Empty means unset, and unset admits everything. That is deliberate for a
+   * loopback relay on a developer's machine, and it is why `resolveConfig`
+   * refuses to start with it unset anywhere the relay is actually reachable.
+   */
+  allowedOrigins: [],
 };
 
 const ENV = {
@@ -73,6 +84,7 @@ const ENV = {
   tlsCertPath: 'RELAY_TLS_CERT',
   tlsKeyPath: 'RELAY_TLS_KEY',
   behindProxy: 'RELAY_BEHIND_PROXY',
+  allowedOrigins: 'RELAY_ALLOWED_ORIGINS',
   pairTtlMs: 'RELAY_PAIR_TTL_MS',
   sessionTtlMs: 'RELAY_SESSION_TTL_MS',
   sweepMs: 'RELAY_SWEEP_MS',
@@ -97,6 +109,8 @@ const HIGH_WATER_FRACTION = 8;
 /** Keys whose environment value is taken as written rather than as a number. */
 const STRING_KEYS = new Set(['host', 'tlsCertPath', 'tlsKeyPath']);
 const BOOL_KEYS = new Set(['behindProxy']);
+/** Keys whose environment value is a comma-separated list. */
+const LIST_KEYS = new Set(['allowedOrigins']);
 
 const TRUE = new Set(['1', 'true', 'yes', 'on']);
 const FALSE = new Set(['0', 'false', 'no', 'off']);
@@ -105,6 +119,7 @@ function fromEnv(key, env) {
   const raw = env[ENV[key]];
   if (raw === undefined || raw === '') return undefined;
   if (STRING_KEYS.has(key)) return raw.trim();
+  if (LIST_KEYS.has(key)) return raw;
   if (BOOL_KEYS.has(key)) {
     const v = raw.trim().toLowerCase();
     if (TRUE.has(v)) return true;
@@ -144,6 +159,35 @@ function assertNoSilentDowngrade(config) {
 }
 
 /**
+ * Can a stranger's browser reach this relay?
+ *
+ * True for a non-loopback bind, and equally true for a loopback bind that a
+ * reverse proxy publishes to the internet -- which is the whole point of
+ * `RELAY_BEHIND_PROXY`. It is not only a TLS statement; it is the operator
+ * saying "this process is exposed", and every check that only matters when
+ * exposed keys off it.
+ */
+const isReachable = (config) => !isLoopbackHost(config.host) || config.behindProxy;
+
+/**
+ * The origin allowlist may only be unset where nobody else can reach the relay.
+ *
+ * Unset admits every page, and an allowlist that admits every page is worse
+ * than none at all: it reads, in the config and in review, as a control that
+ * exists. So a reachable relay with no allowlist does not start. A developer's
+ * loopback relay keeps admitting everything, because there is no browser on
+ * another machine that can get to it.
+ */
+function assertOriginPolicy(config) {
+  if (!isReachable(config) || config.allowedOrigins.length > 0) return;
+  throw new Error(
+    `refusing to start: this relay is reachable from outside this machine and ${ENV.allowedOrigins} is unset, `
+    + 'so any web page in any tab could open a socket to it. '
+    + `Set ${ENV.allowedOrigins} to the exact origins the app is served from, comma separated.`,
+  );
+}
+
+/**
  * Defaults, then environment, then explicit overrides. Overrides win so tests
  * can drive a relay with small caps without touching the process environment.
  */
@@ -175,6 +219,11 @@ export function resolveConfig(overrides = {}, env = process.env) {
   if (config.highWaterBytes >= config.maxMessageBytes) {
     throw new Error('highWaterBytes must be below maxMessageBytes, or the relay buffers more than one message before it pauses');
   }
+  // A list from the environment arrives as a string and from a test as an
+  // array. Normalising here means every consumer sees exactly one shape.
+  config.allowedOrigins = parseOriginList(config.allowedOrigins);
+
   assertNoSilentDowngrade(config);
+  assertOriginPolicy(config);
   return config;
 }

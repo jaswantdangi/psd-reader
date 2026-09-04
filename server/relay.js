@@ -38,6 +38,7 @@ import { parseMessage, errorFrame } from '../src/sync/protocol.js';
 import { resolveConfig } from './config.js';
 import { createPairingDesk } from './pairing.js';
 import { loadTlsMaterial } from './tls.js';
+import { originAllowed } from './net.js';
 
 /** Close codes. 1001 going away, 1008 policy violation. */
 const GOING_AWAY = 1001;
@@ -63,6 +64,7 @@ export function createRelay(options = {}) {
   let sweeper = null;
   let closed = false;
   let secure = false;
+  let originRefusals = 0;
 
   // ------------------------------------------------------------- framing
 
@@ -265,11 +267,24 @@ export function createRelay(options = {}) {
   }
 
   /**
-   * Admission, before the handshake. A refusal here costs the caller one HTTP
-   * response and leaves no state behind: no socket in `connections`, no
-   * pairing code spent, no session.
+   * Admission, before the handshake.
+   *
+   * The origin check happens HERE and not in `onConnection`, because "reject
+   * early, before pairing" has to mean before there is anything to reject
+   * from: no `conn`, no entry in `connections`, no rate-limit budget spent, no
+   * pairing code redeemable. The socket is destroyed while it is still an HTTP
+   * request that never became a WebSocket.
    */
   function onUpgrade(req, socket, head) {
+    if (!originAllowed(req.headers.origin, config.allowedOrigins)) {
+      originRefusals += 1;
+      // The origin itself is NOT logged. It is attacker-controlled text in a
+      // log a person reads, and this file logs counts, never peer identity.
+      log(`upgrade refused: origin not on the allowlist (${originRefusals} so far)`);
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, req));
   }
 
@@ -368,6 +383,7 @@ export function createRelay(options = {}) {
     return {
       connections: connections.size,
       pendingCodes: desk.size(),
+      originRefusals,
       sessions: [...sessions].map((s) => ({
         id: s.id,
         framesRead: s.framesRead,

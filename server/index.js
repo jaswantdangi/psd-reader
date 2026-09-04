@@ -22,9 +22,15 @@
  *      speaking plain `ws://` and everything it can see about a client is
  *      whatever the proxy chose to tell it.
  *        RELAY_HOST=127.0.0.1              # bind the private hop, not the world
- *        RELAY_BEHIND_PROXY=1              # only needed if HOST is not loopback
+ *        RELAY_BEHIND_PROXY=1              # ALWAYS, in this mode
  *        RELAY_TRUSTED_PROXIES=127.0.0.1   # who may set X-Forwarded-For
  *        RELAY_ALLOWED_ORIGINS=https://psd-editor.pages.dev
+ *      `RELAY_BEHIND_PROXY` is not only a TLS statement. It is the operator
+ *      saying "this process is exposed to the internet", and every check that
+ *      only matters when exposed keys off it -- so set it even when the bind
+ *      itself is loopback, which is the shape that would otherwise look private
+ *      while a proxy publishes it to the world. With it set, an origin
+ *      allowlist becomes mandatory and the process will not start without one.
  *      The proxy must pass the upgrade through (`proxy_set_header Upgrade`,
  *      `Connection upgrade`), forward `Origin` unmodified, and append the real
  *      client to `X-Forwarded-For`. If it does not append, the rate limit --

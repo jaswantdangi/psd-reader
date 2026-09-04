@@ -33,3 +33,37 @@ export function isLoopbackHost(host) {
   if (h === 'localhost' || h === '::1') return true;
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
+
+/** `RELAY_ALLOWED_ORIGINS=https://a.example, https://b.example` -> a list. */
+export function parseOriginList(value) {
+  const raw = Array.isArray(value) ? value : String(value ?? '').split(',');
+  return raw.map(normalizeOrigin).filter(Boolean);
+}
+
+/** Origins compare case-insensitively, and carry no path or trailing slash. */
+function normalizeOrigin(value) {
+  return String(value ?? '').trim().toLowerCase().replace(/\/+$/, '');
+}
+
+/**
+ * Is this browser page allowed to open a socket?
+ *
+ * An empty list means UNSET, and unset admits everything. That is only safe
+ * because `config.js` refuses to start with an unset list in every reachable
+ * configuration -- so "unset" can only ever mean a loopback relay a developer
+ * is running on their own machine, where requiring an allowlist would be a
+ * ceremony people learn to switch off.
+ *
+ * A request with NO `Origin` header is admitted. Only browsers send one, and a
+ * browser cannot lie about it; anything else -- the UXP plugin, a script, an
+ * attacker with curl -- can simply omit it, so refusing on absence would lock
+ * out the plugin while stopping nobody. This control exists to stop a WEB PAGE
+ * from reaching the relay using someone's browser. Everything that is not a
+ * browser still meets the pairing code and its rate limit, which is where that
+ * threat is answered.
+ */
+export function originAllowed(origin, allowedOrigins) {
+  if (origin === undefined || origin === null) return true;
+  if (!allowedOrigins.length) return true;
+  return allowedOrigins.includes(normalizeOrigin(origin));
+}
