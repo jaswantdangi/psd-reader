@@ -34,6 +34,48 @@ export function isLoopbackHost(host) {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
 
+/** `RELAY_TRUSTED_PROXIES=10.0.0.1, 10.0.0.2` -> a normalized list. */
+export function parseIpList(value) {
+  const raw = Array.isArray(value) ? value : String(value ?? '').split(',');
+  return raw.map(normalizeIp).filter(Boolean);
+}
+
+/**
+ * The key the pairing rate limit counts against.
+ *
+ * The pairing code is the entire security model, so this key is the whole of
+ * what stands between a six-character code and a brute force. There are two
+ * ways to get it wrong and they fail in opposite directions:
+ *
+ * - Key on `remoteAddress` behind a proxy and EVERY client shares one bucket.
+ *   One attacker spends the budget for the entire internet, and the limit stops
+ *   protecting the thing it exists to protect while still looking like it does.
+ * - Trust `X-Forwarded-For` unconditionally and a client picks its own key by
+ *   inventing a header. That is strictly worse than never reading it: the limit
+ *   is no longer merely coarse, it is bypassable by anyone who can type. A
+ *   fresh key per request means an unlimited number of first attempts.
+ *
+ * So the header is read ONLY when the immediate peer is on the configured
+ * trusted-proxy list, and even then the client is the RIGHTMOST entry that is
+ * not itself a trusted proxy. A proxy APPENDS what it observed, so anything a
+ * spoofing client invented sits to the LEFT of the address the first trusted
+ * proxy actually saw. Walking from the right steps over the invented entries;
+ * taking the leftmost -- the common shortcut -- would read exactly the part the
+ * attacker controls.
+ */
+export function clientKeyFor(req, trustedProxies) {
+  const remote = normalizeIp(req.socket?.remoteAddress) || 'unknown';
+  if (!trustedProxies.length || !trustedProxies.includes(remote)) return remote;
+
+  const chain = String(req.headers?.['x-forwarded-for'] ?? '').split(',').map(normalizeIp).filter(Boolean);
+  for (let i = chain.length - 1; i >= 0; i--) {
+    if (!trustedProxies.includes(chain[i])) return chain[i];
+  }
+  // A trusted peer that forwarded nothing, or a chain of nothing but trusted
+  // proxies. The proxy itself is the most specific honest answer available.
+  return remote;
+}
+
 /** `RELAY_ALLOWED_ORIGINS=https://a.example, https://b.example` -> a list. */
 export function parseOriginList(value) {
   const raw = Array.isArray(value) ? value : String(value ?? '').split(',');

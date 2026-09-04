@@ -279,7 +279,7 @@ test('a public bind starts once TLS terminates here, or once upstream terminatio
   ({ certPath, keyPath }) => {
     const reachable = { port: 0, host: '0.0.0.0', allowedOrigins: ['https://psd-editor.pages.dev'] };
     assert.ok(createRelay({ ...reachable, tlsCertPath: certPath, tlsKeyPath: keyPath }).config.tlsCertPath);
-    assert.equal(createRelay({ ...reachable, behindProxy: true }).config.behindProxy, true,
+    assert.equal(createRelay({ ...reachable, behindProxy: true, trustedProxies: ['10.0.0.1'] }).config.behindProxy, true,
       'the reverse-proxy deployment is supported, but only as an explicit statement');
   },
 ));
@@ -436,6 +436,66 @@ test('the rate limiter blocks a CORRECT code once the budget is spent', () => wi
   assert.equal(frame.code, 'rate-limited', 'brute force is throttled even when the guesser gets lucky');
   assert.equal(ctx.relay.stats().sessions.length, 0);
 }));
+
+/**
+ * Which key the limit counts against, proved through the limit itself.
+ *
+ * These do not read `clientKeyFor` -- they spend a real budget on a real
+ * server and watch whose budget moved. A test that asserted the key directly
+ * would still pass if the relay stopped consulting it.
+ */
+async function guessFrom(ctx, code, forwardedFor) {
+  const plugin = ctx.client(ctx.url, forwardedFor ? { headers: { 'x-forwarded-for': forwardedFor } } : undefined);
+  await plugin.open();
+  plugin.send({ type: 'hello', role: 'plugin', version: '1.0.0' });
+  plugin.send({ type: 'pair', code });
+  return (await plugin.next()).code;
+}
+
+test('a forged X-Forwarded-For from an untrusted peer does not move the rate-limit key', () => withRelay(
+  { rateLimitMax: 2 },
+  async (ctx) => {
+    // No trusted-proxy list, so the header is not read at all. If it were, each
+    // of these would land in its own bucket and nothing would ever be limited
+    // -- a rate limit anyone can opt out of by typing a header.
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '203.0.113.1'), 'no-such-code');
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '203.0.113.2'), 'no-such-code');
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '203.0.113.3'), 'rate-limited',
+      'the budget belongs to the peer the relay can see, not to a header it was handed');
+  },
+));
+
+test("a trusted proxy's X-Forwarded-For does move the key, so one client cannot spend another's budget", () => withRelay(
+  { rateLimitMax: 2, trustedProxies: ['127.0.0.1'] },
+  async (ctx) => {
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '203.0.113.9'), 'no-such-code');
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '203.0.113.9'), 'no-such-code');
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '203.0.113.9'), 'rate-limited');
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '198.51.100.4'), 'no-such-code',
+      'a different client behind the same proxy still has its own budget -- otherwise one attacker locks everyone out');
+  },
+));
+
+test('prepending to a trusted proxy\'s header buys no fresh bucket', () => withRelay(
+  { rateLimitMax: 2, trustedProxies: ['127.0.0.1'] },
+  async (ctx) => {
+    for (let i = 0; i < 2; i++) assert.equal(await guessFrom(ctx, 'ZZZZZZ', '203.0.113.9'), 'no-such-code');
+    // A real proxy APPENDS what it saw, so an invented entry can only ever sit
+    // to the left of it. Reading the leftmost -- the usual shortcut -- would
+    // hand this client a brand new bucket on every request.
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '1.2.3.4, 203.0.113.9'), 'rate-limited');
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '5.6.7.8, 9.9.9.9, 203.0.113.9'), 'rate-limited');
+  },
+));
+
+test('behind a proxy with no trusted-proxy list, the relay refuses to start', () => {
+  assert.throws(
+    () => createRelay({ port: 0, host: '127.0.0.1', behindProxy: true, allowedOrigins: [ALLOWED] }),
+    /RELAY_TRUSTED_PROXIES is empty/,
+    'one shared bucket for the whole internet is not a rate limit, and is not worth starting in',
+  );
+  assert.ok(createRelay({ port: 0, host: '127.0.0.1', behindProxy: true, allowedOrigins: [ALLOWED], trustedProxies: ['10.0.0.1'] }));
+});
 
 test('pair before hello is refused -- the role must be known first', () => withRelay({}, async (ctx) => {
   const plugin = ctx.client();

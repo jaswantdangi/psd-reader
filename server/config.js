@@ -8,7 +8,7 @@
  * does on its behalf.
  */
 
-import { isLoopbackHost, parseOriginList } from './net.js';
+import { isLoopbackHost, parseOriginList, parseIpList } from './net.js';
 
 export const DEFAULTS = {
   host: '127.0.0.1',
@@ -41,9 +41,38 @@ export const DEFAULTS = {
    */
   highWaterBytes: 1024 * 1024,
 
-  /** Pairing attempts per IP per window. A guessable code is the whole model. */
+  /**
+   * Pairing attempts per client key per window, and the window.
+   *
+   * This is not a politeness limit. The pairing code is the entire security
+   * model, so this number is what a brute force has to get through. Sized
+   * against that, with the alphabet and length from `src/sync/protocol.js`:
+   *
+   *   32^6                       = 1,073,741,824 codes
+   *   10 attempts / 60 s         = 50 attempts inside one code's 5-minute life
+   *   P(hit), one key, one code  = 50 / 1.07e9 ~= 1 in 21.5 million
+   *
+   * From ONE source that is about 141 years of continuous guessing to reach an
+   * even chance -- 14.9 million code lifetimes at five minutes each. Getting
+   * there inside a single code's life instead takes roughly **14.9 million
+   * distinct client keys** guessing in parallel.
+   *
+   * Which is exactly why `RELAY_TRUSTED_PROXIES` matters more than this number
+   * does. Raising the limit weakens it linearly; getting the KEY wrong collapses
+   * it outright, in either direction -- one shared bucket for the world, or a
+   * fresh bucket per forged header.
+   */
   rateLimitMax: 10,
   rateLimitWindowMs: 60 * 1000,
+
+  /**
+   * The addresses whose `X-Forwarded-For` this relay believes. Empty means the
+   * header is ignored completely and the immediate peer is the key.
+   *
+   * Nothing is inferred and nothing is assumed private: an unlisted peer's
+   * header is not read at all, however plausible the address in it looks.
+   */
+  trustedProxies: [],
 
   /**
    * TLS. PATHS, never contents -- a private key does not belong in an
@@ -93,6 +122,7 @@ const ENV = {
   highWaterBytes: 'RELAY_HIGH_WATER_BYTES',
   rateLimitMax: 'RELAY_RATE_LIMIT_MAX',
   rateLimitWindowMs: 'RELAY_RATE_LIMIT_WINDOW_MS',
+  trustedProxies: 'RELAY_TRUSTED_PROXIES',
 };
 
 /**
@@ -110,7 +140,7 @@ const HIGH_WATER_FRACTION = 8;
 const STRING_KEYS = new Set(['host', 'tlsCertPath', 'tlsKeyPath']);
 const BOOL_KEYS = new Set(['behindProxy']);
 /** Keys whose environment value is a comma-separated list. */
-const LIST_KEYS = new Set(['allowedOrigins']);
+const LIST_KEYS = new Set(['allowedOrigins', 'trustedProxies']);
 
 const TRUE = new Set(['1', 'true', 'yes', 'on']);
 const FALSE = new Set(['0', 'false', 'no', 'off']);
@@ -188,6 +218,27 @@ function assertOriginPolicy(config) {
 }
 
 /**
+ * Behind a proxy, the rate limit has to have something to key on.
+ *
+ * Every connection then arrives from the proxy's address. Without a trusted
+ * proxy list the header is (correctly) ignored, so all of them share one
+ * bucket: a single attacker exhausts the budget for every real user, and the
+ * limit that is supposed to be standing in front of a six-character code is
+ * instead standing in front of nobody.
+ *
+ * That is not a configuration worth starting in, so it does not start. The fix
+ * is one variable, and it is the variable that makes the whole model work.
+ */
+function assertRateLimitKeyIsMeaningful(config) {
+  if (!config.behindProxy || config.trustedProxies.length > 0) return;
+  throw new Error(
+    `refusing to start: ${ENV.behindProxy} is set but ${ENV.trustedProxies} is empty, `
+    + 'so every client would arrive from the proxy address and share one pairing rate-limit bucket. '
+    + `Set ${ENV.trustedProxies} to the address(es) of the proxy in front of this process.`,
+  );
+}
+
+/**
  * Defaults, then environment, then explicit overrides. Overrides win so tests
  * can drive a relay with small caps without touching the process environment.
  */
@@ -222,8 +273,10 @@ export function resolveConfig(overrides = {}, env = process.env) {
   // A list from the environment arrives as a string and from a test as an
   // array. Normalising here means every consumer sees exactly one shape.
   config.allowedOrigins = parseOriginList(config.allowedOrigins);
+  config.trustedProxies = parseIpList(config.trustedProxies);
 
   assertNoSilentDowngrade(config);
   assertOriginPolicy(config);
+  assertRateLimitKeyIsMeaningful(config);
   return config;
 }

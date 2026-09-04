@@ -38,7 +38,7 @@ import { parseMessage, errorFrame } from '../src/sync/protocol.js';
 import { resolveConfig } from './config.js';
 import { createPairingDesk } from './pairing.js';
 import { loadTlsMaterial } from './tls.js';
-import { originAllowed } from './net.js';
+import { originAllowed, clientKeyFor } from './net.js';
 
 /** Close codes. 1001 going away, 1008 policy violation. */
 const GOING_AWAY = 1001;
@@ -209,7 +209,7 @@ export function createRelay(options = {}) {
   function onPair(conn, frame) {
     if (conn.role !== 'plugin') return refuse(conn, 'unexpected-pair', 'only a plugin redeems a pairing code');
     if (conn.session) return refuse(conn, 'already-paired', 'this socket is already in a session');
-    const result = desk.redeem(frame.code, conn.ip);
+    const result = desk.redeem(frame.code, conn.rateKey);
     if (!result.ok) return refuse(conn, result.code, result.message);
     const appConn = result.owner;
     if (!isOpen(appConn) || appConn.session) {
@@ -289,7 +289,9 @@ export function createRelay(options = {}) {
   }
 
   function onConnection(ws, req) {
-    const conn = { ws, ip: req.socket.remoteAddress ?? 'unknown', role: null, version: null, session: null };
+    // Not `remoteAddress`: behind a proxy that is one address for the whole
+    // internet. Not the raw forwarded header either. See `clientKeyFor`.
+    const conn = { ws, rateKey: clientKeyFor(req, config.trustedProxies), role: null, version: null, session: null };
     connections.add(conn);
     ws.on('message', (data, isBinary) => {
       try { onMessage(conn, data, isBinary); }
