@@ -26,8 +26,28 @@ order of how likely they are to bite:
 4. **`layer.bounds` on groups and on layers with effects** — some versions
    report effect-inclusive bounds. Those would not match the app's bounds, and
    the layer would drop to a looser match tier or fail to match at all.
-5. **`import` beside `require`** — repo modules come in as ES modules, host
+5. **`import` beside `require`** — vendored modules come in as ES modules, host
    modules through `require`. If the panel fails to load at all, start here.
+
+## `vendor/` — why the modules are duplicated
+
+`main.js` imports from `./vendor/`, not `../src/sync/`. UXP treats the folder
+holding `manifest.json` as the plugin root, and a plugin that reaches above it
+may simply fail to load — the panel never appears, with no reason given.
+
+So `scripts/vendor-plugin.mjs` copies three files in (`protocol.js`,
+`identity.js`, `photoshop.js`) and **they are committed**. UDT loads this folder
+straight off disk and runs no npm scripts, so "remember to build first" would be
+a trap rather than a workflow.
+
+There is still one source of truth. Edit `src/sync/`, then:
+
+```
+npm run plugin:vendor
+```
+
+`test/sync.mjs` fails if the two ever drift, so forgetting is caught by the
+suite rather than discovered inside Photoshop.
 
 ## What it does
 

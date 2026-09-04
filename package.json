@@ -26,7 +26,8 @@
     "test:app": "npm --prefix app test -- --watch=false",
     "test:worker": "node test/worker.mjs",
     "relay:dev": "wrangler dev",
-    "relay:deploy": "wrangler deploy"
+    "relay:deploy": "wrangler deploy",
+    "plugin:vendor": "node scripts/vendor-plugin.mjs"
   },
   "keywords": [],
   "author": "",

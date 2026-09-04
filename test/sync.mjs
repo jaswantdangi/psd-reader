@@ -748,4 +748,38 @@ test('document-level changes coalesce without a layerID colliding them', () => {
   assert.deepEqual(collapsed[0].props, { x: 1, y: 1, width: 8, height: 8 });
 });
 
+console.log('\nthe plugin\'s vendored copies\n');
+
+test('plugin/vendor is byte-identical to src/sync, banner aside', () => {
+  // plugin/main.js cannot import ../src/sync/*: UXP treats the folder holding
+  // manifest.json as the plugin root, and a plugin that reaches above it may
+  // simply fail to load, with the panel never appearing and no reason given.
+  // So the modules are copied in, and committed -- UDT loads the folder off
+  // disk and runs no npm scripts, so "remember to build first" would be a trap.
+  //
+  // Committed build output needs a guard or it is just a second copy waiting to
+  // drift. This is that guard: run `node scripts/vendor-plugin.mjs` after any
+  // change to src/sync/, and this test tells you when you forgot.
+  for (const name of ['protocol.js', 'identity.js', 'photoshop.js']) {
+    const source = fs.readFileSync(`src/sync/${name}`, 'utf8');
+    const vendored = fs.readFileSync(`plugin/vendor/${name}`, 'utf8');
+    assert.ok(vendored.startsWith('// GENERATED'), `plugin/vendor/${name} is missing its generated banner`);
+    assert.ok(
+      vendored.endsWith(source),
+      `plugin/vendor/${name} has drifted from src/sync/${name} — run: node scripts/vendor-plugin.mjs`,
+    );
+  }
+});
+
+test('the plugin imports only from its own folder', () => {
+  // The rule the vendoring exists to satisfy. An import that climbs out of
+  // plugin/ is exactly the thing that would stop the panel loading, and it is
+  // an easy edit for someone to make without knowing that.
+  const main = fs.readFileSync('plugin/main.js', 'utf8');
+  const climbing = [...main.matchAll(/^import .* from '([^']+)'/gm)]
+    .map((m) => m[1])
+    .filter((spec) => spec.startsWith('../'));
+  assert.deepEqual(climbing, [], 'plugin/main.js must not import above its own folder');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

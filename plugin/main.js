@@ -16,8 +16,8 @@
  * as working code that happens to be new.
  */
 
-import { PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH } from '../src/sync/protocol.js';
-import { treeFrameFor, changeForNotification, coalesceEvents } from '../src/sync/photoshop.js';
+import { PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH } from './vendor/protocol.js';
+import { treeFrameFor, changeForNotification, coalesceEvents } from './vendor/photoshop.js';
 
 // VERIFY: UXP exposes host modules through `require` even inside an ES module
 // script. Mixed `import`/`require` is what Adobe's own samples do, but it is
