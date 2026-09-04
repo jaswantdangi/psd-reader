@@ -1,7 +1,27 @@
 # Handoff: Clipping, Blend If, GPU Tier, Sync Relay, Test Coverage
 
 **Generated**: 2026-09-04 (updated same day, second pass)
-**Branch**: `phase-1-engine-gpu-memory` — HEAD `cd3c491`, **never pushed** (see Not Yet Done)
+**Branch**: `phase-1-engine-gpu-memory` — pushed, tracking `origin/phase-1-engine-gpu-memory`
+on `github.com/jaswantdangi/psd-reader` (private)
+
+## Live
+
+| | URL |
+|---|---|
+| **App** | https://psd-editor.pages.dev — Cloudflare Pages, production branch |
+| **Relay** | https://psd-sync-relay.jaswantdangi00.workers.dev — Workers + Durable Objects |
+
+Deployed to the Cloudflare account `jaswantdangi00@gmail.com`. The app's
+`<meta name="psd-relay">` points at the relay, and the relay's
+`RELAY_ALLOWED_ORIGINS` is `https://psd-editor.pages.dev` — so the pair only
+works with each other, and any other origin is refused with 403 before a socket
+opens. Both were verified against the deployed instances, not just locally:
+pairing, `tree` and `event` routing, field stripping, the one-way rule, `error`
+travelling back, `peer-gone`, and `/stats` indistinguishable from any other path
+without a token.
+
+`GET /stats` needs a token that has NOT been set — the safe default. Enable with
+`npx wrangler secret put RELAY_STATS_TOKEN`.
 **Status**: In Progress — all engine work green; **three headline claims never verified
 on real hardware**: the GPU tier, the phone, and the UXP plugin
 
@@ -48,10 +68,33 @@ that could be closed without a phone or a GPU — then hand back the two that ca
 - [x] **`server/pairing.js` is runtime-portable** — `crypto.getRandomValues` with rejection sampling instead of `node:crypto.randomInt`, plus `snapshot()`/`restore()` so an eviction cannot reset an attacker's rate-limit budget
 - [x] **The relay URL is no longer hardcoded** — `<meta name="psd-relay">`, read at runtime, so one artifact serves local dev, a Pages preview, production and the Android wrapper
 - [x] **`docs/DEPLOY-CLOUDFLARE.md`** — what deploys where, what it costs, and what Cloudflare cannot host
+- [x] **Deployed and verified live** — Pages and the Worker, both driven end to end against the deployed instances. See the Live table at the top
+- [x] **Pushed** — the repo existed and was private all along; see the corrected entry below
+- [x] **CI** (`.github/workflows/test.yml`) — engine and app jobs. Fetches the corpus first, because `fixtures/` is gitignored and every runner starts empty
+- [x] **Android release signing configured** — `signingConfigs` reading a gitignored `keystore.properties`. **No key was created**: an upload key cannot be regenerated, so it is made once by a person. A release build without it still configures and produces an unsigned APK rather than failing
+- [x] **The plugin points at the deployed relay** — exact host in `manifest.json`; UXP 7.4+ rejects wildcard TLDs. Localhost entries kept for `wrangler dev`
 
 ## Not Yet Done
 
-- [ ] **`origin` points at a repository that does not exist.** `github.com/jaswantdangi/psd-reader` resolves for none of the three accounts `gh` can see (`jaswantdangi`, `dangijaswant`, `hellomipl`). The branch is **181 commits ahead with no upstream** and has never been pushed. Creating a repo publishes all of it, and the owner/visibility choice is not one to make on someone's behalf — so it was left. `git push -u origin phase-1-engine-gpu-memory` is the whole fix once it exists
+- [x] ~~`origin` points at a repository that does not exist.~~ **It did exist.** That
+  claim was wrong, and the way it was wrong is worth keeping: `gh` had **four**
+  accounts logged in, not three — an earlier `gh auth status | head -10` truncated the
+  list — and the active one (`dangijaswant`) cannot see a **private** repo owned by
+  `jaswantdangi`. So `gh repo view` answered "Could not resolve to a Repository" for a
+  repo that was there all along. Querying as `jaswantdangi` (id 79034803, the same id
+  as the commit author) found it immediately. **Lesson: a 404 from a permissions
+  boundary is indistinguishable from a 404 from absence.** Pushed; the branch now
+  tracks `origin/phase-1-engine-gpu-memory`
+- [ ] **CI's `app` job is RED, and the branch genuinely does not compile from a clean
+  clone.** `app/src/app/editor/editor.page.ts:965` calls `this.seg.tool.set('')`, and the
+  **committed** `segment.service.ts` has no `tool` property — it exists only in the other
+  session's **uncommitted** working copy (`readonly tool = signal<...>('')`, line 61). So
+  `ng build` fails with `TS2339: Property 'tool' does not exist on type 'SegmentService'`.
+  This predates every commit in this pass: `git show 6b576cb:app/.../editor.page.ts`
+  already has the call. It has been invisible because every local build patches it from
+  the working tree. **The fix is one line and it belongs to the other session** — commit
+  `segment.service.ts`. Nothing here should commit it on their behalf; CI is telling the
+  truth and should stay red until they do
 - [ ] **Run the GPU conformance page** — no GLSL in this repo has *ever* been compiled
 - [ ] **Run the UXP plugin** — written this pass, never loaded. `plugin/README.md` ranks the five seams most likely to be wrong
 - [ ] **Run on a phone** — Phase 1's definition of done requires it; never happened
