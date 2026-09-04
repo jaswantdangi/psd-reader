@@ -24,6 +24,9 @@ on:
 jobs:
   engine:
     runs-on: ubuntu-latest
+    # A hung suite should cost minutes, not the 360-minute default. The engine
+    # suite runs in well under a minute; anything past this is stuck.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -61,6 +64,7 @@ jobs:
 
   app:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 

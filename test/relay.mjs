@@ -69,7 +69,16 @@ function client(url, options = {}) {
 
   return {
     ws,
-    open: () => new Promise((res, rej) => { ws.on('open', res); ws.on('error', rej); }),
+    // Timed, because an un-timed `open` is an infinite hang rather than a
+    // failed test. A refused connection errors and a live one opens, but a
+    // socket that reaches something which accepts TCP and never completes the
+    // upgrade does NEITHER -- and that is what stalled a CI run for fourteen
+    // minutes on a suite that takes forty seconds.
+    open: (timeoutMs = 5000) => new Promise((res, rej) => {
+      const t = setTimeout(() => rej(new Error(`socket did not open within ${timeoutMs}ms`)), timeoutMs);
+      ws.on('open', () => { clearTimeout(t); res(); });
+      ws.on('error', (e) => { clearTimeout(t); rej(e); });
+    }),
     next: (timeoutMs = 5000) => new Promise((res, rej) => {
       if (queue.length) return res(queue.shift());
       const t = setTimeout(() => rej(new Error('no frame arrived within ' + timeoutMs + 'ms')), timeoutMs);
@@ -942,18 +951,25 @@ test('the relay contains no second implementation of anything in src/', () => {
 // -------------------------------------------------------------- entrypoint
 
 test('the shipped entrypoint binds a real port from the environment and routes', async () => {
-  const port = 18000 + Math.floor(Math.random() * 2000);
+  // PORT 0, not a random one in a range. A guessed port can collide with
+  // whatever else is on a shared CI runner, and colliding with something that
+  // accepts TCP but never speaks WebSocket is indistinguishable from success
+  // until the handshake never finishes. Letting the OS choose cannot collide,
+  // and the child already prints the port it actually got -- which is also a
+  // stronger assertion, because it proves the URL it REPORTS is the one it
+  // bound rather than the one it was asked for.
   const child = spawn(process.execPath, [path.join(serverDir, 'index.js')], {
-    env: { ...process.env, RELAY_PORT: String(port), RELAY_HOST: '127.0.0.1' },
+    env: { ...process.env, RELAY_PORT: '0', RELAY_HOST: '127.0.0.1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
   child.stdout.on('data', (d) => { out += d.toString(); });
   child.stderr.on('data', (d) => { out += d.toString(); });
   try {
-    await until(() => out.includes('listening'), `the child to announce it is listening (saw: ${out})`, 10_000);
+    await until(() => /listening on ws:\/\/127\.0\.0\.1:\d+/.test(out),
+      `the child to announce a bound port (saw: ${out})`, 10_000);
     assert.ok(out.includes('127.0.0.1'), 'it binds loopback, never a public interface');
-    const url = `ws://127.0.0.1:${port}`;
+    const url = out.match(/ws:\/\/127\.0\.0\.1:\d+/)[0];
     const app = client(url);
     const plugin = client(url);
     await app.open();

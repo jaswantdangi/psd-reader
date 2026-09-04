@@ -74,6 +74,30 @@ that could be closed without a phone or a GPU — then hand back the two that ca
 - [x] **Android release signing configured** — `signingConfigs` reading a gitignored `keystore.properties`. **No key was created**: an upload key cannot be regenerated, so it is made once by a person. A release build without it still configures and produces an unsigned APK rather than failing
 - [x] **The plugin points at the deployed relay** — exact host in `manifest.json`; UXP 7.4+ rejects wildcard TLDs. Localhost entries kept for `wrangler dev`
 
+### What CI found on its first three runs
+
+Adding CI paid for itself immediately. Three real defects, none of which any local
+run could have surfaced, because every local machine already had the state that hid them:
+
+1. **`npm ci` could not install.** `wrangler` was added to root `package.json` without
+   updating `package-lock.json`. Mine, fixed.
+2. **`scripts/fetch-fixtures.mjs` never downloaded the `expected` fixtures.** The corpus
+   has two kinds — `<name>.src.psd` (21, the accuracy corpus) and `<name>.expected.psd`
+   (9, Photoshop's own re-save) — and the script only ever fetched the first. So **a
+   clean clone has never been able to run the full engine suite**; `test/text-engine.mjs`
+   dies with `ENOENT: fixtures/text.expected.psd`. Invisible on every machine that
+   already had them, which was every machine this had ever run on. All nine upstream
+   URLs were verified 200 before the fix landed.
+3. **A relay test assumed two async steps were one.** `a vanished peer fails the send
+   cleanly` awaited `sessions.length === 0` and then asserted `connections === 0`
+   *outright*. A session leaves `sessions` on teardown; a socket leaves `connections`
+   when its own close event fires — two separate turns of the loop. Passed on a fast
+   machine for months, failed `1 !== 0` on the first runner it met.
+
+The pattern in all three: **state that a developer machine accumulates and a clean
+runner does not.** That is the entire value of the CI job, and it is worth remembering
+before dismissing a red build as "works on mine".
+
 ## Not Yet Done
 
 - [x] ~~`origin` points at a repository that does not exist.~~ **It did exist.** That
