@@ -67,6 +67,16 @@ export function blankLayer(project, fields = {}) {
     selfSupplied: false,
     mask: null,
     clipping: false,
+    /**
+     * Present, and undefined. A created layer has no Blend If ranges -- it came
+     * from no file -- but toLayer assigns this key on every layer it builds, so
+     * omitting it here would make a created layer DISTINGUISHABLE from a loaded
+     * one by its key set alone. That is the invariant test/creative.mjs guards,
+     * and it is not pedantry: payloadFor once stripped pixels off selfSupplied
+     * layers on exactly this kind of divergence, and inserted images failed
+     * export with NO_IDENTITY.
+     */
+    blendingRanges: undefined,
     groupPath: '',
     groupWarned: false,
     adjust: null,
