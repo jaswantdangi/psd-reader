@@ -74,10 +74,14 @@ that could be closed without a phone or a GPU — then hand back the two that ca
 - [x] **Android release signing configured** — `signingConfigs` reading a gitignored `keystore.properties`. **No key was created**: an upload key cannot be regenerated, so it is made once by a person. A release build without it still configures and produces an unsigned APK rather than failing
 - [x] **The plugin points at the deployed relay** — exact host in `manifest.json`; UXP 7.4+ rejects wildcard TLDs. Localhost entries kept for `wrangler dev`
 
-### What CI found on its first three runs
+### What CI found on its first four runs
 
-Adding CI paid for itself immediately. Three real defects, none of which any local
-run could have surfaced, because every local machine already had the state that hid them:
+**Final state: `engine` is GREEN on a clean runner — 983 assertions, corpus fetched
+from scratch, all 21 fixtures within their ceilings. `app` is RED, for a reason that
+belongs to the other session (see Not Yet Done).**
+
+Adding CI paid for itself immediately. Five real defects, none of which any local run
+could have surfaced, because every local machine already had the state that hid them:
 
 1. **`npm ci` could not install.** `wrangler` was added to root `package.json` without
    updating `package-lock.json`. Mine, fixed.
@@ -94,9 +98,23 @@ run could have surfaced, because every local machine already had the state that 
    when its own close event fires — two separate turns of the loop. Passed on a fast
    machine for months, failed `1 !== 0` on the first runner it met.
 
-The pattern in all three: **state that a developer machine accumulates and a clean
-runner does not.** That is the entire value of the CI job, and it is worth remembering
-before dismissing a red build as "works on mine".
+4. **`client.open()` in `test/relay.mjs` had no timeout**, so the suite could hang
+   forever rather than fail. It stalled a runner for **14 minutes on a suite that takes
+   40 seconds**. A refused connection errors and a live one opens; a socket that reaches
+   something accepting TCP but never completing the upgrade does neither.
+5. **That test guessed its port** — `18000 + random(2000)`. On a shared runner that can
+   land on an unrelated listener, which *is* the accepts-TCP-but-never-upgrades case
+   above. It now binds `RELAY_PORT=0` and reads the port back out of the child's own
+   announcement: cannot collide, and a stronger assertion besides, because it proves the
+   URL the entrypoint **reports** is the one it actually **bound**.
+
+Both jobs now carry `timeout-minutes: 15`, so a future hang costs minutes rather than
+GitHub's 360-minute default.
+
+The pattern in all five: **state or luck that a developer machine has and a clean runner
+does not** — an installed dependency, a downloaded file, a fast event loop, a free port.
+That is the entire value of the CI job, and it is worth remembering before dismissing a
+red build as "works on mine".
 
 ## Not Yet Done
 
