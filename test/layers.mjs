@@ -373,10 +373,34 @@ test('a document with nothing clipped raises no clipping warning', () => {
   assert.equal(project.warnings.some((x) => /clipped/i.test(x)), false);
 });
 
-test('vector masks with no raster are counted and warned about', () => {
-  // Those three layers render UNMASKED, everywhere, silently — until now.
-  const w = createProject(vectorsDoc, 'vectors.src.psd').warnings.find((x) => /vector mask/i.test(x));
-  assert.ok(w, 'a vector-masked layer must raise a document warning');
+test('a vector path already baked into pixels raises nothing', () => {
+  // This test used to assert the opposite, on the premise that those three
+  // layers "render UNMASKED, everywhere, silently". They do not. Photoshop
+  // wrote their pixels already cropped to the path, and vectors.src.psd
+  // composites bit-exact against its own embedded preview -- 0.00% real diff,
+  // maxDelta 0, which test/composite.mjs has been reporting all along.
+  //
+  // So the warning was firing on three correct layers and telling the user to
+  // distrust a picture that matches Photoshop pixel for pixel. The old
+  // assertion pinned that as intended behaviour, which is why it had to be
+  // rewritten rather than deleted: the file is the record of what we believe,
+  // and what we believed here was wrong.
+  const warnings = createProject(vectorsDoc, 'vectors.src.psd').warnings;
+  assert.equal(warnings.some((x) => /vector/i.test(x)), false);
+});
+
+test('a vector path with no pixels to draw is still disclosed', () => {
+  // The case the warning is actually for, kept on a real document so the
+  // silence above can never be mistaken for the check having been removed.
+  // Strip the pixels and there is nothing left to draw the path onto.
+  const stripped = {
+    ...vectorsDoc,
+    children: vectorsDoc.children.map((n) => (
+      n.vectorMask ? { ...n, imageData: undefined, proxyData: undefined } : n
+    )),
+  };
+  const w = createProject(stripped, 'vectors.src.psd').warnings.find((x) => /vector/i.test(x));
+  assert.ok(w, 'a live shape with no pixels must still raise a warning');
   assert.match(w, /3 layers/);
 });
 
