@@ -9,10 +9,12 @@ import {
   compareBuffers, flattenOnto, createSandwichCache, renderSandwiched, sandwichStateFor, SANDWICH_FLAT_ABOVE, SANDWICH_BELOW_ONLY,
   conformancePattern, conformanceProject, compareRenders, verdictFor, CONFORMANCE_MODES,
   selectTier, tierOverrideFrom, probeCapabilities, TIER_WORKER_GPU, TIER_MAIN_GPU, TIER_JS,
+  readDocument, installPlainPixelBackend,
 } from '../src/index.js';
 import { createAdjust, HSL_BANDS } from '../src/adjust/ops.js';
 import { buildLut } from '../src/adjust/lut.js';
 import { clipRunEnd } from '../src/render.js';
+import { parseBlendIf } from '../src/composite.js';
 import { buildDrawPlan, GPU_BUDGET_BYTES } from '../src/gpu/plan.js';
 // Not re-exported through src/index.js: these two are internal to the renderer,
 // and the barrel is owned by another session.
@@ -1744,6 +1746,107 @@ test('probeGpu reports no GPU in Node, and selectTier agrees', () => {
   assert.equal(caps.webgl2, false);
   assert.equal(caps.probe, null);
   assert.equal(selectTier(caps).tier, TIER_JS);
+});
+
+console.log('\nblend if refuses the tier\n');
+
+/**
+ * The real fixture, loaded the way test/clip.mjs loads one and for the same
+ * reason: a synthetic `blendingRanges` object proves the gate reads the field,
+ * but only the file proves it reads the field ag-psd actually writes — the
+ * typo'd `compositeGraphBlendDestinationRange` included.
+ *
+ * `pixels: 'eager'`, because the plan skips a layer with no pixels, and a gate
+ * that only fires on layers that draw cannot be tested with a stack that does
+ * not draw. Loaded up here because `test` is synchronous.
+ */
+installPlainPixelBackend();
+const blendIfDoc = await readDocument(
+  new Uint8Array(readFileSync(new URL('../fixtures/blend-if.src.psd', import.meta.url))),
+  { pixels: 'eager', embedded: false, metadata: false });
+const blendIfProject = createProject(blendIfDoc, 'blend-if.src.psd');
+
+test('the real blend-if fixture falls back instead of rendering without it', () => {
+  // blendInto multiplies `as` by a factor read from BOTH the source and the
+  // destination pixel, through a per-channel four-stop ramp plus a Gray
+  // composite. glsl.js has no such stage, so a GPU that drew this document
+  // anyway would render it as though every range were default — a plausible
+  // frame that disagrees with the inspector and with renderProject, silently,
+  // which is the worst of the three outcomes.
+  const plan = buildDrawPlan(blendIfProject);
+  assert.equal(plan.ok, false, 'this document must never reach the GPU tier');
+  assert.match(plan.reason, /Blend If/);
+  assert.match(plan.reason, /JS tier/, 'the refusal has to say where it goes instead');
+  assert.equal(plan.steps.length > 0, true, 'the walk still ran — the refusal is a verdict, not a crash');
+
+  // And it is genuinely the blend-if gate, not some other refusal riding along.
+  assert.ok(!/texture size|budget|overlay/i.test(plan.reason), plan.reason);
+});
+
+test('the refusal names a layer that actually carries ranges', () => {
+  // A reason nobody can act on is a bug report nobody can act on. The named
+  // layer has to be one parseBlendIf agrees about.
+  const plan = buildDrawPlan(blendIfProject);
+  const named = blendIfProject.layers.filter((l) => plan.reason.startsWith(l.name));
+  assert.equal(named.length > 0, true, `no layer is named in: ${plan.reason}`);
+  assert.ok(parseBlendIf(named[0]), 'the layer the reason names must really carry ranges');
+});
+
+test('a default range is free: the same document without ranges plans fine', () => {
+  // parseBlendIf returns null and allocates nothing on the twenty of twenty-one
+  // fixtures that do not use the feature, so this gate must cost them nothing
+  // and refuse them nothing.
+  const project = createProject(blendIfDoc, 'blend-if.src.psd');
+  for (const layer of project.layers) delete layer.blendingRanges;
+  const plan = buildDrawPlan(project, { maxTextureSize: 8192 });
+  assert.equal(plan.ok, true, plan.reason || '');
+  assert.ok(plan.steps.some((s) => s.kind === 'draw'));
+});
+
+test('the gate reads parseBlendIf, and does not re-derive what a default is', () => {
+  // What counts as a default range — 0/0/255/255 per stop, across the Gray pair
+  // and up to three channel pairs — now has exactly one implementation and has
+  // to keep having one. A second copy here would decide differently the first
+  // time ag-psd's field names or the channel-order assumption moved.
+  const withRanges = (ranges) => {
+    const project = clipProject([{}]);
+    project.layers[0].blendingRanges = ranges;
+    return buildDrawPlan(project);
+  };
+
+  assert.equal(withRanges(undefined).ok, true, 'no ranges at all');
+  assert.equal(withRanges({}).ok, true, 'an empty ranges object is default');
+  assert.equal(withRanges({
+    compositeGrayBlendSource: [0, 0, 255, 255],
+    compositeGraphBlendDestinationRange: [0, 0, 255, 255],
+    ranges: [{ sourceRange: [0, 0, 255, 255], destRange: [0, 0, 255, 255] }],
+  }).ok, true, 'every stop at its default must not refuse');
+
+  // One non-default stop anywhere is enough, on either side and on either the
+  // Gray composite or a colour channel.
+  for (const ranges of [
+    { compositeGrayBlendSource: [30, 30, 255, 255] },
+    { compositeGraphBlendDestinationRange: [0, 0, 200, 200] },
+    { ranges: [{ sourceRange: [10, 10, 255, 255] }] },
+    { ranges: [{}, {}, { destRange: [0, 0, 240, 240] }] },
+  ]) {
+    const plan = withRanges(ranges);
+    assert.equal(plan.ok, false, JSON.stringify(ranges));
+    assert.match(plan.reason, /Blend If/);
+  }
+});
+
+test('a layer the plan already skips does not refuse the whole frame', () => {
+  // The gate lives where the overlay gate lives — inside the step builder, so
+  // it sees only layers that actually draw. A hidden layer's ranges are never
+  // applied by renderProject either, and refusing over one would send a
+  // document to the JS tier for a layer neither tier draws.
+  const project = clipProject([{}, { hidden: true }]);
+  project.layers[1].blendingRanges = { compositeGrayBlendSource: [40, 40, 255, 255] };
+  assert.equal(buildDrawPlan(project).ok, true, 'a hidden layer takes its ranges with it');
+
+  project.layers[1].visible = true;
+  assert.equal(buildDrawPlan(project).ok, false, 'and brings them back when it draws');
 });
 
 console.log('\nthe conformance route\n');

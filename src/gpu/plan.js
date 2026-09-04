@@ -36,6 +36,10 @@
  *   - an overlay adjustment, which `ops.js` marks class P with `glsl: null` —
  *     there is no shader for it, and drawing the layer anyway would silently
  *     drop the gradient;
+ *   - a layer carrying Blend If ranges, which `blendInto` applies from BOTH the
+ *     source and the destination pixel and which glsl.js has no stage for. The
+ *     GPU would render it as though the ranges were default: a plausible frame
+ *     that disagrees with the inspector and with `renderProject`;
  *   - a canvas or a source texture past `maxTextureSize`, because tiled upload
  *     is not implemented and clamping would render the top-left corner of the
  *     document at full size and call it a frame;
@@ -43,6 +47,7 @@
  */
 import { programNameFor } from './modes.js';
 import { clipRunEnd } from '../render.js';
+import { parseBlendIf } from '../composite.js';
 import { isNeutralAdjust, adjustCostOf, lutFor } from '../adjust/lut.js';
 import { HSL_BANDS } from '../adjust/ops.js';
 
@@ -192,6 +197,32 @@ export function buildDrawPlan(project, options = {}) {
         `${layer.name} carries an overlay adjustment, which has no GPU program: ` +
         'a per-layer overlay blend mode multiplied by the layer\'s own is a 26x26 ' +
         'program matrix that programNameFor cannot express. Render this document on the JS tier.';
+
+    // Blend If. `blendInto` multiplies `as` by a factor read from BOTH the
+    // source and the destination pixel, through a four-stop ramp per channel
+    // plus a Gray composite -- and glsl.js has no such stage, so a document
+    // using it would render on the GPU exactly as if the ranges were default:
+    // a plausible frame that disagrees with the inspector and with
+    // renderProject, silently, which is the worst of the three outcomes.
+    //
+    // REFUSED RATHER THAN IMPLEMENTED, on purpose. The JS tier is correct and
+    // merely slower, the fallback already exists and is tested, and a second
+    // implementation of the ramp is exactly the drift this file's own docstring
+    // exists to prevent.
+    //
+    // `parseBlendIf` is IMPORTED, never re-derived. What counts as a default
+    // range (0/0/255/255, per stop, across the Gray pair and up to three
+    // channel pairs) now has one implementation and has to keep having one; a
+    // second copy here would decide differently the first time ag-psd's field
+    // names or the channel-order assumption changed. It returns null and
+    // allocates nothing on the twenty of twenty-one fixtures that do not use
+    // the feature, so this check is free for everything that does not.
+    if (!reason && parseBlendIf(layer))
+      reason =
+        `${layer.name} carries Blend If ranges, which have no GPU stage: the factor ` +
+        'depends on the destination pixel through a per-channel four-stop ramp that ' +
+        'glsl.js does not implement, and drawing the layer anyway would render it as ' +
+        'though the ranges were default. Render this document on the JS tier.';
 
     if (source.width > maxTextureSize || source.height > maxTextureSize)
       oversize = oversize || { what: `${layer.name} source`, w: source.width, h: source.height };
