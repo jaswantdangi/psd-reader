@@ -11,13 +11,16 @@ import fs from 'fs';
 import { readDocument } from '../src/index.js';
 import { createProject } from '../src/edit.js';
 import {
-  matchLayers, MATCH_TIERS, UNMATCHED_REASONS, boundsOf, groupPathOf,
+  matchLayers, MATCH_TIERS, UNMATCHED_REASONS, boundsOf, groupPathOf, appIdFor,
 } from '../src/sync/identity.js';
 import {
   MESSAGE_TYPES, PROTOCOL_ERRORS, PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH,
   validateMessage, parseMessage, classifyChange, UNMAPPABLE_CHANGES,
   translateEvent, translateEvents,
 } from '../src/sync/protocol.js';
+import {
+  normaliseKind, flattenLayerTree, treeFrameFor, changeForNotification, coalesceEvents,
+} from '../src/sync/photoshop.js';
 
 let passed = 0;
 const test = (name, fn) => {
@@ -241,8 +244,8 @@ console.log('\nprotocol: validating every inbound frame\n');
 
 const helloOk = { type: 'hello', role: 'plugin', version: '1.0.0' };
 
-test('each of the five frame types validates and normalises', () => {
-  assert.deepEqual(MESSAGE_TYPES, ['hello', 'pair', 'paired', 'event', 'error']);
+test('each of the six frame types validates and normalises', () => {
+  assert.deepEqual(MESSAGE_TYPES, ['hello', 'pair', 'paired', 'tree', 'event', 'error']);
   assert.deepEqual(validateMessage(helloOk).message, helloOk);
   assert.deepEqual(validateMessage({ type: 'pair', code: 'K7M2PQ' }).message, { type: 'pair', code: 'K7M2PQ' });
   assert.deepEqual(
@@ -522,6 +525,227 @@ test('every Photoshop entry with no app layer has a STRUCTURAL reason', () => {
   }
   assert.ok((tally.reasons.group ?? 0) > 0, 'the fixtures include grouped documents');
   assert.ok((tally.reasons.adjustment ?? 0) > 0, 'the fixtures include adjustment layers');
+});
+
+console.log('\nprotocol: the layer tree frame\n');
+
+const treeLayer = (over = {}) => ({
+  layerID: 7, name: 'Sky', kind: 'pixel',
+  bounds: { left: 0, top: 0, right: 10, bottom: 10 }, groupPath: ['Backgrounds'], ...over,
+});
+const treeOk = (over = {}) => ({
+  type: 'tree',
+  document: { name: 'poster.psd', width: 100, height: 80 },
+  layers: [treeLayer()],
+  ...over,
+});
+
+test('a tree frame validates and normalises', () => {
+  assert.deepEqual(validateMessage(treeOk()).message, treeOk());
+});
+
+test('a tree frame is rebuilt from known fields only', () => {
+  // Same discipline as every other frame: what the plugin invents does not
+  // reach the app just because the plugin sent it.
+  const dirty = treeOk({
+    layers: [treeLayer({ opacity: 0.5, secret: 'x' })],
+    document: { name: 'poster.psd', width: 100, height: 80, path: '/Users/someone/poster.psd' },
+  });
+  const out = validateMessage(dirty).message;
+  assert.deepEqual(Object.keys(out.layers[0]).sort(), ['bounds', 'groupPath', 'kind', 'layerID', 'name']);
+  assert.deepEqual(Object.keys(out.document).sort(), ['height', 'name', 'width'],
+    'a local filesystem path is not part of this protocol and must not ride along');
+});
+
+test('an empty layer list is a legitimate tree, not a fault', () => {
+  // An empty document is a real state, and it has to reconcile to "nothing
+  // matched" rather than to a parse error the user cannot act on.
+  assert.equal(validateMessage(treeOk({ layers: [] })).ok, true);
+});
+
+test('groupPath is optional and normalises to an empty array', () => {
+  const l = treeLayer();
+  delete l.groupPath;
+  assert.deepEqual(validateMessage(treeOk({ layers: [l] })).message.layers[0].groupPath, []);
+});
+
+test('a tree frame is refused field by field, naming the layer at fault', () => {
+  const bad = [
+    [treeOk({ document: undefined }), 'tree.document must be an object'],
+    [treeOk({ document: { name: 'x', width: 'wide', height: 80 } }), 'tree.document.width and .height must be finite numbers'],
+    [treeOk({ layers: 'Sky' }), 'tree.layers must be an array'],
+    [treeOk({ layers: [treeLayer(), treeLayer({ layerID: null })] }), 'tree.layers[1].layerID must be a number or string'],
+    [treeOk({ layers: [treeLayer({ layerID: Number.NaN })] }), 'tree.layers[0].layerID must be finite'],
+    [treeOk({ layers: [treeLayer({ name: 7 })] }), 'tree.layers[0].name must be a string'],
+    [treeOk({ layers: [treeLayer({ kind: '' })] }), 'tree.layers[0].kind must be a non-empty string'],
+    [treeOk({ layers: [treeLayer({ bounds: { left: 0, top: 0, right: 10 } })] }), 'tree.layers[0].bounds must be {left,top,right,bottom} finite numbers'],
+    [treeOk({ layers: [treeLayer({ groupPath: [1, 2] })] }), 'tree.layers[0].groupPath must be an array of strings'],
+  ];
+  for (const [frame, message] of bad) {
+    const r = validateMessage(frame);
+    assert.equal(r.ok, false, `should have been refused: ${JSON.stringify(frame).slice(0, 70)}`);
+    assert.equal(r.error.code, PROTOCOL_ERRORS.BAD_FIELD);
+    assert.equal(r.error.message, message);
+  }
+});
+
+test('a validated tree feeds matchLayers without further shaping', () => {
+  // The point of the frame. If these two disagree about field names the
+  // handshake fails at run time, on a machine with Photoshop on it, which is
+  // the hardest possible place to find out.
+  const frame = validateMessage(treeOk({
+    layers: [treeLayer(), treeLayer({ layerID: 8, name: 'Sea', bounds: { left: 0, top: 10, right: 10, bottom: 20 } })],
+  })).message;
+  const appLayers = [
+    { id: 'a1', sourceIndex: 0, name: 'Sky', kind: 'raster', x: 0, y: 0, w: 10, h: 10, groupPath: ['Backgrounds'] },
+    { id: 'a2', sourceIndex: 1, name: 'Sea', kind: 'raster', x: 0, y: 10, w: 10, h: 10, groupPath: ['Backgrounds'] },
+  ];
+  const mapping = matchLayers(frame.layers, appLayers);
+  assert.equal(mapping.matched.length, 2, 'both layers reconciled straight off the wire');
+  assert.equal(mapping.unmatched.length, 0);
+  assert.equal(appIdFor(mapping, 7), 'a1');
+  assert.equal(appIdFor(mapping, 8), 'a2');
+});
+
+console.log('\nphotoshop: the plugin\'s decisions, without Photoshop\n');
+
+const hostLayer = (id, name, kind, [left, top, right, bottom], layers) =>
+  ({ id, name, kind, bounds: { left, top, right, bottom }, ...(layers ? { layers } : {}) });
+
+test('adjustment layers collapse to one kind, so identity can report them', () => {
+  // Photoshop has no single `adjustment` kind -- it has one per adjustment
+  // type. identity.js compares against `adjustment`, so the collapse has to
+  // happen before the frame is built or every Curves layer looks like a raster.
+  for (const k of ['curves', 'levels', 'brightnessContrast', 'colorLookup'])
+    assert.equal(normaliseKind(k), 'adjustment', `${k} should read as an adjustment`);
+  assert.equal(normaliseKind('group'), 'group');
+  assert.equal(normaliseKind('groupEnd'), 'group');
+  assert.equal(normaliseKind('pixel'), 'pixel', 'anything else is passed through for kindOf to reduce');
+  assert.equal(normaliseKind(undefined), '');
+});
+
+test('an unlisted adjustment kind fails towards disclosure, not towards a wrong edit', () => {
+  // The safe direction. It reads as a raster, matches no app layer, and is
+  // reported unmatched -- rather than being mapped onto something.
+  const result = matchLayers(
+    [{ layerID: 1, name: 'Some New Adjustment 1', kind: normaliseKind('futureAdjustment'), bounds: { left: 0, top: 0, right: 10, bottom: 10 }, groupPath: [] }],
+    [app(11, 0, 'Background', 'raster', [0, 0, 100, 100])],
+  );
+  assert.equal(result.matched.length, 0, 'it must not be mapped onto an unrelated layer');
+  assert.equal(result.unmatched.some((u) => u.layerID === 1), true, 'and it must be reported');
+});
+
+test('the tree walk keeps groups and builds a group path', () => {
+  const flat = flattenLayerTree([
+    hostLayer(1, 'Background', 'pixel', [0, 0, 100, 100]),
+    hostLayer(2, 'Card', 'group', [0, 0, 50, 50], [
+      hostLayer(3, 'fill', 'pixel', [0, 0, 50, 50]),
+      hostLayer(4, 'Inner', 'group', [5, 5, 20, 20], [hostLayer(5, 'dot', 'pixel', [5, 5, 20, 20])]),
+    ]),
+  ]);
+  assert.deepEqual(flat.map((l) => l.layerID), [1, 2, 3, 4, 5]);
+  assert.deepEqual(flat.map((l) => l.groupPath), [[], [], ['Card'], ['Card'], ['Card', 'Inner']]);
+  assert.equal(flat.find((l) => l.layerID === 2).kind, 'group',
+    'groups are kept so matchLayers can name them rather than go quiet');
+});
+
+test('a layer with unreadable bounds is dropped rather than sent unmatched-shaped', () => {
+  const flat = flattenLayerTree([hostLayer(1, 'ok', 'pixel', [0, 0, 10, 10]), { id: 2, name: 'no bounds', kind: 'pixel' }]);
+  assert.deepEqual(flat.map((l) => l.layerID), [1]);
+});
+
+test('UnitValue bounds are read as numbers', () => {
+  // UXP returns `{_value,_unit}` in some versions and plain numbers in others.
+  const flat = flattenLayerTree([{
+    id: 1, name: 'Sky', kind: 'pixel',
+    bounds: { left: { _value: 0, _unit: 'px' }, top: { _value: 0 }, right: { _value: 10 }, bottom: { _value: 10 } },
+  }]);
+  assert.deepEqual(flat[0].bounds, { left: 0, top: 0, right: 10, bottom: 10 });
+});
+
+test('the tree frame it builds is one the protocol accepts', () => {
+  // The seam that cannot be checked by reading: the plugin builds it, the
+  // relay validates it, and they are written in different files.
+  const frame = treeFrameFor({ name: 'poster.psd', width: 100, height: 80 },
+    [hostLayer(1, 'Background', 'pixel', [0, 0, 100, 100]),
+     hostLayer(2, 'Card', 'group', [0, 0, 50, 50], [hostLayer(3, 'fill', 'pixel', [0, 0, 50, 50])])]);
+  const checked = validateMessage(frame);
+  assert.equal(checked.ok, true, checked.ok ? '' : checked.error.message);
+  assert.deepEqual(checked.message, frame, 'and survives validation unchanged');
+});
+
+test('an empty document still builds a valid frame', () => {
+  assert.equal(validateMessage(treeFrameFor({ name: 'blank.psd', width: 10, height: 10 }, [])).ok, true);
+});
+
+test('Photoshop\'s vocabulary is translated into this protocol\'s', () => {
+  assert.equal(changeForNotification('move').change, 'move');
+  assert.equal(changeForNotification('delete').change, 'delete');
+  assert.equal(changeForNotification('gaussianBlur').change, 'filter');
+  assert.equal(changeForNotification('setLayerEffects').change, 'layerEffect');
+});
+
+test('a `set` is disambiguated by its descriptor, never by guessing', () => {
+  // Photoshop uses one event name for opacity, blend mode, visibility and
+  // rename. Which it was is only in the payload.
+  assert.equal(changeForNotification('set', { to: { opacity: 40 } }).change, 'opacity');
+  assert.equal(changeForNotification('set', { to: { mode: 'multiply' } }).change, 'blendMode');
+  assert.equal(changeForNotification('set', { to: { visible: false } }).change, 'visibility');
+  assert.equal(changeForNotification('set', { to: { name: 'Hero' } }).change, 'rename');
+  assert.equal(changeForNotification('set', { to: { textKey: 'hi' } }).change, 'retype');
+});
+
+test('a change with nothing this protocol represents is unknown, not invented', () => {
+  for (const [event, descriptor] of [['set', { to: { someFutureField: 1 } }], ['invertPurple', {}], ['', {}]]) {
+    const r = changeForNotification(event, descriptor);
+    assert.equal(r.known, false, `${event} should be unknown`);
+    assert.equal(r.change, null);
+  }
+});
+
+test('the pixel-path changes are marked as needing pixels, not as mappable', () => {
+  // The disclosure the design asks for: these cannot cross as an operation,
+  // and a sync that silently dropped them would be worse than one that says so.
+  for (const event of ['paint', 'gaussianBlur', 'setLayerEffects', 'curves']) {
+    const r = changeForNotification(event, {});
+    assert.equal(r.known, true, `${event} is a change we know about`);
+    assert.equal(r.mappable, false, `${event} must not be treated as forwardable`);
+    assert.equal(r.requiresPixels, true);
+  }
+});
+
+test('a burst collapses to the last of each layer, keeping first-seen order', () => {
+  // One drag is dozens of `move` notifications, all superseded by the last.
+  const collapsed = coalesceEvents([
+    { change: 'move', layerID: 7, props: { x: 1 } },
+    { change: 'reorder', layerID: 9, props: { to: 2 } },
+    { change: 'move', layerID: 7, props: { x: 2 } },
+    { change: 'move', layerID: 8, props: { x: 5 } },
+    { change: 'move', layerID: 7, props: { x: 3 } },
+  ]);
+  assert.deepEqual(collapsed, [
+    { change: 'move', layerID: 7, props: { x: 3 } },
+    { change: 'reorder', layerID: 9, props: { to: 2 } },
+    { change: 'move', layerID: 8, props: { x: 5 } },
+  ]);
+});
+
+test('coalescing keeps different changes on one layer apart', () => {
+  const collapsed = coalesceEvents([
+    { change: 'move', layerID: 7, props: { x: 1 } },
+    { change: 'opacity', layerID: 7, props: { opacity: 0.5 } },
+  ]);
+  assert.equal(collapsed.length, 2, 'a move and an opacity change are not the same edit');
+});
+
+test('document-level changes coalesce without a layerID colliding them', () => {
+  const collapsed = coalesceEvents([
+    { change: 'crop', props: { x: 0, y: 0, width: 10, height: 10 } },
+    { change: 'canvasSize', props: { x: 0, y: 0, width: 20, height: 20 } },
+    { change: 'crop', props: { x: 1, y: 1, width: 8, height: 8 } },
+  ]);
+  assert.deepEqual(collapsed.map((e) => e.change), ['crop', 'canvasSize']);
+  assert.deepEqual(collapsed[0].props, { x: 1, y: 1, width: 8, height: 8 });
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

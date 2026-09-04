@@ -66,6 +66,70 @@ export const DEFAULTS = {
   rateLimitWindowMs: 60 * 1000,
 
   /**
+   * The ceiling across ALL keys, which the per-key limit above cannot provide.
+   *
+   * Per-key throttling is linear in how many keys the attacker holds. The sum
+   * above works out to ~141 years from one source, but that is 141 years PER
+   * SOURCE: a botnet of a million addresses gets a million buckets and reaches
+   * an even chance in under an hour. Nothing in a per-key limit notices that,
+   * because no individual key misbehaves.
+   *
+   * So there is a second budget that every key draws from:
+   *
+   *   10,000 failures / 60 s  = 14.4M/day
+   *   50% of 32^6                                          ~= 5.37e8 attempts
+   *   time to reach it, at the ceiling, at ANY botnet size  ~= 37 days
+   *
+   * Only FAILURES that already passed the per-key gate are counted. A success
+   * costs nothing, so ordinary pairing never draws on it, and an attacker has
+   * to spend distinct keys to spend this budget -- which is precisely the
+   * resource being capped.
+   *
+   * THE TRADE-OFF, stated plainly: this is a global gate, so exhausting it
+   * denies pairing to everyone until the window rolls. At 10,000/minute that
+   * costs an attacker ~1,000 sustained addresses, and it denies only NEW
+   * pairings -- established sessions are untouched, and it clears within one
+   * window. That is the deliberate exchange: a bounded, self-healing denial of
+   * new pairings, against an unbounded distributed guess at the one secret in
+   * the system. Set to 0 to switch it off and accept the botnet case.
+   */
+  globalRateLimitMax: 10_000,
+  globalRateLimitWindowMs: 60 * 1000,
+
+  /**
+   * How fast a session's byte budget drains back, in bytes per second.
+   *
+   * Without this `maxSessionBytes` is a LIFETIME quota, and the honest reading
+   * of that is "every session is killed eventually" -- a legitimate editing
+   * session that moves a proxy-resolution layer now and then simply reaches
+   * 256 MB and is closed mid-work, having done nothing wrong. The cap is meant
+   * to stop a session monopolising a shared process, which is a question about
+   * rate, not about a total.
+   *
+   * So the cap becomes a burst allowance over a sustained rate: spend up to
+   * `maxSessionBytes` as fast as you like, and the budget refills at this many
+   * bytes per second.
+   *
+   * DERIVED from `maxSessionBytes` unless set explicitly, so a test that lowers
+   * the cap does not silently get a refill rate that outruns it. See
+   * `SESSION_REFILL_SECONDS` -- the default is a full budget every ~4 minutes,
+   * which at the default cap is 1 MiB/s sustained.
+   */
+  sessionByteRefillBytesPerSec: 1024 * 1024,
+
+  /**
+   * Bearer token for the read-only `GET /stats` endpoint.
+   *
+   * Empty means no token, and with no token the endpoint answers only a
+   * loopback peer on a relay that is not behind a proxy -- because behind one,
+   * every request arrives from the proxy and "is the caller local" stops being
+   * a question this process can answer. A refused request gets byte for byte
+   * what every other path on this port gets, so the route does not advertise
+   * itself to anyone who cannot already read it.
+   */
+  statsToken: '',
+
+  /**
    * Heartbeat: how long a socket may say nothing before it is pinged, and how
    * long it then has to pong before it is treated as gone.
    *
@@ -137,6 +201,10 @@ const ENV = {
   highWaterBytes: 'RELAY_HIGH_WATER_BYTES',
   rateLimitMax: 'RELAY_RATE_LIMIT_MAX',
   rateLimitWindowMs: 'RELAY_RATE_LIMIT_WINDOW_MS',
+  globalRateLimitMax: 'RELAY_GLOBAL_RATE_LIMIT_MAX',
+  globalRateLimitWindowMs: 'RELAY_GLOBAL_RATE_LIMIT_WINDOW_MS',
+  sessionByteRefillBytesPerSec: 'RELAY_SESSION_BYTE_REFILL',
+  statsToken: 'RELAY_STATS_TOKEN',
   trustedProxies: 'RELAY_TRUSTED_PROXIES',
   heartbeatMs: 'RELAY_HEARTBEAT_MS',
   heartbeatTimeoutMs: 'RELAY_HEARTBEAT_TIMEOUT_MS',
@@ -153,8 +221,17 @@ const ENV = {
  */
 const HIGH_WATER_FRACTION = 8;
 
+/**
+ * Seconds for a session's byte budget to refill from empty, when the rate is
+ * not set explicitly. Tied to the cap rather than fixed, so lowering the cap
+ * lowers the sustained rate with it -- a fixed 1 MiB/s against a 120 KB test
+ * cap would refill the entire budget eight times a second and the cap would
+ * never trip.
+ */
+const SESSION_REFILL_SECONDS = 256;
+
 /** Keys whose environment value is taken as written rather than as a number. */
-const STRING_KEYS = new Set(['host', 'tlsCertPath', 'tlsKeyPath']);
+const STRING_KEYS = new Set(['host', 'tlsCertPath', 'tlsKeyPath', 'statsToken']);
 const BOOL_KEYS = new Set(['behindProxy']);
 /** Keys whose environment value is a comma-separated list. */
 const LIST_KEYS = new Set(['allowedOrigins', 'trustedProxies']);
@@ -262,16 +339,21 @@ function assertRateLimitKeyIsMeaningful(config) {
 export function resolveConfig(overrides = {}, env = process.env) {
   const config = { ...DEFAULTS };
   let highWaterIsExplicit = false;
+  let refillIsExplicit = false;
+  const note = (key) => {
+    if (key === 'highWaterBytes') highWaterIsExplicit = true;
+    if (key === 'sessionByteRefillBytesPerSec') refillIsExplicit = true;
+  };
   for (const key of Object.keys(ENV)) {
     const value = fromEnv(key, env);
     if (value === undefined) continue;
     config[key] = value;
-    if (key === 'highWaterBytes') highWaterIsExplicit = true;
+    note(key);
   }
   for (const [key, value] of Object.entries(overrides)) {
     if (value === undefined || !(key in config)) continue;
     config[key] = value;
-    if (key === 'highWaterBytes') highWaterIsExplicit = true;
+    note(key);
   }
 
   // Lower the message cap and the mark follows it down. Otherwise a small cap
@@ -279,6 +361,11 @@ export function resolveConfig(overrides = {}, env = process.env) {
   // pause never engages.
   if (!highWaterIsExplicit) {
     config.highWaterBytes = Math.max(1, Math.floor(config.maxMessageBytes / HIGH_WATER_FRACTION));
+  }
+  // Same reasoning one level down: the refill rate is a property of the cap,
+  // so a lowered cap must not keep a rate that can outrun it.
+  if (!refillIsExplicit) {
+    config.sessionByteRefillBytesPerSec = Math.max(1, Math.floor(config.maxSessionBytes / SESSION_REFILL_SECONDS));
   }
 
   if (config.maxMessageBytes > config.maxSessionBytes) {

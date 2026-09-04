@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<!--
+  The panel shell.
+
+  Plain CSS, not Tailwind: UXP renders with its own engine over a subset of
+  CSS, and it cannot fetch a stylesheet from a CDN at all -- `network.domains`
+  in the manifest is an allowlist for the relay, and widening it to a CDN to
+  style a four-control panel would be the wrong trade. Everything here sticks
+  to the properties UXP documents as supported.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        margin: 0;
+        padding: 12px;
+        font-size: 12px;
+        color: #e8e8e8;
+        background: #262626;
+      }
+      h1 {
+        font-size: 12px;
+        font-weight: 700;
+        margin: 0 0 10px 0;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #9a9a9a;
+      }
+      .field { margin-bottom: 10px; }
+      label {
+        display: block;
+        margin-bottom: 4px;
+        color: #9a9a9a;
+      }
+      /*
+        A pairing code is read off one screen and typed into another, so it is
+        set large, wide-tracked and monospaced. The alphabet already excludes
+        the characters people confuse; this is the other half of that job.
+      */
+      #code {
+        font-family: monospace;
+        font-size: 18px;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+        width: 100%;
+      }
+      #relay { width: 100%; }
+      .row { display: flex; }
+      .row > * { flex: 1; }
+
+      /* One status line, one meaning. Colour is a second channel, never the only one. */
+      #status {
+        padding: 8px 10px;
+        border-radius: 4px;
+        margin-bottom: 10px;
+        background: #333;
+        border-left: 3px solid #666;
+      }
+      #status.working { border-left-color: #b8860b; }
+      #status.live { border-left-color: #2e7d32; }
+      #status.failed { border-left-color: #c62828; }
+
+      .section {
+        margin-top: 14px;
+        border-top: 1px solid #3a3a3a;
+        padding-top: 10px;
+      }
+      .count { color: #9a9a9a; }
+      ul {
+        list-style: none;
+        margin: 6px 0 0 0;
+        padding: 0;
+        max-height: 140px;
+        overflow-y: auto;
+      }
+      li {
+        padding: 4px 6px;
+        border-radius: 3px;
+        background: #2f2f2f;
+        margin-bottom: 3px;
+      }
+      li .what { color: #d7a45f; }
+      .empty { color: #6f6f6f; font-style: italic; }
+      .hint { color: #7d7d7d; margin-top: 6px; }
+    </style>
+  </head>
+
+  <body>
+    <h1>PSD Reader Sync</h1>
+
+    <div id="status">Not connected.</div>
+
+    <div id="setup">
+      <div class="field">
+        <label for="relay">Relay</label>
+        <input id="relay" type="text" value="ws://localhost:8787" />
+      </div>
+      <div class="field">
+        <label for="code">Pairing code from the app</label>
+        <input id="code" type="text" maxlength="6" placeholder="------" />
+      </div>
+      <div class="row">
+        <button id="connect">Connect</button>
+      </div>
+    </div>
+
+    <div class="row" id="live" style="display: none">
+      <button id="disconnect">Disconnect</button>
+    </div>
+
+    <div class="section">
+      <span class="count" id="sent">0 changes sent</span>
+      <!--
+        Not a log. This is the disclosure the design requires: a change that
+        cannot cross has to be visible, because a sync that silently discards
+        half someone's work is worse than one that refuses it.
+      -->
+      <div style="margin-top: 10px">
+        <span class="count">Not synced</span>
+        <ul id="unsynced">
+          <li class="empty">Nothing skipped yet.</li>
+        </ul>
+        <div class="hint">
+          Brush strokes, filters, adjustments, mask painting and layer effects
+          have no operation to send. Re-open the file in the app to see them.
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

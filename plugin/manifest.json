@@ -1,0 +1,38 @@
+{
+  "manifestVersion": 5,
+  "id": "com.psdreader.sync",
+  "name": "PSD Reader Sync",
+  "version": "0.1.0",
+  "main": "index.html",
+  "host": [
+    {
+      "app": "PS",
+      "minVersion": "24.0.0"
+    }
+  ],
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "syncPanel",
+      "label": {
+        "default": "PSD Reader Sync"
+      },
+      "minimumSize": {
+        "width": 240,
+        "height": 300
+      },
+      "preferredDockedSize": {
+        "width": 320,
+        "height": 480
+      }
+    }
+  ],
+  "requiredPermissions": {
+    "network": {
+      "domains": [
+        "ws://localhost:8787",
+        "wss://localhost:8787"
+      ]
+    }
+  }
+}

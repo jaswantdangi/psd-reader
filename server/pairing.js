@@ -27,13 +27,22 @@ function mintCode() {
  * @param {number} options.ttlMs             how long an issued code lives
  * @param {number} options.rateLimitMax      redemption attempts per IP per window
  * @param {number} options.rateLimitWindowMs the window
+ * @param {number} [options.globalMax]       failed attempts across ALL ips per window; 0 disables
+ * @param {number} [options.globalWindowMs]  that window
  * @param {function} [options.now]           injectable clock
  */
-export function createPairingDesk({ ttlMs, rateLimitMax, rateLimitWindowMs, now = Date.now }) {
+export function createPairingDesk({
+  ttlMs, rateLimitMax, rateLimitWindowMs,
+  globalMax = 0, globalWindowMs = rateLimitWindowMs, now = Date.now,
+}) {
   /** code -> { owner, expiresAt }. Never persisted; the process is the store. */
   const codes = new Map();
   /** ip -> { count, resetAt } */
   const attempts = new Map();
+  /** The one budget every ip draws from. See `globalRateLimitMax` in config.js. */
+  let global = { count: 0, resetAt: 0 };
+  /** How many redemptions the global ceiling has refused, for stats(). */
+  let globalRefusals = 0;
 
   /** Issue a code bound to the socket that will be paired INTO it. */
   function issue(owner) {
@@ -58,6 +67,24 @@ export function createPairingDesk({ ttlMs, rateLimitMax, rateLimitWindowMs, now 
     return entry.count <= rateLimitMax;
   }
 
+  /** Is the cross-key budget spent? Asked before the lookup, never after. */
+  function globalExhausted() {
+    if (!globalMax) return false;
+    return now() < global.resetAt && global.count >= globalMax;
+  }
+
+  /**
+   * Spend one unit of the cross-key budget. Called ONLY where an attempt that
+   * passed the per-ip gate turned out to be wrong, so a successful pairing
+   * costs nothing and ordinary use never draws the budget down.
+   */
+  function chargeGlobal() {
+    if (!globalMax) return;
+    const at = now();
+    if (at >= global.resetAt) global = { count: 1, resetAt: at + globalWindowMs };
+    else global.count += 1;
+  }
+
   /**
    * Redeem a code. The attempt is counted BEFORE the lookup, so a lucky guess
    * on the last try is still refused -- otherwise the limit only slows down
@@ -65,14 +92,24 @@ export function createPairingDesk({ ttlMs, rateLimitMax, rateLimitWindowMs, now 
    *
    * A code that has already been spent comes back as `no-such-code` rather than
    * as its own reason: telling a guesser that a code once existed narrows their
-   * search for free.
+   * search for free. The global ceiling answers with the SAME reason the per-ip
+   * limit does, for the same purpose -- which of the two budgets is empty is
+   * not something a guesser gets to measure.
    */
   function redeem(code, ip) {
     if (!allow(ip)) return { ok: false, code: 'rate-limited', message: 'too many pairing attempts' };
+    if (globalExhausted()) {
+      globalRefusals += 1;
+      return { ok: false, code: 'rate-limited', message: 'too many pairing attempts' };
+    }
     const entry = codes.get(code);
-    if (!entry) return { ok: false, code: 'no-such-code', message: 'that pairing code is not valid' };
+    if (!entry) {
+      chargeGlobal();
+      return { ok: false, code: 'no-such-code', message: 'that pairing code is not valid' };
+    }
     if (now() >= entry.expiresAt) {
       codes.delete(code);
+      chargeGlobal();
       return { ok: false, code: 'code-expired', message: 'that pairing code has expired' };
     }
     codes.delete(code); // single use, spent on redemption
@@ -91,5 +128,11 @@ export function createPairingDesk({ ttlMs, rateLimitMax, rateLimitWindowMs, now 
     for (const [ip, entry] of attempts) if (at >= entry.resetAt) attempts.delete(ip);
   }
 
-  return { issue, redeem, revokeFor, sweep, allow, size: () => codes.size };
+  return {
+    issue, redeem, revokeFor, sweep, allow,
+    size: () => codes.size,
+    /** Counts only: how much of the cross-key budget is spent, and refusals so far. */
+    globalSpent: () => (now() < global.resetAt ? global.count : 0),
+    globalRefusals: () => globalRefusals,
+  };
 }

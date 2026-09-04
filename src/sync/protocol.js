@@ -29,8 +29,8 @@
  */
 import { appIdFor } from './identity.js';
 
-/** The five frame types. Anything else is refused by name. */
-export const MESSAGE_TYPES = ['hello', 'pair', 'paired', 'event', 'error'];
+/** The six frame types. Anything else is refused by name. */
+export const MESSAGE_TYPES = ['hello', 'pair', 'paired', 'tree', 'event', 'error'];
 
 export const PROTOCOL_ERRORS = {
   BAD_JSON: 'bad-json',
@@ -140,6 +140,72 @@ function validatePaired(m) {
   return { ok: true, message: { type: 'paired', sessionId: m.sessionId, peer: { role: m.peer.role, version: m.peer.version } } };
 }
 
+/**
+ * One layer in a `tree` frame, checked against exactly what `matchLayers`
+ * needs to normalise it. A descriptor it would reject is refused here instead,
+ * where the reason can still name the index it came from.
+ */
+function treeLayerFault(l, i) {
+  if (!isPlainObject(l)) return `tree.layers[${i}] must be an object`;
+  const id = l.layerID;
+  if (typeof id !== 'number' && typeof id !== 'string') return `tree.layers[${i}].layerID must be a number or string`;
+  if (typeof id === 'number' && !Number.isFinite(id)) return `tree.layers[${i}].layerID must be finite`;
+  if (typeof l.name !== 'string') return `tree.layers[${i}].name must be a string`;
+  if (!isNonEmptyString(l.kind)) return `tree.layers[${i}].kind must be a non-empty string`;
+  const b = l.bounds;
+  if (!isPlainObject(b) || ![b.left, b.top, b.right, b.bottom].every(Number.isFinite)) {
+    return `tree.layers[${i}].bounds must be {left,top,right,bottom} finite numbers`;
+  }
+  if (l.groupPath !== undefined
+    && !(Array.isArray(l.groupPath) && l.groupPath.every((s) => typeof s === 'string'))) {
+    return `tree.layers[${i}].groupPath must be an array of strings`;
+  }
+  return null;
+}
+
+/**
+ * The layer tree, sent once by the plugin at pairing.
+ *
+ * This is the frame the whole identity model rests on: `matchLayers` cannot
+ * run until the app has Photoshop's side of the comparison, and an event that
+ * arrives before a mapping exists has nowhere to land. It is a type of its own
+ * rather than an `event` because it is not a change -- classifying it as one
+ * would put it through `CHANGE_MAP`, which has nothing to say about it.
+ *
+ * `document` is REQUIRED, and is not decoration. Both sides open the same file
+ * independently, and nothing so far checks that they did. Pair against the
+ * wrong open document and every signature misses: the user sees "matched 0 of
+ * 12" with no way to tell a broken matcher from a wrong file. Carrying the
+ * name and size lets the app say which it is.
+ */
+function validateTree(m) {
+  if (!isPlainObject(m.document)) return fail(PROTOCOL_ERRORS.BAD_FIELD, 'tree.document must be an object');
+  const { name, width, height } = m.document;
+  if (typeof name !== 'string') return fail(PROTOCOL_ERRORS.BAD_FIELD, 'tree.document.name must be a string');
+  if (!Number.isFinite(width) || !Number.isFinite(height)) {
+    return fail(PROTOCOL_ERRORS.BAD_FIELD, 'tree.document.width and .height must be finite numbers');
+  }
+  if (!Array.isArray(m.layers)) return fail(PROTOCOL_ERRORS.BAD_FIELD, 'tree.layers must be an array');
+  for (let i = 0; i < m.layers.length; i++) {
+    const fault = treeLayerFault(m.layers[i], i);
+    if (fault) return fail(PROTOCOL_ERRORS.BAD_FIELD, fault);
+  }
+  return {
+    ok: true,
+    message: {
+      type: 'tree',
+      document: { name, width, height },
+      layers: m.layers.map((l) => ({
+        layerID: l.layerID,
+        name: l.name,
+        kind: l.kind,
+        bounds: { left: l.bounds.left, top: l.bounds.top, right: l.bounds.right, bottom: l.bounds.bottom },
+        groupPath: Array.isArray(l.groupPath) ? [...l.groupPath] : [],
+      })),
+    },
+  };
+}
+
 function validateEvent(m) {
   if (!isNonEmptyString(m.change)) return fail(PROTOCOL_ERRORS.BAD_FIELD, 'event.change must be a string');
   if (!isPlainObject(m.props)) return fail(PROTOCOL_ERRORS.BAD_FIELD, 'event.props must be an object');
@@ -168,6 +234,7 @@ const VALIDATORS = {
   hello: validateHello,
   pair: validatePair,
   paired: validatePaired,
+  tree: validateTree,
   event: validateEvent,
   error: validateError,
 };

@@ -965,6 +965,204 @@ test('the shipped entrypoint binds a real port from the environment and routes',
   }
 });
 
+// ----------------------------------------------------- the layer tree
+
+const treeFrame = {
+  type: 'tree',
+  document: { name: 'poster.psd', width: 100, height: 80 },
+  layers: [{ layerID: 7, name: 'Sky', kind: 'pixel', bounds: { left: 0, top: 0, right: 10, bottom: 10 }, groupPath: ['Backgrounds'] }],
+};
+
+test('the layer tree crosses the wire byte for byte', () => withRelay({}, async (ctx) => {
+  // The frame the whole identity model waits on: matchLayers cannot run until
+  // the app holds Photoshop's side of the comparison.
+  const { app, plugin } = await pairedPair(ctx);
+  plugin.send(treeFrame);
+  assert.deepEqual(await app.next(), treeFrame);
+}));
+
+test('the layer tree travels Photoshop -> app only', () => withRelay({}, async (ctx) => {
+  const { app, plugin } = await pairedPair(ctx);
+  app.send(treeFrame);
+  const refusal = await app.next();
+  assert.equal(refusal.type, 'error');
+  assert.equal(refusal.code, 'wrong-direction');
+  assert.equal(plugin.seen(), 0, 'and nothing reached the plugin');
+}));
+
+test('a layer tree before pairing has nowhere to go and is refused', () => withRelay({}, async (ctx) => {
+  const plugin = ctx.client();
+  await plugin.open();
+  plugin.send({ type: 'hello', role: 'plugin', version: '1.0.0' });
+  plugin.send(treeFrame);
+  const refusal = await plugin.next();
+  assert.equal(refusal.type, 'error');
+  assert.equal(refusal.code, 'not-paired');
+}));
+
+test('a malformed layer tree is refused with the field at fault, not relayed', () => withRelay({}, async (ctx) => {
+  const { app, plugin } = await pairedPair(ctx);
+  plugin.send({ ...treeFrame, layers: [{ layerID: 7, name: 'Sky', kind: 'pixel' }] });
+  const refusal = await plugin.next();
+  assert.equal(refusal.type, 'error');
+  assert.equal(refusal.code, 'bad-field');
+  assert.match(refusal.message, /tree\.layers\[0\]\.bounds/);
+  assert.equal(app.seen(), 0, 'a frame the app could not have used never reached it');
+}));
+
+// ------------------------------------------------ the cross-key ceiling
+
+/**
+ * A trusted-proxy list makes `x-forwarded-for` the rate-limit key, which is
+ * the only way a test on one loopback interface can present itself as many
+ * distinct clients -- which is exactly the shape the global ceiling exists to
+ * answer. Without it every guess below shares one bucket and the per-ip limit
+ * would be doing the work instead.
+ */
+const AS_MANY_CLIENTS = { trustedProxies: ['127.0.0.1'], rateLimitMax: 2 };
+
+test('the global ceiling stops a guess from a key that has spent nothing', () => withRelay(
+  { ...AS_MANY_CLIENTS, globalRateLimitMax: 3, globalRateLimitWindowMs: 60_000 },
+  async (ctx) => {
+    await appWithCode(ctx);
+    // Three different keys, one guess each: nobody is near the per-ip limit of 2.
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '198.51.100.1'), 'no-such-code');
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '198.51.100.2'), 'no-such-code');
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '198.51.100.3'), 'no-such-code');
+    // A fourth, equally fresh key. Per-ip has nothing to say about it; the
+    // shared budget does. This is the botnet case in one assertion.
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '198.51.100.4'), 'rate-limited',
+      'a fresh key still guesses freely -- the ceiling is per-key only, so it scales with the botnet');
+  },
+));
+
+test('the ceiling refuses with the same reason the per-ip limit does', () => withRelay(
+  { ...AS_MANY_CLIENTS, globalRateLimitMax: 1 },
+  async (ctx) => {
+    await appWithCode(ctx);
+    assert.equal(await guessFrom(ctx, 'ZZZZZZ', '198.51.100.1'), 'no-such-code');
+    const refused = await guessFrom(ctx, 'ZZZZZZ', '198.51.100.2');
+    // Identical to what an exhausted per-ip bucket returns. Which budget ran
+    // out is not something a guesser gets to measure.
+    assert.equal(refused, 'rate-limited');
+    assert.equal(ctx.relay.stats().globalPairRefusals, 1, 'but the operator can see it');
+  },
+));
+
+test('a successful pairing costs nothing from the shared budget', () => withRelay(
+  // NOT AS_MANY_CLIENTS: its rateLimitMax of 2 counts successful redemptions
+  // too, so the third pairing below would be refused by the per-ip limit and
+  // this test would pass for the wrong reason.
+  { globalRateLimitMax: 2 },
+  async (ctx) => {
+    // Ordinary use must never draw down a budget the whole installation shares,
+    // or a busy relay would throttle itself for doing its job.
+    await pairedPair(ctx);
+    await pairedPair(ctx);
+    await pairedPair(ctx);
+    assert.equal(ctx.relay.stats().globalPairSpent, 0, 'only failures are charged');
+  },
+));
+
+test('setting the ceiling to 0 switches it off, and says so by letting guesses through', () => withRelay(
+  { ...AS_MANY_CLIENTS, globalRateLimitMax: 0 },
+  async (ctx) => {
+    await appWithCode(ctx);
+    for (const ip of ['198.51.100.1', '198.51.100.2', '198.51.100.3', '198.51.100.4', '198.51.100.5'])
+      assert.equal(await guessFrom(ctx, 'ZZZZZZ', ip), 'no-such-code', `${ip} was refused with the ceiling disabled`);
+  },
+));
+
+// --------------------------------------------- the session budget drains
+
+test('a session outlives its byte cap when it spends slowly', () => withRelay(
+  // 200 KiB/s against a 120 KiB cap: half a second refunds the whole budget.
+  { maxMessageBytes: 64 * 1024, maxSessionBytes: 120 * 1024, sessionByteRefillBytesPerSec: 200 * 1024 },
+  async (ctx) => {
+    const { app, plugin } = await pairedPair(ctx);
+    const blob = 'y'.repeat(32 * 1024);
+    const sendThree = () => { for (let i = 0; i < 3; i++) plugin.send({ type: 'event', change: 'brush', layerID: 7, props: { blob, i } }); };
+
+    sendThree();                       // ~96 KiB, inside the burst
+    await until(() => app.seen() >= 3, 'the first burst to arrive');
+    app.drained();                     // or the wait below is satisfied by these
+    await sleep(600);                  // the budget drains back to empty
+    sendThree();                       // ~96 KiB again: 192 KiB lifetime, past the cap
+
+    const seen = await until(() => (app.seen() >= 3 ? app.drained() : null), 'the second burst to arrive');
+    assert.ok(seen.every((f) => f.type === 'event'), 'the session was not torn down between the bursts');
+
+    const session = ctx.relay.stats().sessions[0];
+    assert.ok(session, 'the session is still alive after spending more than a lifetime cap');
+    assert.ok(session.bytes > ctx.relay.config.maxSessionBytes,
+      `lifetime bytes ${session.bytes} should have passed the ${ctx.relay.config.maxSessionBytes} cap`);
+    assert.ok(session.budgetBytes < ctx.relay.config.maxSessionBytes,
+      'and the draining budget is what the cap actually reads');
+  },
+));
+
+test('the refill rate follows the cap down rather than outrunning it', () => withRelay(
+  { maxMessageBytes: 64 * 1024, maxSessionBytes: 120 * 1024 },
+  async (ctx) => {
+    // Derived, not fixed. A hardcoded 1 MiB/s would refund this whole cap
+    // eight times a second and the burst test above could never trip.
+    assert.ok(ctx.relay.config.sessionByteRefillBytesPerSec < ctx.relay.config.maxSessionBytes,
+      'a burst must not be refunded within one window');
+    assert.equal(ctx.relay.config.sessionByteRefillBytesPerSec, Math.floor((120 * 1024) / 256));
+  },
+));
+
+// ------------------------------------------------------ the stats endpoint
+
+const statsUrl = (ctx) => ctx.url.replace(/^ws/, 'http') + '/stats';
+
+test('stats are readable over http from loopback', () => withRelay({}, async (ctx) => {
+  await pairedPair(ctx);
+  const res = await fetch(statsUrl(ctx));
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.connections, 2);
+  assert.equal(body.sessions.length, 1);
+  assert.equal(typeof body.globalPairSpent, 'number');
+}));
+
+test('the stats endpoint never carries a payload', () => withRelay({}, async (ctx) => {
+  const { app, plugin } = await pairedPair(ctx);
+  plugin.send({ type: 'event', change: 'rename', layerID: 3, props: { name: 'SECRETMARKER' } });
+  await app.next();
+  const text = await (await fetch(statsUrl(ctx))).text();
+  assert.ok(!text.includes('SECRETMARKER'), 'stats is counts only, and that is load-bearing');
+}));
+
+test('with a token set, an unauthenticated read is indistinguishable from any other path', () => withRelay(
+  { statsToken: 'a-long-enough-token' },
+  async (ctx) => {
+    const bare = await fetch(statsUrl(ctx));
+    const other = await fetch(ctx.url.replace(/^ws/, 'http') + '/anything-else');
+    assert.equal(bare.status, 426, 'loopback alone is not enough once a token is configured');
+    assert.equal(bare.status, other.status, 'and the route does not announce itself by answering differently');
+    assert.equal(await bare.text(), await other.text());
+
+    const wrong = await fetch(statsUrl(ctx), { headers: { authorization: 'Bearer a-long-enough-toker' } });
+    assert.equal(wrong.status, 426, 'a token of the right length but wrong content is still refused');
+
+    const right = await fetch(statsUrl(ctx), { headers: { authorization: 'Bearer a-long-enough-token' } });
+    assert.equal(right.status, 200);
+    assert.equal(typeof (await right.json()).connections, 'number');
+  },
+));
+
+test('behind a proxy, an untokened stats read is refused however local it looks', () => withRelay(
+  // Every request arrives from the proxy, so "is the caller local" is a
+  // question this process cannot answer -- and must not answer from a header.
+  { behindProxy: true, trustedProxies: ['127.0.0.1'], allowedOrigins: ['https://example.test'] },
+  async (ctx) => {
+    assert.equal((await fetch(statsUrl(ctx))).status, 426);
+    const forged = await fetch(statsUrl(ctx), { headers: { 'x-forwarded-for': '127.0.0.1' } });
+    assert.equal(forged.status, 426, 'and a forwarded-for saying "loopback" buys nothing');
+  },
+));
+
 // -------------------------------------------------------------------- run
 
 console.log('\nrelay: pairing, routing, caps, backpressure, lifecycle\n');

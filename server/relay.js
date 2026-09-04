@@ -31,14 +31,14 @@
  * deliberately not named here -- nothing in this directory may reach for it.
  */
 import { WebSocketServer, WebSocket } from 'ws';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import https from 'node:https';
 import { parseMessage, errorFrame } from '../src/sync/protocol.js';
 import { resolveConfig } from './config.js';
 import { createPairingDesk } from './pairing.js';
 import { loadTlsMaterial } from './tls.js';
-import { originAllowed, clientKeyFor } from './net.js';
+import { originAllowed, clientKeyFor, isLoopbackHost } from './net.js';
 
 /** Close codes. 1001 going away, 1008 policy violation. */
 const GOING_AWAY = 1001;
@@ -52,6 +52,8 @@ export function createRelay(options = {}) {
     ttlMs: config.pairTtlMs,
     rateLimitMax: config.rateLimitMax,
     rateLimitWindowMs: config.rateLimitWindowMs,
+    globalMax: config.globalRateLimitMax,
+    globalWindowMs: config.globalRateLimitWindowMs,
   });
 
   /** Every live socket, paired or not. */
@@ -109,6 +111,21 @@ export function createRelay(options = {}) {
    * The frame written is the one `validateMessage` REBUILT, not the object that
    * arrived, so fields the sender invented never reach the other side.
    */
+  /**
+   * Refund a session's byte budget for the time that has passed.
+   *
+   * The cap is a burst allowance over a sustained rate, not a lifetime quota:
+   * a session that moves a proxy-resolution layer every so often must be able
+   * to run all day, while one that floods still hits the wall. Called on the
+   * way in to `forward`, so the budget is current at the moment it is tested.
+   */
+  function drainBudget(session, at = Date.now()) {
+    const elapsed = at - session.budgetAt;
+    if (elapsed <= 0) return;
+    session.budgetAt = at;
+    session.budget = Math.max(0, session.budget - (elapsed / 1000) * config.sessionByteRefillBytesPerSec);
+  }
+
   function forward(conn, frame) {
     const session = conn.session;
     const to = peerOf(conn);
@@ -120,10 +137,12 @@ export function createRelay(options = {}) {
 
     const text = JSON.stringify(frame);
     const bytes = Buffer.byteLength(text);
-    if (session.bytes + bytes > config.maxSessionBytes) {
+    drainBudget(session);
+    if (session.budget + bytes > config.maxSessionBytes) {
       endSession(session, 'session-cap', `session byte cap of ${config.maxSessionBytes} reached`, POLICY);
       return;
     }
+    session.budget += bytes;
     session.bytes += bytes;
 
     // Read the mark BEFORE this frame is queued. What is buffered at this
@@ -161,7 +180,15 @@ export function createRelay(options = {}) {
       id: randomUUID(),
       app: appConn,
       plugin: pluginConn,
+      /** Lifetime total, for the log line and stats. Never the thing the cap reads. */
       bytes: 0,
+      /**
+       * The draining budget the cap DOES read, and when it was last drained.
+       * See `sessionByteRefillBytesPerSec` -- `bytes` only ever grows, so
+       * capping on it would kill every long session eventually.
+       */
+      budget: 0,
+      budgetAt: Date.now(),
       framesRead: 0,
       pauses: 0,
       peakBufferedBytes: 0,
@@ -220,6 +247,17 @@ export function createRelay(options = {}) {
     createSession(appConn, conn);
   }
 
+  /**
+   * The layer tree travels the same direction as events, for the same reason:
+   * Photoshop is authoritative, and an app-side tree would be an assertion
+   * about a document it does not own.
+   */
+  function onTree(conn, frame) {
+    if (!conn.session) return refuse(conn, 'not-paired', 'pair before sending the layer tree');
+    if (conn.role !== 'plugin') return refuse(conn, 'wrong-direction', 'the layer tree travels Photoshop -> app only');
+    forward(conn, frame);
+  }
+
   function onEvent(conn, frame) {
     if (!conn.session) return refuse(conn, 'not-paired', 'pair before sending events');
     // Rescoped: Photoshop is authoritative and events travel one way. An app
@@ -255,6 +293,7 @@ export function createRelay(options = {}) {
           return;
         }
         return onPair(conn, frame);
+      case 'tree': return onTree(conn, frame);
       case 'event': return onEvent(conn, frame);
       case 'error': return onError(conn, frame);
       default:
@@ -403,8 +442,21 @@ export function createRelay(options = {}) {
       secure = material !== null;
       server = secure ? https.createServer(material) : http.createServer();
 
-      // This port speaks one protocol. Saying so beats an empty 404.
+      // This port speaks one protocol, plus the one read-only route below.
+      // Saying so beats an empty 404.
       server.on('request', (req, res) => {
+        if (req.method === 'GET' && req.url === '/stats' && statsAllowed(req)) {
+          res.writeHead(200, {
+            'content-type': 'application/json',
+            'cache-control': 'no-store',
+            connection: 'close',
+          });
+          res.end(JSON.stringify(stats()) + '\n');
+          return;
+        }
+        // A refused /stats falls through to exactly what every other path
+        // gets. There is no 401 and no 404 special case, so a caller without
+        // the token cannot tell the route from any other URL on this port.
         res.writeHead(426, { 'content-type': 'text/plain', connection: 'close' });
         res.end('this endpoint speaks WebSocket only\n');
       });
@@ -457,6 +509,33 @@ export function createRelay(options = {}) {
     });
   }
 
+  /** Constant-time within a length class; an unequal length is not a secret. */
+  function tokenMatches(given) {
+    const a = Buffer.from(given);
+    const b = Buffer.from(config.statsToken);
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
+  /**
+   * Who may read `GET /stats`.
+   *
+   * With a token set, the token is the whole answer and the endpoint works
+   * wherever the operator can reach it. Without one it is loopback-only --
+   * and NOT behind a proxy, because there every request arrives from the
+   * proxy's address, so "is the caller local" is a question this process
+   * cannot answer and must not guess at. `X-Forwarded-For` is deliberately
+   * not consulted here: trusting it for authorisation would let anyone who
+   * can reach the proxy mint their own answer.
+   */
+  function statsAllowed(req) {
+    if (config.statsToken) {
+      const header = req.headers.authorization || '';
+      return header.startsWith('Bearer ') && tokenMatches(header.slice(7));
+    }
+    if (config.behindProxy) return false;
+    return isLoopbackHost(req.socket.remoteAddress || '');
+  }
+
   /** Counts only. No payloads, no peer identities beyond the session id. */
   function stats() {
     return {
@@ -464,10 +543,13 @@ export function createRelay(options = {}) {
       pendingCodes: desk.size(),
       originRefusals,
       heartbeatDrops,
+      globalPairSpent: desk.globalSpent(),
+      globalPairRefusals: desk.globalRefusals(),
       sessions: [...sessions].map((s) => ({
         id: s.id,
         framesRead: s.framesRead,
         bytes: s.bytes,
+        budgetBytes: Math.round(s.budget),
         pauses: s.pauses,
         peakBufferedBytes: s.peakBufferedBytes,
         senderPaused: s.senderPaused,
