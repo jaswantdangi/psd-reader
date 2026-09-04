@@ -396,19 +396,41 @@ function flatten(children, out, warnings, path = [], stats = { skipped: 0 }, inW
 }
 
 /**
- * Leaves carrying a vector mask that nothing in this codebase rasterises.
+ * Leaves whose vector mask would actually change what we draw.
  *
  * ag-psd exposes `layer.vectorMask` and `mask.fromVectorData`; neither is ever
- * consulted by composite.js or render.js. A layer whose ONLY mask is vector
- * data therefore renders completely unmasked, in the inspector and the editor
- * alike. Photoshop sometimes also writes a rasterised copy into `mask.imageData`
- * -- when it has, the layer renders correctly and must not be warned about.
+ * consulted by composite.js or render.js, so a path this codebase has to apply
+ * itself is a path that goes unapplied.
+ *
+ * THE COMMON CASE IS NOT THAT ONE, and this used to claim it was. The test was
+ * "is there a rasterised mask alongside the path?", and for a Photoshop shape
+ * layer the answer is no -- there is no separate mask because the path is
+ * already baked into the layer's OWN pixels, which arrive cropped to the
+ * shape's bounds. Measured on the corpus: shapes.src.psd and vectors.src.psd
+ * hold 8 vector-masked layers between them, every one with no raster mask and
+ * every one composited bit-exact against Photoshop (0.00% real diff, maxDelta
+ * 0). The warning fired on all 8 and was false on all 8 -- it told the user to
+ * distrust a picture that is pixel-for-pixel correct, which is worse than
+ * saying nothing, because it spends the credibility the true warnings need.
+ *
+ * So the question is what we would DRAW, not what fields are present. A leaf
+ * with pixels of its own has the path already applied to them, whether the
+ * clipping came from a raster mask or from Photoshop's own rasteriser. Only a
+ * leaf with a path and NO pixels -- a live shape whose fill we would have to
+ * synthesise from `vectorFill` -- is one we cannot render faithfully.
+ *
+ * `proxyData` as well as `imageData`: a streamed load carries the layer's
+ * pixels on the former, and asking only about the latter would put the false
+ * warning straight back for every streamed document.
  */
 function countUnrasterisedVectorMasks(children) {
   let n = 0;
   for (const node of children || []) {
     if (node.children) { n += countUnrasterisedVectorMasks(node.children); continue; }
-    if (node.vectorMask && !node.mask?.imageData && !node.proxyMask) n++;
+    if (!node.vectorMask) continue;
+    if (node.mask?.imageData || node.proxyMask) continue;  // rasterised mask: applied
+    if (node.imageData || node.proxyData) continue;        // pixels: path already baked in
+    n++;
   }
   return n;
 }
@@ -445,8 +467,9 @@ export function createProject(doc, fileName = 'untitled.psd', options = {}) {
   const vectorMasked = countUnrasterisedVectorMasks(doc.children);
   if (vectorMasked)
     warnings.add(
-      `${vectorMasked} layer${vectorMasked === 1 ? ' has' : 's have'} a vector mask. Vector masks are ` +
-      `not rasterised — ${vectorMasked === 1 ? 'that layer is' : 'those layers are'} drawn unmasked.`,
+      `${vectorMasked} layer${vectorMasked === 1 ? ' has' : 's have'} a vector shape and no pixels of ` +
+      `${vectorMasked === 1 ? 'its' : 'their'} own. Vector paths are not rasterised — ` +
+      `${vectorMasked === 1 ? 'that layer is' : 'those layers are'} drawn unmasked.`,
     );
 
   return {

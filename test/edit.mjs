@@ -674,5 +674,47 @@ test('the UI offers exactly the blend modes the compositor implements', () => {
   assert.deepEqual(phantom, [], 'offered to the user but not implemented — would render wrong');
 });
 
+
+// ------------------------------------------ the vector-mask disclosure
+// This warning fired on every vector-masked layer in the corpus and was false
+// on every one of them: shapes.src.psd and vectors.src.psd hold 8 between
+// them, all composited bit-exact against Photoshop. It asked whether a
+// RASTERISED mask sat beside the path, but a Photoshop shape layer has no
+// separate mask -- the path is already baked into its own pixels. So the
+// question had to become what we would DRAW.
+//
+// Both directions are pinned. Deleting a warning is trivially "green", and a
+// silence test alone could not tell that apart from a real fix.
+
+/** A leaf as readDocument hands it over, with only the fields this asks about. */
+const leaf = (over) => ({ name: 'shape', ...over });
+const pixels = () => ({ width: 2, height: 2, data: new Uint8ClampedArray(16) });
+const vectorWarnings = (node) =>
+  [...createProject({ width: 4, height: 4, children: [node] }, 't.psd').warnings]
+    .filter((w) => /vector/i.test(w));
+
+test('a path with no pixels to draw is still disclosed', () => {
+  const [warning] = vectorWarnings(leaf({ vectorMask: { paths: [] } }));
+  assert.ok(warning, 'a live shape we cannot rasterise must still be reported');
+  assert.match(warning, /no pixels/);
+});
+
+test('a path already baked into the layer pixels is not disclosed', () => {
+  // The regression itself. Photoshop crops these to the shape's own bounds,
+  // which is what makes them render correctly with no mask in sight.
+  assert.deepEqual(vectorWarnings(leaf({ vectorMask: { paths: [] }, imageData: pixels() })), []);
+});
+
+test('a streamed load is judged on proxyData, not imageData', () => {
+  // Asking only about imageData would put the false warning straight back for
+  // every document that arrives through loadProjectProxy -- which is all of
+  // them, in the app.
+  assert.deepEqual(vectorWarnings(leaf({ vectorMask: { paths: [] }, proxyData: pixels() })), []);
+});
+
+test('a rasterised mask beside the path is still enough on its own', () => {
+  assert.deepEqual(vectorWarnings(leaf({ vectorMask: { paths: [] }, mask: { imageData: {} } })), []);
+});
+
 delete globalThis.document;
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
