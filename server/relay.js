@@ -117,6 +117,21 @@ export function createRelay(options = {}) {
     }
     session.bytes += bytes;
 
+    // Read the mark BEFORE this frame is queued. What is buffered at this
+    // instant is what the destination has FAILED TO TAKE -- the backlog the
+    // pause exists to stop growing.
+    //
+    // Reading it after the write instead measures the frame that was just
+    // handed over, which the kernel is about to accept anyway. Every frame
+    // larger than the mark then trips a pause that the very next write
+    // callback lifts, and the relay pause-resumes its way through the whole
+    // stream while reporting itself paused. It looks like backpressure and
+    // is not: nothing ever stops.
+    if (to.ws.bufferedAmount > config.highWaterBytes) pauseReader(session, conn);
+
+    // The frame is written either way. It has already been read off the wire,
+    // and discarding it would make backpressure lossy -- it delays, it does
+    // not drop. That is what puts the peak at one mark plus one message.
     to.ws.send(text, (err) => {
       // A failed write means the peer went away; its close handler tears the
       // session down. Resuming here would only read more frames with nowhere
@@ -125,9 +140,11 @@ export function createRelay(options = {}) {
       if (to.ws.bufferedAmount <= config.highWaterBytes) resumeReader(session, conn);
     });
 
+    // There is always a write outstanding at this point -- the one just issued
+    // -- so a pause always has a callback that can lift it. A stalled peer
+    // never delivers that callback, which is exactly why the pause holds.
     const buffered = to.ws.bufferedAmount;
     if (buffered > session.peakBufferedBytes) session.peakBufferedBytes = buffered;
-    if (buffered > config.highWaterBytes) pauseReader(session, conn);
   }
 
   function createSession(appConn, pluginConn) {
