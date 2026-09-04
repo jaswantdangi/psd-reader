@@ -996,4 +996,34 @@ test('the editor renderer agrees with the inspector exactly', () => {
   assert.equal(stat.maxDelta, 0);
 });
 
+
+// ------------------------------------------- Blend If reaches the editor
+// composite.js has applied Blend If since ce41ef0 and render.js has called
+// parseBlendIf since 70acac5, but toLayer never carried `blendingRanges`, so
+// the renderer asked every layer and every layer said no. The inspector was
+// right and the editor was wrong -- exactly the split that made clipping wrong
+// in preview and export while the compositor had been correct all along.
+//
+// Pinned on the one fixture that actually uses the feature. A synthetic layer
+// could not catch this: the bug was a missing field on the path OUT of a real
+// file, so the test has to start from one.
+
+test('toLayer carries Blend If out of the file', () => {
+  const project = createProject(blendIfDoc, 'blend-if.src.psd');
+  const carried = project.layers.filter((l) => parseBlendIf(l));
+  assert.ok(carried.length > 0, 'the fixture uses Blend If, so some layer must carry it');
+});
+
+test('the editor renders Blend If exactly as the inspector does', () => {
+  // The whole point of the field. renderProject and compositeDocument must not
+  // disagree about a real document -- 0, not "close".
+  const project = createProject(blendIfDoc, 'blend-if.src.psd');
+  const { percentReal } = compareBuffers(
+    flattenOnto(compositeDocument(blendIfDoc)),
+    flattenOnto(renderProject(project, { scale: 1 })),
+    1,
+  );
+  assert.equal(percentReal, 0, 'renderer and compositor agree on blend-if.src.psd');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

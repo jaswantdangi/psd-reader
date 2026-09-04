@@ -271,6 +271,21 @@ function toLayer(source, warnings) {
      * "and therefore wrong" no longer is.
      */
     clipping: source.clipping === true,
+    /**
+     * Photoshop's Blend If ranges, carried verbatim for composite.js to parse.
+     *
+     * NOT interpreted here. `parseBlendIf` in composite.js is the single
+     * implementation of the rule, and render.js already calls it on every
+     * layer of every frame -- it was simply always getting undefined, because
+     * this field never made it out of the file. The inspector applied blend-if
+     * and the editor did not, which is the same split that made clipping wrong
+     * in preview and export while composite.js had been right all along.
+     *
+     * Undefined rather than null when absent: `parseBlendIf` returns null on
+     * anything falsy and allocates nothing, so a document that does not use
+     * blend-if -- 20 of the 21 fixtures -- pays nothing for this line.
+     */
+    blendingRanges: source.blendingRanges,
     /** ' / '-joined names of the groups this layer was flattened out of. Assigned by flatten(). */
     groupPath: '',
     /** One of the groups this layer came from raised a flattening warning. Assigned by flatten(). */
