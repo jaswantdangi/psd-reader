@@ -865,3 +865,62 @@ has a linear gradient; `gradient.src.psd` is radial-only.
 `models.js`, `edge.js` and both `index.js` barrels are not, and were deliberately
 left alone because a concurrent session had them mid-edit. `resampleLogits`
 lives in `cutout.js`, so it is untested despite being in scope by name.
+
+## What the GPU / blend-if / relay / app-test round left open
+
+### Three commits carry hunks their messages do not describe
+
+`ea0d66d` (Android) contains `server/relay.js`; `3788b4b` contains
+`test/gpu.mjs`; one app-test commit briefly held `src/gpu/*.js` and was rebuilt
+with `--only`. All three have the same cause: **concurrent agents share one git
+index**, so `git add` followed by a separate `git commit` is racy — another
+agent stages between the two and its files ride along. The fix that worked is
+`git commit -- <paths>`, staging and committing in one invocation. Content is
+correct everywhere; only the messages under-describe. History was not rewritten
+because another session was live on the branch.
+
+### Pixel parity on the GPU has never been observed
+
+`src/gpu/` now plans and executes a frame, and 133 assertions check the command
+sequence against a recording fake. **No GLSL in this repo has ever been
+compiled.** Run `npm run serve` and open `/demo/conformance.html` → *Run all
+tables*: a **Tier 1/2** badge with Tables A, C and D at real % 0.00 is the first
+real evidence the GPU path renders correctly. **Green under a Tier 3 badge means
+nothing** — the page ran JS against itself and says so.
+
+Also unmeasured there: non-separable modes cost a full-canvas pass per draw
+(~84 M fragments at 20 layers / 2048²) because scissoring is not implemented,
+and the `isPaused` heartbeat branch in the relay is reasoned rather than
+measured.
+
+### Blend If is 1.26%, not 0, and that is Photoshop dithering
+
+Measured, not excused: Photoshop dithers the feather, spreading one flat grey
+across ~5 adjacent output values — including *below* the black stop, where
+blend-if contributes nothing. The backdrop was verified exact first (maxDelta 1
+over 741,924 pixels outside the ellipse). The ramp
+`(v - b0 + 0.5)/(b1 - b0 + 1)` was read off the fixture; the textbook
+`(v - b0)/(b1 - b0)` runs 0.7/255 low near the black stop, which is 1.76% rather
+than 1.26%.
+
+Blend If is **gated off the GPU tier** rather than implemented in GLSL —
+`buildDrawPlan` refuses such a document by name and falls back to JS. A slow
+correct frame beats a fast wrong one. Implementing it in a shader would remove
+that fallback.
+
+### Still no coverage where two sessions overlapped
+
+`editor.page.ts` is untested because importing it pulls in `canvas-stage.ts` and
+`cutout-panel.ts`, which another session held — so its `open()` / `cancel(id)`
+session-rollback logic is uncovered. Same for `segment.service.ts` and
+`bg-remove.worker.ts`. `image-actions.ts`'s `planFor`/`summaryOf` and
+`overlay-sheet`'s colour helpers are module-private and unreachable without
+exporting them, which would have meant changing app code to test it.
+
+### Relay, before it is exposed
+
+No global cross-key ceiling on pairing attempts, so a large botnet is bounded
+only by the ~14.9M-distinct-keys figure rather than by any absolute limit.
+`maxSessionBytes` is a lifetime total with no decay. `stats()` has no
+operational endpoint. And `src/sync/identity.js` — the layer-matching handshake
+the whole design rests on — is still unexercised end to end.
