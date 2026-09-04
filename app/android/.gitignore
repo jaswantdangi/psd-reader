@@ -99,3 +99,9 @@ app/src/main/assets/public
 app/src/main/assets/capacitor.config.json
 app/src/main/assets/capacitor.plugins.json
 app/src/main/res/xml/config.xml
+
+# Release signing. The keystore and its passwords never enter version control:
+# an upload key cannot be regenerated, and a leaked one lets anyone publish as us.
+keystore.properties
+*.jks
+*.keystore

@@ -1,5 +1,35 @@
 apply plugin: 'com.android.application'
 
+/**
+ * Release signing.
+ *
+ * The keystore and its passwords are read from `keystore.properties`, which is
+ * gitignored and is NOT in this repository. Nothing here creates a key: an
+ * upload key is the one credential in this project that cannot be replaced by
+ * regenerating it -- lose it and Play will not accept another build of this
+ * applicationId, forever. So it is made once, by a person, and backed up:
+ *
+ *   keytool -genkeypair -v -keystore upload-keystore.jks \
+ *     -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+ *
+ * Then, beside this file, `android/keystore.properties`:
+ *
+ *   storeFile=../upload-keystore.jks
+ *   storePassword=...
+ *   keyAlias=upload
+ *   keyPassword=...
+ *
+ * Without that file the release build still CONFIGURES, and produces an
+ * unsigned release. That is deliberate: failing the whole build on a missing
+ * credential would stop anyone from compiling a release to check it, and CI
+ * has no business holding an upload key.
+ */
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
 android {
     namespace = "com.digitaaz.psdeditor"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -16,8 +46,25 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (keystoreProperties['storeFile']) {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
     buildTypes {
         release {
+            // Only when the credentials are actually present. Assigning an
+            // empty signingConfig fails the build at assemble time with a
+            // message about a null keystore, which reads as a broken project
+            // rather than as "you have not set up signing yet".
+            if (keystoreProperties['storeFile']) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

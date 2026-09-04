@@ -55,13 +55,26 @@ deployment; nothing here needs any of it for local development.
 
 ### 2. The relay's address must be in `manifest.json`
 
+Already listed, both the deployed relay and the local one:
+
 ```json
-"requiredPermissions": { "network": { "domains": ["ws://localhost:8787"] } }
+"requiredPermissions": {
+  "network": {
+    "domains": [
+      "wss://psd-sync-relay.jaswantdangi00.workers.dev",
+      "ws://localhost:8787",
+      "wss://localhost:8787"
+    ]
+  }
+}
 ```
 
 Exact origins only. **UXP 7.4+ rejects wildcard TLDs**, so `wss://*.example.com`
 will not load — list the host you actually deploy. Changing this needs a plugin
 reload, not just a panel refresh.
+
+The deployed relay is live and verified: pairing, routing and origin refusal
+were all driven through it over `wss://`. What has never run is this plugin.
 
 ### 3. Load it
 

@@ -1,0 +1,74 @@
+# The whole suite, on every push and pull request.
+#
+# `fixtures/` is gitignored — ~13 MB of Photoshop files from ag-psd's test
+# suite, not ours to redistribute — so a fresh clone and every CI runner start
+# with none of them. Hence the fetch step.
+#
+# Without it the suite does NOT pass silently, which is worth stating because
+# it is the failure mode you would expect: `test/composite.mjs` checks that
+# every fixture named in CEILINGS actually ran, so an empty corpus produces 21
+# "has a ceiling but did not run" regressions and exits 1. The corpus cannot
+# quietly shrink to nothing.
+#
+# The guard step below is therefore belt-and-braces, not the load-bearing
+# part: it fails in five seconds with a plain message instead of after fifteen
+# suites with a wall of per-fixture regressions.
+
+name: test
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Fetch the fixture corpus
+        run: node scripts/fetch-fixtures.mjs
+
+      - name: Check the corpus arrived before spending fifteen suites on it
+        run: |
+          count=$(ls fixtures/*.src.psd fixtures/*.src.psb 2>/dev/null | wc -l)
+          echo "fixtures present: $count"
+          if [ "$count" -lt 21 ]; then
+            echo "::error::Expected 21 source fixtures, found $count — the fetch did not complete."
+            echo "::error::test/composite.mjs would catch this too, as 21 'ceiling but did not run'"
+            echo "::error::regressions, but only after the whole suite has run. This is the early exit."
+            exit 1
+          fi
+
+      # Several suites need the larger heap; the npm scripts already carry
+      # --max-old-space-size where it is required.
+      - name: Engine suite
+        run: npm run test:engine
+
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - run: npm ci
+        working-directory: app
+
+      # No fixtures needed: app/ builds its projects through the engine's own
+      # createProject from synthetic documents, in jsdom.
+      - name: App suite
+        run: npm test -- --watch=false
+        working-directory: app

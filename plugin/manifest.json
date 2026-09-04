@@ -30,6 +30,7 @@
   "requiredPermissions": {
     "network": {
       "domains": [
+        "wss://psd-sync-relay.jaswantdangi00.workers.dev",
         "ws://localhost:8787",
         "wss://localhost:8787"
       ]
