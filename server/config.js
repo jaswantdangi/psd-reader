@@ -31,6 +31,11 @@ export const DEFAULTS = {
    * The point at which the relay stops reading its sender. Peak memory per
    * session is this plus whatever the receiver had already parsed -- one chunk,
    * never one stream.
+   *
+   * This is DERIVED from `maxMessageBytes` unless it is set explicitly (see
+   * `HIGH_WATER_FRACTION`). The literal below is what that derivation produces
+   * for the default message cap, and is here so the shape of the config object
+   * is complete before anything is resolved.
    */
   highWaterBytes: 1024 * 1024,
 
@@ -52,6 +57,17 @@ const ENV = {
   rateLimitWindowMs: 'RELAY_RATE_LIMIT_WINDOW_MS',
 };
 
+/**
+ * The high water mark is a fraction of ONE message, not an absolute size.
+ *
+ * It has to be, because it is the point at which the relay stops reading. If it
+ * sat above the message cap the relay would buffer more than one message before
+ * pausing, and "peak memory per session is one chunk" would stop being true --
+ * which is the whole reason the mark exists. An eighth leaves the pause room to
+ * engage well inside the frame that trips it.
+ */
+const HIGH_WATER_FRACTION = 8;
+
 function fromEnv(key, env) {
   const raw = env[ENV[key]];
   if (raw === undefined || raw === '') return undefined;
@@ -67,15 +83,31 @@ function fromEnv(key, env) {
  */
 export function resolveConfig(overrides = {}, env = process.env) {
   const config = { ...DEFAULTS };
+  let highWaterIsExplicit = false;
   for (const key of Object.keys(ENV)) {
     const value = fromEnv(key, env);
-    if (value !== undefined) config[key] = value;
+    if (value === undefined) continue;
+    config[key] = value;
+    if (key === 'highWaterBytes') highWaterIsExplicit = true;
   }
   for (const [key, value] of Object.entries(overrides)) {
-    if (value !== undefined && key in config) config[key] = value;
+    if (value === undefined || !(key in config)) continue;
+    config[key] = value;
+    if (key === 'highWaterBytes') highWaterIsExplicit = true;
   }
-  if (config.highWaterBytes >= config.maxSessionBytes) {
-    throw new Error('highWaterBytes must be below maxSessionBytes, or a session caps before it can ever pause');
+
+  // Lower the message cap and the mark follows it down. Otherwise a small cap
+  // leaves the mark stranded above every frame the relay will ever see, and the
+  // pause never engages.
+  if (!highWaterIsExplicit) {
+    config.highWaterBytes = Math.max(1, Math.floor(config.maxMessageBytes / HIGH_WATER_FRACTION));
+  }
+
+  if (config.maxMessageBytes > config.maxSessionBytes) {
+    throw new Error('maxMessageBytes must not exceed maxSessionBytes, or a session caps on its first frame');
+  }
+  if (config.highWaterBytes >= config.maxMessageBytes) {
+    throw new Error('highWaterBytes must be below maxMessageBytes, or the relay buffers more than one message before it pauses');
   }
   return config;
 }
