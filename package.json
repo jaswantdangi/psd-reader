@@ -29,6 +29,7 @@
   "type": "module",
   "dependencies": {
     "ag-psd": "^31.0.2",
-    "exifr": "^7.1.3"
+    "exifr": "^7.1.3",
+    "ws": "^8.21.3"
   }
 }
