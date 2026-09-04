@@ -44,9 +44,13 @@ precision highp float;
 
 uniform sampler2D uBackdrop;
 uniform sampler2D uSource;
+uniform sampler2D uMask;  // R8 on the SOURCE grid -- shares uv with uSource
+uniform sampler2D uClip;  // R8 over the whole canvas -- the run base's alpha
 uniform vec4  uRect;      // left, top, width, height -- destination pixels
 uniform vec2  uCanvas;
 uniform float uOpacity;
+uniform bool  uUseMask;
+uniform bool  uUseClip;
 
 in  vec2 vDstPx;
 out vec4 fragColor;
@@ -111,6 +115,13 @@ void main() {
   vec4 src = applyAdjust(texture(uSource, uv));
 
   float as = src.a * uOpacity;
+  // blendInto's order, exactly: opacity, then the layer mask, then the clip
+  // plane, and only THEN the early-out. The mask rides the source grid so it
+  // shares uv; the clip plane is full-canvas because clipAlphaMap writes it
+  // that way. Float multiplication does not associate, so the order is
+  // load-bearing rather than stylistic.
+  if (uUseMask) as *= texture(uMask, uv).r;
+  if (uUseClip) as *= texture(uClip, vDstPx / uCanvas).r;
   // Not an optimisation. Without it a transparent source fragment would run the
   // straight-alpha divide and re-quantise the backdrop. Returning dst unchanged
   // is an exact unorm8 -> float -> unorm8 round trip, matching JS's \`continue\`.
@@ -152,3 +163,77 @@ export function fragmentShaderFor(mode) {
     '  return vec3(chan(b.r, s.r), chan(b.g, s.g), chan(b.b, s.b));\n}\n' +
     FRAGMENT_MAIN;
 }
+
+/**
+ * The `clip-alpha` reduction pass: the run base's alpha, over the whole canvas,
+ * into the R8 plane every clipped member then multiplies its own alpha by.
+ *
+ * A LINE-FOR-LINE PORT of `clipAlphaMap` in render.js, and the integer
+ * arithmetic is the reason it is a separate shader rather than a flag on the
+ * blend program:
+ *
+ *   - `clipAlphaMap` writes into a `Uint8Array`, which TRUNCATES. A unorm8
+ *     render target ROUNDS. Left alone, every partially masked pixel of every
+ *     clipped run would sit 1 LSB away from the oracle -- exactly the class of
+ *     divergence render.js's own docstring says is load-bearing. `floor()` here
+ *     puts the truncation back.
+ *   - the mask divides by 255 because it is a separate 0..255 plane, and the
+ *     alpha does NOT, because `pixels[si + 3] * opacity` is already 0..255.
+ *     Both halves are reproduced in 0..255 space and only the final store
+ *     returns to unorm.
+ *
+ * Outside the rect it writes 0, which is what the zeroed scratch plane holds
+ * where `clipAlphaMap` never reaches. The `255` constants here are legitimate:
+ * this shader is not produced by `fragmentShaderFor`, and the rule that keeps
+ * blend-mode bodies in 0..1 space is about the mode table, not about a
+ * deliberate integer reduction.
+ */
+export const CLIP_ALPHA_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+
+uniform sampler2D uSource;
+uniform sampler2D uMask;
+uniform vec4  uRect;
+uniform vec2  uCanvas;
+uniform float uOpacity;
+uniform bool  uUseMask;
+
+in  vec2 vDstPx;
+out vec4 fragColor;
+
+void main() {
+  vec2 uv = (vDstPx - uRect.xy) / uRect.zw;
+  if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) {
+    fragColor = vec4(0.0); return;
+  }
+
+  float a = floor(texture(uSource, uv).a * 255.0 + 0.5) * uOpacity;
+  if (uUseMask) a *= floor(texture(uMask, uv).r * 255.0 + 0.5) / 255.0;
+  fragColor = vec4(floor(a) / 255.0, 0.0, 0.0, 1.0);
+}
+`;
+
+/**
+ * The present pass: the finished accumulator onto the VISIBLE drawing buffer.
+ *
+ * The Y flip the vertex shader's docstring warns about lives here and ONLY
+ * here. Every internal target is row-major with row 0 at the top, matching each
+ * Uint8ClampedArray in this engine and matching readPixels, so compositing and
+ * readback need no flip and conformance compares like for like. The default
+ * framebuffer is the one surface with y running the other way.
+ *
+ * Sampled with NEAREST at 1:1, so presenting is a copy and not a resample.
+ */
+export const PRESENT_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+
+uniform sampler2D uSource;
+uniform vec2 uCanvas;
+
+in  vec2 vDstPx;
+out vec4 fragColor;
+
+void main() {
+  fragColor = texture(uSource, vec2(vDstPx.x, uCanvas.y - vDstPx.y) / uCanvas);
+}
+`;

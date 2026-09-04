@@ -13,6 +13,9 @@ import { createAdjust, HSL_BANDS } from '../src/adjust/ops.js';
 import { buildLut } from '../src/adjust/lut.js';
 import { clipRunEnd } from '../src/render.js';
 import { buildDrawPlan, GPU_BUDGET_BYTES } from '../src/gpu/plan.js';
+// Not re-exported through src/index.js: these two are internal to the renderer,
+// and the barrel is owned by another session.
+import { CLIP_ALPHA_FRAGMENT_SHADER, PRESENT_FRAGMENT_SHADER } from '../src/gpu/glsl.js';
 
 let passed = 0;
 const test = (name, fn) => {
@@ -890,6 +893,102 @@ test('a plan over the budget refuses, and says what it would have cost', () => {
   assert.match(plan.reason, /budget/i);
   assert.match(plan.reason, /\d/, 'the refusal has to carry the number');
   assert.ok(GPU_BUDGET_BYTES > 0);
+});
+
+console.log('\nmask, clip and present shaders\n');
+
+test('the mask and the clip plane multiply into as in blendInto\'s order', () => {
+  // blendInto: as = (a/255) * opacity, then *= mask/255, then *= clipAlpha/255,
+  // and only then the `if (as <= 0) continue`. Float multiplication does not
+  // associate, so a shader that folded the mask in after the early-out, or
+  // multiplied the two planes together first, would round differently on every
+  // partially masked pixel of every clipped run.
+  const src = code(fragmentShaderFor('normal'));
+  const opacityAt = src.indexOf('float as = src.a * uOpacity;');
+  const maskAt = src.indexOf('if (uUseMask) as *= texture(uMask, uv).r;');
+  const clipAt = src.indexOf('if (uUseClip) as *= texture(uClip, vDstPx / uCanvas).r;');
+  const earlyAt = src.indexOf('if (as <= 0.0)');
+  assert.ok(opacityAt > -1 && maskAt > -1 && clipAt > -1 && earlyAt > -1,
+    'the four steps are not all present');
+  assert.ok(opacityAt < maskAt && maskAt < clipAt && clipAt < earlyAt,
+    'opacity, then mask, then clip, then the early-out');
+});
+
+test('the mask rides the source uv and the clip plane the canvas uv', () => {
+  // A mask lives on exactly the same grid as the layer's pixels -- render.js
+  // resamples it to the same rect from the same source dimensions. The clip
+  // plane is full-canvas, because clipAlphaMap writes it in canvas coordinates.
+  // Swapping the two spaces is a silent misregistration, not an error.
+  const src = code(fragmentShaderFor('multiply'));
+  assert.ok(src.includes('texture(uMask, uv).r'), 'the mask must sample at the SOURCE uv');
+  assert.ok(src.includes('texture(uClip, vDstPx / uCanvas).r'),
+    'the clip plane must sample at the CANVAS uv');
+});
+
+test('every mode carries both planes and both switches', () => {
+  for (const mode of GPU_BLEND_MODES) {
+    const src = code(fragmentShaderFor(mode));
+    for (const decl of ['uniform sampler2D uMask;', 'uniform sampler2D uClip;',
+      'uniform bool  uUseMask;', 'uniform bool  uUseClip;'])
+      assert.ok(src.includes(decl), mode + ': missing ' + decl);
+  }
+});
+
+test('adding the two planes did not put a 0..255 constant in a mode body', () => {
+  // The existing rule, re-run against the enlarged main(): only `hard mix` may
+  // mention 255 anywhere after the blend body begins.
+  for (const mode of GPU_BLEND_MODES) {
+    if (mode === 'hard mix') continue;
+    const src = code(fragmentShaderFor(mode));
+    const marker = isNonSeparableMode(programNameFor(mode)) ? 'vec3 blendFn(' : 'float chan(';
+    assert.ok(!/255/.test(src.slice(src.indexOf(marker))), mode + ' carries a 0..255 constant');
+  }
+});
+
+test('the clip-alpha pass truncates, because clipAlphaMap writes a Uint8Array', () => {
+  const src = code(CLIP_ALPHA_FRAGMENT_SHADER);
+  assert.ok(src.startsWith('#version 300 es'));
+  // A unorm8 render target ROUNDS. Uint8Array TRUNCATES. Without floor() every
+  // partially masked pixel of every clipped run would sit 1 LSB off the oracle.
+  assert.ok(src.includes('fragColor = vec4(floor(a) / 255.0, 0.0, 0.0, 1.0);'),
+    'the final store must truncate');
+  // `pixels[si + 3] * opacity` is already 0..255 and does NOT divide; the mask
+  // is a separate 0..255 plane and does.
+  assert.ok(src.includes('float a = floor(texture(uSource, uv).a * 255.0 + 0.5) * uOpacity;'));
+  assert.ok(src.includes('floor(texture(uMask, uv).r * 255.0 + 0.5) / 255.0'));
+  // Outside the rect, zero -- what the zeroed scratch plane holds where
+  // clipAlphaMap never reaches.
+  assert.ok(src.includes('fragColor = vec4(0.0); return;'));
+  assert.equal(count(src, '{'), count(src, '}'));
+  assert.equal(count(src, '('), count(src, ')'));
+});
+
+test('the clip-alpha pass never blends: it has no backdrop at all', () => {
+  // It is a reduction, not a composite. A uBackdrop here would mean somebody
+  // had turned it into a draw, and the plane would accumulate across runs.
+  assert.ok(!code(CLIP_ALPHA_FRAGMENT_SHADER).includes('uBackdrop'));
+  assert.ok(!code(CLIP_ALPHA_FRAGMENT_SHADER).includes('blendFn'));
+});
+
+test('the Y flip lives in the present pass and nowhere else', () => {
+  // Every internal target is row-major with row 0 at the top, matching every
+  // Uint8ClampedArray in this engine and matching readPixels -- so compositing
+  // and readback need no flip and conformance compares like for like. The
+  // default framebuffer is the one surface with y running the other way.
+  assert.ok(code(PRESENT_FRAGMENT_SHADER).includes('uCanvas.y - vDstPx.y'),
+    'the present pass must flip Y');
+  for (const mode of GPU_BLEND_MODES)
+    assert.ok(!code(fragmentShaderFor(mode)).includes('uCanvas.y - vDstPx.y'),
+      mode + ' flips Y, which would flip the accumulator against readPixels');
+  assert.ok(!code(CLIP_ALPHA_FRAGMENT_SHADER).includes('uCanvas.y - vDstPx.y'));
+});
+
+test('the present pass is a copy, not a composite', () => {
+  const src = code(PRESENT_FRAGMENT_SHADER);
+  assert.ok(src.startsWith('#version 300 es'));
+  assert.ok(!src.includes('uBackdrop'), 'presenting must not read a backdrop');
+  assert.ok(!src.includes('uOpacity'), 'presenting must not scale alpha');
+  assert.equal(count(src, 'void main()'), 1);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
