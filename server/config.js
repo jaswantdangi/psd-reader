@@ -8,6 +8,8 @@
  * does on its behalf.
  */
 
+import { isLoopbackHost } from './net.js';
+
 export const DEFAULTS = {
   host: '127.0.0.1',
   port: 8787,
@@ -42,11 +44,35 @@ export const DEFAULTS = {
   /** Pairing attempts per IP per window. A guessable code is the whole model. */
   rateLimitMax: 10,
   rateLimitWindowMs: 60 * 1000,
+
+  /**
+   * TLS. PATHS, never contents -- a private key does not belong in an
+   * environment variable that every child process inherits. Both or neither;
+   * one alone is a misconfiguration, not a half-measure.
+   *
+   * The design specifies `wss://`. There are exactly two honest ways to be it:
+   * terminate here (set these two), or terminate at a reverse proxy in front of
+   * this process and say so with `RELAY_BEHIND_PROXY`. See `assertNoSilentDowngrade`.
+   */
+  tlsCertPath: '',
+  tlsKeyPath: '',
+
+  /**
+   * "TLS terminates upstream; this process speaks plain ws:// to the proxy on a
+   * private hop." It is a claim the operator makes, deliberately, and the only
+   * thing it buys is permission to bind a non-loopback interface without a cert
+   * here. It must never be inferred -- inferring it is how a public plaintext
+   * relay happens.
+   */
+  behindProxy: false,
 };
 
 const ENV = {
   host: 'RELAY_HOST',
   port: 'RELAY_PORT',
+  tlsCertPath: 'RELAY_TLS_CERT',
+  tlsKeyPath: 'RELAY_TLS_KEY',
+  behindProxy: 'RELAY_BEHIND_PROXY',
   pairTtlMs: 'RELAY_PAIR_TTL_MS',
   sessionTtlMs: 'RELAY_SESSION_TTL_MS',
   sweepMs: 'RELAY_SWEEP_MS',
@@ -68,13 +94,53 @@ const ENV = {
  */
 const HIGH_WATER_FRACTION = 8;
 
+/** Keys whose environment value is taken as written rather than as a number. */
+const STRING_KEYS = new Set(['host', 'tlsCertPath', 'tlsKeyPath']);
+const BOOL_KEYS = new Set(['behindProxy']);
+
+const TRUE = new Set(['1', 'true', 'yes', 'on']);
+const FALSE = new Set(['0', 'false', 'no', 'off']);
+
 function fromEnv(key, env) {
   const raw = env[ENV[key]];
   if (raw === undefined || raw === '') return undefined;
-  if (key === 'host') return raw;
+  if (STRING_KEYS.has(key)) return raw.trim();
+  if (BOOL_KEYS.has(key)) {
+    const v = raw.trim().toLowerCase();
+    if (TRUE.has(v)) return true;
+    if (FALSE.has(v)) return false;
+    throw new Error(`${ENV[key]} must be one of 1/0/true/false/yes/no, got "${raw}"`);
+  }
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 0) throw new Error(`${ENV[key]} must be a non-negative number, got "${raw}"`);
   return Math.floor(n);
+}
+
+/**
+ * The startup refusal.
+ *
+ * A relay that quietly served `ws://` on a public interface because nobody set
+ * a cert is the worst outcome available here: it looks like the design, the
+ * pairing code and every frame after it cross in clear, and nothing in the
+ * running system says so. So the process does not start.
+ *
+ * Loopback is exempt because it is not reachable from anywhere else, and it is
+ * the default. Making local development require a certificate would push people
+ * toward turning the check off, which is how checks stop existing.
+ */
+function assertNoSilentDowngrade(config) {
+  const hasCert = !!config.tlsCertPath;
+  const hasKey = !!config.tlsKeyPath;
+  if (hasCert !== hasKey) {
+    throw new Error(`${ENV.tlsCertPath} and ${ENV.tlsKeyPath} must be set together -- one alone cannot serve TLS`);
+  }
+  if (isLoopbackHost(config.host) || hasCert || config.behindProxy) return;
+  throw new Error(
+    `refusing to start: ${ENV.host}="${config.host}" is not loopback and there is no TLS. `
+    + `The design specifies wss://, so either set ${ENV.tlsCertPath} and ${ENV.tlsKeyPath} to terminate here, `
+    + `or set ${ENV.behindProxy}=1 if TLS terminates at a reverse proxy in front of this process. `
+    + 'Serving ws:// on a public interface would put the pairing code and every frame after it in clear.',
+  );
 }
 
 /**
@@ -109,5 +175,6 @@ export function resolveConfig(overrides = {}, env = process.env) {
   if (config.highWaterBytes >= config.maxMessageBytes) {
     throw new Error('highWaterBytes must be below maxMessageBytes, or the relay buffers more than one message before it pauses');
   }
+  assertNoSilentDowngrade(config);
   return config;
 }

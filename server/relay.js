@@ -32,9 +32,12 @@
  */
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
+import http from 'node:http';
+import https from 'node:https';
 import { parseMessage, errorFrame } from '../src/sync/protocol.js';
 import { resolveConfig } from './config.js';
 import { createPairingDesk } from './pairing.js';
+import { loadTlsMaterial } from './tls.js';
 
 /** Close codes. 1001 going away, 1008 policy violation. */
 const GOING_AWAY = 1001;
@@ -56,8 +59,10 @@ export function createRelay(options = {}) {
   const sessions = new Set();
 
   let wss = null;
+  let server = null;
   let sweeper = null;
   let closed = false;
+  let secure = false;
 
   // ------------------------------------------------------------- framing
 
@@ -259,6 +264,15 @@ export function createRelay(options = {}) {
     if (conn.session) endSession(conn.session, 'peer-gone', 'the paired peer disconnected');
   }
 
+  /**
+   * Admission, before the handshake. A refusal here costs the caller one HTTP
+   * response and leaves no state behind: no socket in `connections`, no
+   * pairing code spent, no session.
+   */
+  function onUpgrade(req, socket, head) {
+    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, req));
+  }
+
   function onConnection(ws, req) {
     const conn = { ws, ip: req.socket.remoteAddress ?? 'unknown', role: null, version: null, session: null };
     connections.add(conn);
@@ -283,11 +297,31 @@ export function createRelay(options = {}) {
 
   // ---------------------------------------------------------------- public
 
+  /**
+   * The relay runs its own HTTP(S) server rather than letting `ws` create one,
+   * for two reasons that both matter:
+   *
+   * - TLS. `https.createServer` is the only thing that can terminate it, and
+   *   `ws` in `noServer` mode attaches to it unchanged.
+   * - A place to refuse a connection BEFORE the handshake completes. An
+   *   admission check that runs after `connection` has already produced an
+   *   open socket, a `conn` entry and a rate-limit key is a check that ran too
+   *   late; here the socket is destroyed while it is still an HTTP request.
+   */
   function listen() {
     return new Promise((resolve, reject) => {
+      const material = loadTlsMaterial(config); // throws rather than downgrading
+      secure = material !== null;
+      server = secure ? https.createServer(material) : http.createServer();
+
+      // This port speaks one protocol. Saying so beats an empty 404.
+      server.on('request', (req, res) => {
+        res.writeHead(426, { 'content-type': 'text/plain', connection: 'close' });
+        res.end('this endpoint speaks WebSocket only\n');
+      });
+
       wss = new WebSocketServer({
-        host: config.host,
-        port: config.port,
+        noServer: true,
         // The hard per-message cap. `ws` refuses an oversize frame at the
         // protocol level and closes with 1009, so it is never assembled in RAM.
         maxPayload: config.maxMessageBytes,
@@ -295,15 +329,17 @@ export function createRelay(options = {}) {
         // cheap way to make the relay do expensive work. Off.
         perMessageDeflate: false,
       });
-      wss.on('connection', onConnection);
-      wss.once('error', reject);
-      wss.once('listening', () => {
-        wss.removeListener('error', reject);
-        wss.on('error', () => {});
+      server.on('upgrade', onUpgrade);
+
+      server.once('error', reject);
+      server.listen(config.port, config.host, () => {
+        server.removeListener('error', reject);
+        server.on('error', () => {});
         sweeper = setInterval(sweep, config.sweepMs);
         sweeper.unref();
-        const { address, port } = wss.address();
-        resolve(`ws://${address}:${port}`);
+        const { address, port } = server.address();
+        log(`relay bound scheme=${secure ? 'wss' : 'ws'} tls=${secure ? 'local' : (config.behindProxy ? 'upstream' : 'none')}`);
+        resolve(`${secure ? 'wss' : 'ws'}://${address}:${port}`);
       });
     });
   }
@@ -316,7 +352,15 @@ export function createRelay(options = {}) {
     for (const conn of [...connections]) { try { conn.ws.terminate(); } catch { /* already gone */ } }
     connections.clear();
     log('relay closed');
-    return new Promise((resolve) => { if (wss) wss.close(() => resolve()); else resolve(); });
+    return new Promise((resolve) => {
+      const done = () => resolve();
+      if (!server) return done();
+      // Sockets that never became WebSockets (a refused upgrade, a plain GET)
+      // would otherwise hold `close` open for their keep-alive timeout.
+      server.closeAllConnections?.();
+      if (wss) wss.close(() => server.close(done));
+      else server.close(done);
+    });
   }
 
   /** Counts only. No payloads, no peer identities beyond the session id. */
