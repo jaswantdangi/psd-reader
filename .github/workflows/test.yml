@@ -37,14 +37,20 @@ jobs:
       - name: Fetch the fixture corpus
         run: node scripts/fetch-fixtures.mjs
 
+      # BOTH kinds. An earlier version of this step counted only *.src and
+      # passed, and the suite then died on a missing text.expected.psd — the
+      # fetch script had never downloaded the expected files at all. Counting
+      # the thing you did not think to count is how that stayed invisible.
       - name: Check the corpus arrived before spending fifteen suites on it
         run: |
-          count=$(ls fixtures/*.src.psd fixtures/*.src.psb 2>/dev/null | wc -l)
-          echo "fixtures present: $count"
-          if [ "$count" -lt 21 ]; then
-            echo "::error::Expected 21 source fixtures, found $count — the fetch did not complete."
-            echo "::error::test/composite.mjs would catch this too, as 21 'ceiling but did not run'"
-            echo "::error::regressions, but only after the whole suite has run. This is the early exit."
+          src=$(ls fixtures/*.src.psd fixtures/*.src.psb 2>/dev/null | wc -l)
+          expected=$(ls fixtures/*.expected.psd fixtures/*.expected.psb 2>/dev/null | wc -l)
+          echo "source fixtures: $src    expected fixtures: $expected"
+          if [ "$src" -lt 21 ] || [ "$expected" -lt 9 ]; then
+            echo "::error::Wanted 21 source and 9 expected fixtures, got $src and $expected."
+            echo "::error::The fetch did not complete. test/composite.mjs catches a short source"
+            echo "::error::corpus on its own, as 'ceiling but did not run' regressions — but a"
+            echo "::error::missing EXPECTED file only surfaces as an ENOENT crash mid-suite."
             exit 1
           fi
 
