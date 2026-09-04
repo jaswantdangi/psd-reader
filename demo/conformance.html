@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>GPU conformance — PSD Reader</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="h-full bg-slate-50 text-slate-900 antialiased">
+
+<div class="mx-auto max-w-5xl px-4 py-8">
+
+  <header class="mb-6">
+    <div class="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h1 class="text-2xl font-semibold tracking-tight">GPU conformance</h1>
+        <p class="mt-1 max-w-2xl text-sm text-slate-600">
+          Renders the same documents twice — once through <code class="rounded bg-slate-200 px-1 text-xs">renderProject</code>,
+          the JS oracle the 21-fixture accuracy table is measured against, and once through the WebGL2
+          renderer — then compares them pixel for pixel.
+        </p>
+      </div>
+      <a href="/demo/index.html"
+         class="shrink-0 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">
+        ← Demo
+      </a>
+    </div>
+  </header>
+
+  <!-- Tier and the honesty note. Read this before any table below. -->
+  <section id="tier-card" class="mb-6 rounded-lg border border-slate-200 bg-white p-4">
+    <div class="flex flex-wrap items-center gap-3">
+      <span id="tier-badge"
+            class="rounded-md bg-slate-200 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-slate-700">
+        detecting…
+      </span>
+      <span id="tier-verdict" class="text-sm font-medium text-slate-800"></span>
+    </div>
+    <p id="tier-note" class="mt-3 text-sm leading-relaxed text-slate-600"></p>
+    <dl id="device" class="mt-4 grid grid-cols-2 gap-x-6 gap-y-2 border-t border-slate-100 pt-4 text-xs sm:grid-cols-4"></dl>
+  </section>
+
+  <!-- Controls -->
+  <section class="mb-6 flex flex-wrap items-center gap-3">
+    <button id="run"
+      class="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700
+             focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-offset-2
+             disabled:cursor-not-allowed disabled:opacity-40">
+      Run all tables
+    </button>
+    <button id="bench"
+      class="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50
+             disabled:cursor-not-allowed disabled:opacity-40">
+      Time a 20-layer frame
+    </button>
+    <label class="flex items-center gap-2 text-sm text-slate-600">
+      Canvas
+      <select id="size" class="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm">
+        <option value="256" selected>256 × 256</option>
+        <option value="512">512 × 512</option>
+        <option value="1024">1024 × 1024</option>
+      </select>
+    </label>
+    <span id="progress" class="text-sm text-slate-500" role="status" aria-live="polite"></span>
+  </section>
+
+  <!-- Summary -->
+  <section id="summary" class="mb-6 hidden rounded-lg border border-slate-200 bg-white p-4">
+    <div class="flex flex-wrap items-center gap-4 text-sm">
+      <span class="font-semibold">Result</span>
+      <span id="sum-pass" class="rounded-md bg-emerald-100 px-2 py-1 font-medium text-emerald-800"></span>
+      <span id="sum-warn" class="rounded-md bg-amber-100 px-2 py-1 font-medium text-amber-800"></span>
+      <span id="sum-fail" class="rounded-md bg-rose-100 px-2 py-1 font-medium text-rose-800"></span>
+      <span id="sum-verdict" class="text-slate-600"></span>
+    </div>
+  </section>
+
+  <!-- Benchmark -->
+  <section id="bench-card" class="mb-6 hidden rounded-lg border border-slate-200 bg-white p-4">
+    <h2 class="text-sm font-semibold">20-layer frame</h2>
+    <p class="mt-1 text-xs text-slate-500">
+      Median of five. The GPU column includes <code>gl.finish()</code>, so it is wall time and not a
+      queued command buffer; the readback column is what a conformance comparison or an export costs on top.
+    </p>
+    <dl id="bench-out" class="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:grid-cols-4"></dl>
+  </section>
+
+  <div id="tables" class="space-y-8"></div>
+
+  <p class="mt-10 border-t border-slate-200 pt-4 text-xs leading-relaxed text-slate-500">
+    Tolerance 1 is a floor, not a licence. GLSL ES 3.00 has no <code>precise</code> qualifier, so a driver
+    may reassociate float expressions and bit-exactness can only be measured, never promised. Read
+    <strong>real %</strong> beside every verdict: a shader that is uniformly one greylevel wrong shows a high
+    <strong>any %</strong> with <strong>max Δ</strong> 1, which is rounding, while a real bug shows a non-zero
+    <strong>real %</strong>. Do not raise the tolerance to turn a row green.
+  </p>
+
+</div>
+
+<script type="module" src="/demo/conformance.js"></script>
+</body>
+</html>

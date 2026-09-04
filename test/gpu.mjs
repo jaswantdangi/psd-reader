@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   SUPPORTED_BLEND_MODES,
   SEPARABLE_GLSL, NON_SEPARABLE_GLSL, GPU_BLEND_MODES, programNameFor, isNonSeparableMode,
@@ -1743,6 +1744,57 @@ test('probeGpu reports no GPU in Node, and selectTier agrees', () => {
   assert.equal(caps.webgl2, false);
   assert.equal(caps.probe, null);
   assert.equal(selectTier(caps).tier, TIER_JS);
+});
+
+console.log('\nthe conformance route\n');
+
+/**
+ * Read and resolved UP FRONT, at module scope.
+ *
+ * `test()` calls its body synchronously, so an async body would return a
+ * pending promise, be counted as a pass before it asserted anything, and turn a
+ * rejection into an unhandled one — a test that reports ok and checks nothing.
+ */
+const pageJs = readFileSync(new URL('../demo/conformance.js', import.meta.url), 'utf8');
+const pageHtml = readFileSync(new URL('../demo/conformance.html', import.meta.url), 'utf8');
+const pageImports = [...pageJs.matchAll(/import\s*\{([^}]+)\}\s*from\s*'([^']+)'/g)]
+  .map(([, names, from]) => ({ from, names: names.split(',').map((n) => n.trim()).filter(Boolean) }));
+const pageModules = new Map();
+for (const { from } of pageImports)
+  if (!pageModules.has(from)) pageModules.set(from, await import(new URL('..' + from, import.meta.url)));
+
+test('every import the conformance page names is actually exported', () => {
+  // The page is the ONLY place pixel parity is measured, and no browser test
+  // covers it. A renamed export breaks it silently: the page loads, the module
+  // graph fails, and the buttons simply do nothing — which reads as "the GPU is
+  // fine, there is just no result".
+  assert.ok(pageImports.length >= 6, 'the page must still be importing from src/');
+  for (const { from, names } of pageImports) {
+    assert.ok(from.startsWith('/src/'), `${from} is not served by serve.mjs from the repo root`);
+    for (const name of names)
+      assert.ok(name in pageModules.get(from), `${from} does not export ${name}`);
+  }
+});
+
+test('the page is reachable at a path serve.mjs actually serves', () => {
+  // serve.mjs maps a URL straight onto a repo path and 404s anything else, so
+  // the page and its module must both exist exactly where the URL says.
+  assert.ok(pageJs.length > 0 && pageHtml.length > 0);
+  assert.ok(pageHtml.includes('src="/demo/conformance.js"'),
+    'the html must load the module by its served path');
+  assert.ok(pageHtml.includes('type="module"'));
+});
+
+test('the page never claims a GPU comparison it did not make', () => {
+  // The failure this exists for is a page that renders JS against itself and
+  // prints PASS. It must go through conformanceNoteFor, and its own summary
+  // line must say so in the JS-tier branch.
+  assert.ok(pageJs.includes('conformanceNoteFor'), 'the tier note must come from src, not from prose here');
+  assert.ok(/JS against itself/.test(pageJs),
+    'the summary must say what a green table means on the JS tier');
+  assert.ok(pageJs.includes('gl.finish()'),
+    'a GPU timing without finish() measures how fast commands are QUEUED, which is meaningless');
+  assert.ok(pageJs.includes('renderer.dispose()'), 'the page must release its GPU memory');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
