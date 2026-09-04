@@ -813,3 +813,55 @@ was NOT closed.
   poster**, one lazily grown pair per export. Both new terms are 0 on an
   unclipped document, asserted by `allocations === 0`, so all 21 fixtures cost
   what they cost before, to the byte.
+
+## After the GPU / relay / segment session
+
+### Correction to the record
+
+`ea0d66d "Add the Android platform so this can run on a phone"` also contains
+`server/relay.js`, which its message does not mention. A relay change was staged
+by a concurrent agent between the moment the staged list was read and the moment
+the commit ran; the content is correct and belongs to `ce0386f`'s line of work,
+but the message does not account for it. History was not rewritten because
+another session was live on the branch. Reading `--staged` once and committing
+later is not the same as reading it immediately before committing, which is the
+rule this broke.
+
+### The GPU tier is planned, not rendered
+
+`src/gpu/plan.js` decides a frame and is fully checked in Node — 77 assertions.
+Nothing draws. Still missing, none of it verifiable without a browser: context
+and program creation cached by `programNameFor`, texture upload, the ping-pong
+FBO pair, the group FBO plus its R8 clip-alpha plane, LUT/HSL uniform binding,
+the `clip-alpha` reduction pass, presentation, and conformance Table D on real
+hardware. **`GPU_BUDGET_BYTES` (256 MB) is a policy, not a measurement** — there
+is no `navigator.gpuMemory`; refusing early costs a slow JS frame, refusing late
+costs a lost context.
+
+### The relay is loopback-only
+
+32 assertions green against a real server on a real port. Backpressure is proven
+rather than asserted: 100 MB pushed at a stalled peer read 4 frames and froze
+for 3 s, peak buffered 0.5 MB against a 1.1 MB bound, RSS +3.5 MB. Before
+shipping it needs TLS (`wss://` per the spec), an origin check, a rate-limit key
+that survives a proxy (`remoteAddress` collapses behind one, and the pairing code
+is the entire security model), and a heartbeat.
+
+### The vector rasteriser is not a fidelity fix
+
+Recorded because it was nearly built on a false premise. All 21 fixtures were
+scanned: **14 vector-bearing layers, every one already rasterised by Photoshop**,
+and `shapes.src.psd`/`gradient.src.psd` composite at 0.00% real diff, maxDelta 0.
+There is no fixture where a rasteriser changes an output pixel, and substituting
+ours for Photoshop's could only make 12/5/4 worse. A rasteriser is still wanted
+for crisp zoom, editable shapes and upscaled export — a different feature with
+different success criteria, and it needs a fixture saved with *Maximize
+Compatibility* off before any of it can be measured. Note also that no fixture
+has a linear gradient; `gradient.src.psd` is radial-only.
+
+### Half of src/segment/ is still untested
+
+`mask-ops.js` and `refine.js` are pinned by 87 assertions. `cutout.js`,
+`models.js`, `edge.js` and both `index.js` barrels are not, and were deliberately
+left alone because a concurrent session had them mid-edit. `resampleLogits`
+lives in `cutout.js`, so it is untested despite being in scope by name.
