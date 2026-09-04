@@ -26,7 +26,9 @@
  * which pauses its TCP socket, closes the receive window, and pushes the
  * backlog back to the sender where it belongs. The send callback resumes it
  * once the buffer drains. Peak memory per session is one chunk, not one stream,
- * which is the same discipline `loadProjectProxy` applies to decoding.
+ * which is the same discipline the app's proxy loader applies to decoding: one
+ * unit at a time, released immediately. That loader is named in `src/`, and
+ * deliberately not named here -- nothing in this directory may reach for it.
  */
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID } from 'node:crypto';
