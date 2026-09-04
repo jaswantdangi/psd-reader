@@ -9,6 +9,10 @@ import {
   conformancePattern, conformanceProject, compareRenders, verdictFor, CONFORMANCE_MODES,
   selectTier, tierOverrideFrom, probeCapabilities, TIER_WORKER_GPU, TIER_MAIN_GPU, TIER_JS,
 } from '../src/index.js';
+import { createAdjust, HSL_BANDS } from '../src/adjust/ops.js';
+import { buildLut } from '../src/adjust/lut.js';
+import { clipRunEnd } from '../src/render.js';
+import { buildDrawPlan, GPU_BUDGET_BYTES } from '../src/gpu/plan.js';
 
 let passed = 0;
 const test = (name, fn) => {
@@ -598,6 +602,294 @@ test('probeCapabilities reports no GPU in Node, and selectTier agrees', () => {
   assert.equal(tierOverrideFrom('?other=1'), null);
   assert.equal(tierOverrideFrom(''), null);
   assert.equal(tierOverrideFrom(undefined), null);
+});
+
+
+// ---------------------------------------------------------------- gpu plan
+//
+// The GPU internals are imported from their own modules rather than from
+// src/index.js: they are not part of the engine's public surface, and index.js
+// is contended by four agents.
+
+console.log('\ngpu draw plan\n');
+
+/**
+ * A project whose layers can carry clipping, masks and adjustments.
+ *
+ * `pixels: null` means a LAYER WITH NO PIXELS, and it is built in two moves on
+ * purpose. A NODE with no pixels never becomes a layer at all -- createProject's
+ * flatten counts it as skipped (src/edit.js: "Counted, not silently dropped")
+ * -- so building it that way would delete the layer and shift every index above
+ * it, and the assertions below would be reading a different stack than the one
+ * they name. The node carries pixels so the layer survives; the layer then has
+ * them taken off, which is the state prepareLayer actually skips and the state
+ * a streaming load really produces.
+ */
+const clipProject = (specs) => {
+  const project = createProject({
+    width: SIZE, height: SIZE,
+    children: specs.map((s, i) => {
+      const left = s.left ?? 0, top = s.top ?? 0;
+      const w = s.w ?? SIZE - left, h = s.h ?? SIZE - top;
+      const node = {
+        name: `L${i}`, left, top, right: left + w, bottom: top + h,
+        blendMode: s.mode ?? 'normal', opacity: s.opacity ?? 1, hidden: s.hidden === true,
+        clipping: s.clipping === true,
+        proxyData: gradient(w, h, i + 1),
+      };
+      if (s.mask) node.proxyMask = new Uint8Array(w * h).fill(s.mask);
+      return node;
+    }),
+  }, 'clip.psd');
+  specs.forEach((s, i) => { if (s.pixels === null) project.layers[i].pixels = null; });
+  return project;
+};
+
+const kinds = (plan) => plan.steps.map((s) => s.kind);
+const indices = (plan) => plan.steps.filter((s) => s.kind === 'draw').map((s) => s.index);
+
+test('a plain stack plans one draw per layer, straight onto the canvas', () => {
+  const plan = buildDrawPlan(clipProject([{}, { mode: 'multiply' }, { opacity: 0.5 }]));
+  assert.equal(plan.ok, true, plan.reason || '');
+  assert.deepEqual(kinds(plan), ['draw', 'draw', 'draw']);
+  assert.deepEqual(indices(plan), [0, 1, 2]);
+  assert.ok(plan.steps.every((s) => s.target === 'canvas'));
+  assert.ok(plan.steps.every((s) => s.clip === false));
+  assert.equal(plan.steps[1].program, 'multiply');
+  assert.equal(plan.steps[2].opacity, 0.5);
+  assert.equal(plan.groups, 0, 'nothing clips, so no group target is needed');
+});
+
+test('hidden, zero-opacity and pixel-less layers are planned out', () => {
+  // Exactly what drawLayerInto and prepareLayer skip. A step planned for one of
+  // these would draw something renderProject does not.
+  const plan = buildDrawPlan(clipProject([
+    {}, { hidden: true }, { opacity: 0 }, { pixels: null }, {},
+  ]));
+  assert.deepEqual(indices(plan), [0, 4]);
+});
+
+test('a layer entirely off-canvas is planned out, on all four sides', () => {
+  for (const move of [
+    { x: SIZE, w: 4 }, { y: SIZE, h: 4 }, { x: -8, w: 8 }, { y: -8, h: 8 },
+  ]) {
+    const project = clipProject([{ w: 8, h: 8 }]);
+    Object.assign(project.layers[0], move);
+    assert.deepEqual(indices(buildDrawPlan(project)), [], JSON.stringify(move));
+  }
+});
+
+test('the destination rect is prepareLayer arithmetic, at any scale', () => {
+  const project = clipProject([{ left: 3, top: 5, w: 9, h: 7 }]);
+  const layer = project.layers[0];
+  for (const scale of [1, 0.5, 0.61, 2]) {
+    const plan = buildDrawPlan(project, { scale });
+    assert.deepEqual(plan.steps[0].rect, {
+      left: Math.round(layer.x * scale),
+      top: Math.round(layer.y * scale),
+      width: Math.max(1, Math.round(layer.w * scale)),
+      height: Math.max(1, Math.round(layer.h * scale)),
+    }, `scale ${scale}`);
+    assert.equal(plan.width, Math.max(1, Math.round(SIZE * scale)));
+    assert.equal(plan.height, Math.max(1, Math.round(SIZE * scale)));
+  }
+});
+
+test('a clip run plans group-begin, the base, the clip alpha, its members, group-end', () => {
+  const plan = buildDrawPlan(clipProject([{}, { clipping: true }, { clipping: true }]));
+  assert.deepEqual(kinds(plan), ['group-begin', 'draw', 'clip-alpha', 'draw', 'draw', 'group-end']);
+  assert.deepEqual(indices(plan), [0, 1, 2]);
+  assert.equal(plan.groups, 1);
+});
+
+test('the base opacity and mode are spent on group-end, never on the base draw', () => {
+  // Step 1 of drawClipRunInto: the base goes into the group at opacity 1, mode
+  // normal. Its own opacity and blend mode belong to the WHOLE run.
+  const plan = buildDrawPlan(clipProject([{ opacity: 0.4, mode: 'multiply' }, { clipping: true }]));
+  const base = plan.steps.find((s) => s.kind === 'draw');
+  assert.equal(base.opacity, 1);
+  assert.equal(base.program, 'normal');
+  assert.equal(base.target, 'group');
+  const end = plan.steps.at(-1);
+  assert.equal(end.kind, 'group-end');
+  assert.equal(end.opacity, 0.4);
+  assert.equal(end.program, 'multiply');
+});
+
+test('a hidden or pixel-less base takes its whole run out of the plan', () => {
+  for (const base of [{ hidden: true }, { opacity: 0 }, { pixels: null }]) {
+    const plan = buildDrawPlan(clipProject([base, { clipping: true }, { clipping: true }, {}]));
+    assert.deepEqual(indices(plan), [3], JSON.stringify(base));
+    assert.equal(plan.groups, 0);
+  }
+});
+
+test('a hidden member of a run is planned out; the rest still clips', () => {
+  const plan = buildDrawPlan(clipProject([
+    {}, { clipping: true, hidden: true }, { clipping: true },
+  ]));
+  assert.deepEqual(indices(plan), [0, 2]);
+  assert.deepEqual(kinds(plan), ['group-begin', 'draw', 'clip-alpha', 'draw', 'group-end']);
+});
+
+test('a run of one is the plain single-layer draw: no group, no clip texture', () => {
+  const plan = buildDrawPlan(clipProject([{}, {}, {}]));
+  assert.ok(!kinds(plan).includes('group-begin'));
+  assert.ok(!kinds(plan).includes('clip-alpha'));
+  assert.equal(plan.groups, 0);
+});
+
+test('every clipped member draws with the clip texture bound, and the base does not', () => {
+  const plan = buildDrawPlan(clipProject([{}, { clipping: true }, { clipping: true }, {}]));
+  const draws = plan.steps.filter((s) => s.kind === 'draw');
+  assert.deepEqual(draws.map((s) => s.clip), [false, true, true, false]);
+  assert.deepEqual(draws.map((s) => s.target), ['group', 'group', 'group', 'canvas']);
+});
+
+test('a run reaching the bottom of the stack has no base under it', () => {
+  // clipRunStart already says so; the plan must agree with it and not invent a
+  // base. Layer 0 becomes its own base and draws unclipped.
+  const project = clipProject([{ clipping: true }, { clipping: true }, {}]);
+  const plan = buildDrawPlan(project);
+  assert.deepEqual(kinds(plan), ['group-begin', 'draw', 'clip-alpha', 'draw', 'group-end', 'draw']);
+  assert.deepEqual(indices(plan), [0, 1, 2]);
+  assert.equal(plan.steps[1].clip, false, 'the lowest member is its own base');
+});
+
+test('the walk is clipRunEnd run by run, bottom to top', () => {
+  // Pinned against the function renderProject itself walks with, so the two
+  // cannot drift.
+  const project = clipProject([{}, { clipping: true }, {}, {}, { clipping: true }]);
+  const runs = [];
+  for (let i = 0; i < project.layers.length; ) { runs.push(i); i = clipRunEnd(project.layers, i); }
+  assert.deepEqual(runs, [0, 2, 3]);
+  assert.deepEqual(indices(buildDrawPlan(project)), [0, 1, 2, 3, 4]);
+  assert.deepEqual(kinds(buildDrawPlan(project)), [
+    'group-begin', 'draw', 'clip-alpha', 'draw', 'group-end',
+    'draw',
+    'group-begin', 'draw', 'clip-alpha', 'draw', 'group-end',
+  ]);
+});
+
+console.log('\ngpu sampling, masks and adjustments\n');
+
+test('a 1:1 layer samples NEAREST; a resampled one samples LINEAR', () => {
+  const plan = buildDrawPlan(clipProject([{}]), { scale: 1 });
+  assert.equal(plan.steps[0].filter, 'nearest',
+    'at 1:1 NEAREST lands on texel centres and the blit is bit-exact');
+  assert.equal(buildDrawPlan(clipProject([{}]), { scale: 0.5 }).steps[0].filter, 'linear');
+});
+
+test('the mask is bound only when present and enabled', () => {
+  assert.equal(buildDrawPlan(clipProject([{}])).steps[0].mask, null);
+  const masked = buildDrawPlan(clipProject([{ mask: 128 }])).steps[0];
+  assert.ok(masked.mask, 'an enabled mask must reach the shader');
+  assert.equal(masked.mask.width, SIZE);
+
+  // Photoshop saves switched-off masks. Applying one is as wrong as ignoring
+  // an enabled one -- prepareLayer reads `disabled`, so this must too.
+  const project = clipProject([{ mask: 128 }]);
+  project.layers[0].mask.disabled = true;
+  assert.equal(buildDrawPlan(project).steps[0].mask, null);
+});
+
+test('the clip-alpha step carries the base mask, because clipAlphaMap does', () => {
+  const plan = buildDrawPlan(clipProject([{ mask: 200 }, { clipping: true }]));
+  const alpha = plan.steps.find((s) => s.kind === 'clip-alpha');
+  assert.ok(alpha.mask, 'clipAlphaMap multiplies by the base mask; so must the GPU');
+  assert.deepEqual(alpha.rect, plan.steps[1].rect, 'the same rect the base was drawn with');
+});
+
+test('adjustment flags mirror isNeutralAdjust and the hsl test exactly', () => {
+  const flagsOf = (adjust) => {
+    const project = clipProject([{}]);
+    project.layers[0].adjust = adjust;
+    return buildDrawPlan(project).steps[0].adjustFlags;
+  };
+  assert.equal(flagsOf(null), 0);
+  assert.equal(flagsOf(createAdjust()), 0, 'a neutral adjustment must not run the stage at all');
+  assert.equal(flagsOf(createAdjust({ brightness: 40 })), 1);
+  assert.equal(flagsOf(createAdjust({ hsl: { saturation: -60, bands: [] } })), 3,
+    'applyAdjustments runs the LUT unconditionally, so bit 0 is set whenever the pass runs');
+  assert.equal(flagsOf(createAdjust({ brightness: 40, hsl: { saturation: -60, bands: [] } })), 3);
+});
+
+test('a layer carrying a LUT plans its 768 bytes, and a neutral one plans none', () => {
+  const project = clipProject([{}]);
+  project.layers[0].adjust = createAdjust({ contrast: 100 });
+  const step = buildDrawPlan(project).steps[0];
+  assert.equal(step.lut.length, 768, 'exactly the bytes buildLut produced, uploaded as 256x1 RGBA');
+  assert.deepEqual(Array.from(step.lut), Array.from(buildLut(project.layers[0].adjust)));
+  assert.equal(buildDrawPlan(clipProject([{}])).steps[0].lut, null);
+});
+
+test('the HSL uniforms are packed in HSL_BANDS order', () => {
+  const project = clipProject([{}]);
+  project.layers[0].adjust = createAdjust({ hsl: {
+    saturation: -60, bands: [{ h: 60, s: 40, l: 20 }, {}, {}, {}, {}, {}, {}, {}],
+  } });
+  const step = buildDrawPlan(project).steps[0];
+  assert.deepEqual(Array.from(step.hsl.centres), HSL_BANDS.map((b) => b.centre));
+  assert.equal(step.hsl.bands.length, 24, '8 bands x (h, s, l)');
+  assert.deepEqual(Array.from(step.hsl.bands.slice(0, 3)), [60, 40, 20]);
+  assert.equal(step.hsl.saturation, -60);
+});
+
+console.log('\ngpu refusals and memory\n');
+
+test('an overlay adjustment refuses the tier instead of rendering without it', () => {
+  // ops.js marks overlay class P with `glsl: null` -- there IS no shader for it.
+  // Drawing the layer anyway would silently drop the gradient.
+  const project = clipProject([{}, {}]);
+  project.layers[1].adjust = createAdjust({ overlay: {
+    kind: 'linear', angle: 30, mode: 'soft light', opacity: 0.8,
+    stops: [{ t: 0, r: 255, g: 120, b: 0, a: 1 }, { t: 1, r: 0, g: 60, b: 200, a: 0.4 }],
+  } });
+  const plan = buildDrawPlan(project);
+  assert.equal(plan.ok, false);
+  assert.match(plan.reason, /overlay/i);
+  assert.match(plan.reason, /L1/, 'the reason has to name the layer so it is actionable');
+});
+
+test('a canvas or a source beyond MAX_TEXTURE_SIZE refuses, rather than rendering a corner', () => {
+  // Tiled uploads are not implemented. Clamping silently would render the top
+  // left of the document at full size and call it a frame.
+  const plan = buildDrawPlan(clipProject([{}]), { maxTextureSize: 8 });
+  assert.equal(plan.ok, false);
+  assert.match(plan.reason, /texture size/i);
+  assert.equal(buildDrawPlan(clipProject([{}]), { maxTextureSize: SIZE }).ok, true,
+    'exactly at the limit is fine');
+});
+
+test('gpu bytes are the ping-pong pair plus every distinct texture', () => {
+  const plan = buildDrawPlan(clipProject([{}, { left: 4 }]));
+  const px = plan.width * plan.height;
+  // Two full-canvas RGBA8 targets, because every draw reads the backdrop it writes.
+  const layers = SIZE * SIZE * 4 + (SIZE - 4) * SIZE * 4;
+  assert.equal(plan.bytes, 2 * px * 4 + layers);
+});
+
+test('a clip run adds the group pair and the clip alpha plane, and only then', () => {
+  const plain = buildDrawPlan(clipProject([{}, {}]));
+  const clipped = buildDrawPlan(clipProject([{}, { clipping: true }]));
+  const px = plain.width * plain.height;
+  assert.equal(clipped.bytes - plain.bytes, 2 * px * 4 + px,
+    'a second ping-pong pair for the group, and one R8 plane for the base alpha');
+  assert.equal(plain.groups, 0);
+});
+
+test('a mask costs one byte per source pixel, never four', () => {
+  const plain = buildDrawPlan(clipProject([{}]));
+  const masked = buildDrawPlan(clipProject([{ mask: 128 }]));
+  assert.equal(masked.bytes - plain.bytes, SIZE * SIZE);
+});
+
+test('a plan over the budget refuses, and says what it would have cost', () => {
+  const plan = buildDrawPlan(clipProject([{}, {}]), { budgetBytes: 1024 });
+  assert.equal(plan.ok, false);
+  assert.match(plan.reason, /budget/i);
+  assert.match(plan.reason, /\d/, 'the refusal has to carry the number');
+  assert.ok(GPU_BUDGET_BYTES > 0);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
