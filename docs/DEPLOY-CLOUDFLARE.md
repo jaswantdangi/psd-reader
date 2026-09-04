@@ -55,7 +55,7 @@ Worker is provably on the same machine.
 ### Deploy and verify
 
 ```
-npx wrangler dev        # local workerd — DO THIS FIRST, see below
+npx wrangler dev        # local workerd — one instance at a time, see the gotcha below
 npx wrangler deploy
 curl https://<worker>.workers.dev/health
 curl -H "Authorization: Bearer $TOKEN" https://<worker>.workers.dev/stats
@@ -91,15 +91,46 @@ Two smaller differences, both deliberate:
   `X-Forwarded-For`/trusted-proxy machinery is needed. `RELAY_TRUSTED_PROXIES`
   has nothing to do here and is not read.
 
-### Not verified
+### What has actually been verified
 
-**No part of `worker/` has run on workerd.** `test/worker.mjs` (33 assertions)
-drives the Durable Object's message handling with fake sockets and fake
-storage. That covers the *policy* — who may send what, when, to whom, and what
-is refused — and nothing about whether Cloudflare accepts the `WebSocketPair`,
-whether attachments survive a real hibernation, or whether the alarm fires.
-`npx wrangler dev` is the only thing that answers those. Run it before
-believing any of this.
+`worker/` has run on **local workerd** via `wrangler dev`, and the following
+were driven end to end over real WebSockets against a real Durable Object:
+
+- `GET /health` answers without waking the object
+- a disallowed origin is refused with **403 before a socket exists**
+- an app `hello` is answered with a six-character code from the alphabet
+- a plugin redeeming it pairs both sides onto the same session id
+- a `tree` frame crosses byte for byte
+- an `event` crosses, and a field the sender invented is **stripped**
+- `event` and `tree` are refused in the app→plugin direction
+- an `error` frame travels both ways
+- `/stats` without a token is byte-identical to any other path (both 426);
+  with a wrong token of the right length, also 426; with the right token, 200,
+  carrying no payload, with the session rebuilt from the live sockets and the
+  backpressure fields **absent** rather than zero
+- a closed socket produces `peer-gone` on the survivor
+
+`test/worker.mjs` (33 assertions) covers the same policy against fake sockets
+and fake storage, so a regression fails in `npm test` rather than only in a
+manual run.
+
+**Still unverified, and only a real deploy answers it:** whether attachments
+survive an *actual* eviction at the edge, and whether the alarm fires there.
+Local dev keeps the object resident, so nothing has hibernated yet.
+
+### One gotcha found while doing this
+
+Two `wrangler dev` instances share **one** local `.wrangler` Durable Object
+SQLite state. Running two at once and then touching `wrangler.toml` triggers a
+hot reload in both, and the second dies with:
+
+```
+Fatal uncaught kj::Exception: workerd/util/sqlite.c++:852:
+  SENTRY_DO SQLite failed; NOSENTRY database is locked: SQLITE_BUSY
+```
+
+It reads like a runtime bug and is not one. Run one instance at a time, or give
+the second its own `--persist-to` directory.
 
 ---
 
@@ -166,8 +197,8 @@ Adobe review; UDT developer mode works now for internal use.
 
 ## Order
 
-1. `npx wrangler dev` and pair against it locally. This is the first time any of
-   `worker/` will have executed.
+1. ~~`npx wrangler dev` and pair against it locally.~~ **Done** — see "What has
+   actually been verified" above. Re-run it after any change to `worker/`.
 2. `npx wrangler deploy`, then `/health` and `/stats`.
 3. Set `RELAY_ALLOWED_ORIGINS` to the Pages domain; set `<meta name="psd-relay">`
    to the Worker; deploy Pages.

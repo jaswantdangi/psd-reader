@@ -2,8 +2,8 @@
 
 **Generated**: 2026-09-04 (updated same day, second pass)
 **Branch**: `phase-1-engine-gpu-memory` — HEAD `cd3c491`, **never pushed** (see Not Yet Done)
-**Status**: In Progress — all engine work green; **four headline claims never verified
-on real hardware**: the GPU tier, the phone, the UXP plugin, and the Workers relay
+**Status**: In Progress — all engine work green; **three headline claims never verified
+on real hardware**: the GPU tier, the phone, and the UXP plugin
 
 > **Read this first.** `HANDOFF.md` in this repo belongs to a **different, concurrent
 > session** working on AI background removal (`src/segment/`, `app/**/cutout*`,
@@ -44,7 +44,7 @@ that could be closed without a phone or a GPU — then hand back the two that ca
 - [x] **App side of sync** — `SyncService` receives a `tree`, reconciles once through `matchLayers`, applies events via `ProjectService`, and refuses what it cannot place. `SyncSheet` shows the code, the match report and what will never sync. App **138 → 165**
 - [x] **`ProjectService.removeLayer` / `.setFrame`** — the engine had both; the app had a path to neither, so `delete` and `crop` events had nowhere to land
 - [x] **Smart filters disclosed and named** — `smart-filters-2` sat at 46.38% with a BLANK cause column. It is one **Liquify** filter, on `placedLayer.filter.list`. A mesh warp, not a blur someone could add
-- [x] **The relay runs on Cloudflare Workers** — `worker/`, a Durable Object. Shares `src/sync/protocol.js` and `server/pairing.js` with the Node relay rather than copying the security model. 33 tests. **Never run on workerd**
+- [x] **The relay runs on Cloudflare Workers** — `worker/`, a Durable Object. Shares `src/sync/protocol.js` and `server/pairing.js` with the Node relay rather than copying the security model. 33 unit tests, plus 16 checks driven through a REAL workerd via wrangler dev — pairing, routing, origin refusal, peer-gone and /stats all verified live
 - [x] **`server/pairing.js` is runtime-portable** — `crypto.getRandomValues` with rejection sampling instead of `node:crypto.randomInt`, plus `snapshot()`/`restore()` so an eviction cannot reset an attacker's rate-limit budget
 - [x] **The relay URL is no longer hardcoded** — `<meta name="psd-relay">`, read at runtime, so one artifact serves local dev, a Pages preview, production and the Android wrapper
 - [x] **`docs/DEPLOY-CLOUDFLARE.md`** — what deploys where, what it costs, and what Cloudflare cannot host
@@ -52,7 +52,6 @@ that could be closed without a phone or a GPU — then hand back the two that ca
 ## Not Yet Done
 
 - [ ] **`origin` points at a repository that does not exist.** `github.com/jaswantdangi/psd-reader` resolves for none of the three accounts `gh` can see (`jaswantdangi`, `dangijaswant`, `hellomipl`). The branch is **181 commits ahead with no upstream** and has never been pushed. Creating a repo publishes all of it, and the owner/visibility choice is not one to make on someone's behalf — so it was left. `git push -u origin phase-1-engine-gpu-memory` is the whole fix once it exists
-- [ ] **Run `npx wrangler dev`** — the first time any of `worker/` will have executed. See `docs/DEPLOY-CLOUDFLARE.md`
 - [ ] **Run the GPU conformance page** — no GLSL in this repo has *ever* been compiled
 - [ ] **Run the UXP plugin** — written this pass, never loaded. `plugin/README.md` ranks the five seams most likely to be wrong
 - [ ] **Run on a phone** — Phase 1's definition of done requires it; never happened

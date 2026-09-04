@@ -61,13 +61,15 @@ RELAY_ALLOWED_ORIGINS = "https://psd-editor.pages.dev"
 # nothing calling a Worker is provably on the same machine.
 
 #
-# NOT VERIFIED. No part of this has run on workerd. `server/relay.js` has 64
-# tests against a real Node server on a real port; this transport has the ones
-# in test/worker.mjs, which drive the Durable Object's message handling with
-# fake sockets and fake storage. That covers the policy and NOTHING about
-# whether Cloudflare accepts the WebSocketPair, honours the attachments across
-# a real hibernation, or fires the alarm. Run `npx wrangler dev` before
-# believing any of it.
+# VERIFIED ON LOCAL workerd, via `wrangler dev`: the WebSocketPair upgrade, a
+# real pairing, tree and event routing, field stripping, the one-way direction
+# rule, error travelling both ways, a 403 for a disallowed origin, peer-gone on
+# a vanished socket, and /stats both with and without a token. `test/worker.mjs`
+# (33) covers the policy against fake sockets; those checks covered the runtime.
+#
+# STILL UNVERIFIED, and only a real deploy answers it: whether attachments
+# survive an ACTUAL eviction at the edge, and whether the alarm fires there.
+# Local dev keeps the object resident, so nothing here has hibernated.
 #
 # KNOWN LOSS vs. the Node relay: there is no backpressure. Workers exposes no
 # `bufferedAmount` and no way to pause a reader. The decaying byte budget
