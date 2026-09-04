@@ -13,6 +13,7 @@ import {
   chooseRenderMode, FRAME_BUDGET_MS, REDUCED_INTERACTION_SCALE,
   panelRows,
 } from '../src/index.js';
+import { parseBlendIf, blendIfFactor } from '../src/composite.js';
 
 let passed = 0;
 const test = (name, fn) => {
@@ -885,6 +886,114 @@ test('the clip chip names the nearest unclipped layer below', () => {
   const orphan = createProject({ width: 4, height: 4, children: [{ name: 'c', ...box, ...px(), clipping: true }] }, 'o.psd');
   assert.equal(panelRows(orphan).rows[0].clipBase, null);
   assert.equal(panelRows(orphan).rows[0].badges.clipped, true);
+});
+
+console.log('\nblend if\n');
+
+/**
+ * Photoshop's "Blend If" (the file calls it layer blending ranges): per-channel
+ * black and white stops that turn a layer transparent according to its OWN
+ * luminosity ("This Layer") or that of the composite it is blending onto
+ * ("Underlying Layer"). Each stop can be SPLIT into two halves, which replaces
+ * the hard cut with a linear feather between them -- and the split halves are
+ * the part naive implementations drop, so they are what these tests pin.
+ *
+ * `blend-if.src.psd` is the fixture. Its top layer carries
+ * `blendingRanges.compositeGraphBlendDestinationRange = [81, 255, 255, 255]`
+ * (ag-psd's spelling, typo included): an underlying black stop split from 81
+ * all the way to 255, i.e. a feather across the entire tonal range. Ignore the
+ * split and you get a hard cut somewhere in that span; the fixture cannot be
+ * matched by accident.
+ */
+const blendIfDoc = await readDocument(bytesOf('fixtures/blend-if.src.psd'), { pixels: 'eager', embedded: true, metadata: false });
+
+test('the fixture really does carry blending-range data', () => {
+  const [under, over] = blendIfDoc.children;
+  assert.deepEqual(under.blendingRanges.compositeGraphBlendDestinationRange, [0, 0, 255, 255],
+    'the bottom layer is the control: every stop at its default');
+  assert.deepEqual(over.blendingRanges.compositeGraphBlendDestinationRange, [81, 255, 255, 255],
+    'the top layer is the one under test: a split underlying black stop');
+});
+
+test('a default range parses to nothing at all, so the common path stays free', () => {
+  // Every one of the 21 fixtures writes a blendingRanges section and twenty of
+  // them are entirely default. Returning null there is what keeps blend-if off
+  // the hot loop for documents that do not use it.
+  assert.equal(parseBlendIf(blendIfDoc.children[0]), null);
+  assert.equal(parseBlendIf({}), null);
+  assert.notEqual(parseBlendIf(blendIfDoc.children[1]), null);
+});
+
+test('a SPLIT stop feathers linearly between its halves', () => {
+  // [81, 255, 255, 255] on the underlying range: 0 below 81, a straight ramp
+  // from 81 to 255, 1 at the top. A hard-cut implementation gives a step
+  // instead and lands on 0 or 1 at every one of these.
+  const bi = parseBlendIf(blendIfDoc.children[1]);
+  const at = (v) => blendIfFactor(bi, 255, 255, 255, v, v, v);
+  assert.equal(at(0), 0);
+  assert.equal(at(80), 0);
+  assert.ok(at(81) > 0 && at(81) < 0.01, `the bottom of the ramp is the first bucket, not zero: ${at(81)}`);
+  assert.ok(Math.abs(at(168) - 0.5) < 0.01, `midpoint should feather to ~0.5, got ${at(168)}`);
+  assert.ok(Math.abs(at(124.5) - 0.25) < 0.01, `quarter point should feather to ~0.25, got ${at(124.5)}`);
+  assert.equal(at(255), 1);
+  // The whole point: a hard cut anywhere in 81..255 would make the two
+  // interior samples 0 or 1, and this is the only thing that catches it.
+  assert.ok(at(124.5) < at(168) && at(168) < at(200), 'the ramp has to be monotonic');
+});
+
+test('an UNSPLIT stop is a hard cut, and the source range reads the layer', () => {
+  const hard = parseBlendIf({ blendingRanges: { compositeGrayBlendSource: [128, 128, 255, 255] } });
+  assert.equal(blendIfFactor(hard, 127, 127, 127, 0, 0, 0), 0);
+  assert.equal(blendIfFactor(hard, 128, 128, 128, 0, 0, 0), 1);
+  // A white stop cuts from the other end, and splits the same way.
+  const white = parseBlendIf({ blendingRanges: { compositeGrayBlendSource: [0, 0, 100, 200] } });
+  assert.equal(blendIfFactor(white, 100, 100, 100, 0, 0, 0), 1);
+  assert.equal(blendIfFactor(white, 201, 201, 201, 0, 0, 0), 0);
+  assert.ok(blendIfFactor(white, 200, 200, 200, 0, 0, 0) < 0.01, 'the last bucket of the ramp, not past its end');
+  assert.ok(Math.abs(blendIfFactor(white, 150, 150, 150, 0, 0, 0) - 0.5) < 0.01);
+});
+
+const blendIfStat = compareBuffers(
+  flattenOnto(compositeDocument(blendIfDoc)), flattenOnto(blendIfDoc.embeddedComposite));
+
+test('the inspector matches the composite Photoshop embedded in the file', () => {
+  // BEFORE this work: 25.80% of pixels wrong beyond rounding, max channel
+  // delta 226 -- the whole top layer drawn at full opacity. That is the number
+  // the accuracy table's >=10% bucket was counting. AFTER: 1.26%, maxDelta 3.
+  //
+  // 1.26% AND NOT ZERO, AND THE REASON IS MEASURED, NOT GUESSED. Photoshop
+  // DITHERS the feather. Collect every pixel of the fixture that sits on one
+  // identical flat grey underlying value and Photoshop's own composite spreads
+  // its output over about five adjacent values, while the MEAN of that spread
+  // tracks the ramp implemented here to within 0.4/255. It does the same below
+  // the black stop, where blend-if contributes nothing at all and the answer
+  // can only be the backdrop -- so the spread is Photoshop's noise, not our
+  // arithmetic. A specific noise pattern is not reproducible, so this bar is
+  // where the fixture can land, and maxDelta pins how far the noise reaches.
+  //
+  // Tighten it if the number improves. Do NOT loosen it.
+  assert.ok(blendIfStat.percentReal < 1.5,
+    `expected under 1.5% real diff, got ${blendIfStat.percentReal.toFixed(2)}% (maxDelta ${blendIfStat.maxDelta})`);
+  assert.ok(blendIfStat.maxDelta <= 3,
+    `dither reaches +-2; a maxDelta of ${blendIfStat.maxDelta} is a formula error, not noise`);
+});
+
+test('the editor renderer agrees with the inspector exactly', () => {
+  // Same bar clipping and masks had to clear: preview and export cannot render
+  // a document one way while the read-only inspector renders it another.
+  //
+  // `createProject` lives in src/edit.js, which this session does not own, so
+  // the one-line carry of `blendingRanges` onto the project layer is not in
+  // place yet and is done here instead. That is a REAL GAP, not a test
+  // convenience: until toLayer() carries the field, the editor drops blend-if.
+  const project = createProject(blendIfDoc, 'blend-if.src.psd');
+  blendIfDoc.children.forEach((node, i) => { project.layers[i].blendingRanges = node.blendingRanges; });
+
+  const stat = compareBuffers(
+    flattenOnto(renderProject(project, { scale: 1 })), flattenOnto(compositeDocument(blendIfDoc)));
+  assert.equal(stat.beyondRounding, 0,
+    `expected an exact match, got ${stat.beyondRounding} of ${stat.total}`);
+  assert.equal(stat.maxDelta, 0);
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

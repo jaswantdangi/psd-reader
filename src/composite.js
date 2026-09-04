@@ -113,6 +113,188 @@ function blendNonSeparable(mode, br, bg, bb, sr, sg, sb) {
   }
 }
 
+// ------------------------------------------------------------------ blend if
+
+/**
+ * Photoshop's "Blend If" -- the file calls it layer blending ranges.
+ *
+ * Two sliders per channel. "This Layer" reads the layer's OWN pixel, "Underlying
+ * Layer" reads the composite it is being blended onto; each has a black stop and
+ * a white stop, and pixels outside the stops are dropped. Every stop can be
+ * SPLIT into two halves (alt-drag in the dialog), which replaces the hard cut
+ * with a linear feather between the halves. The split is not a nicety -- it is
+ * what the feature is used for, and dropping it turns a gradient into a step.
+ *
+ * ## It is an alpha multiplier, and nothing else
+ *
+ * That is the whole reason this needs no new machinery. `blendInto` already
+ * computes `as` as a product -- source alpha x opacity x mask x clipAlpha --
+ * and blend-if is one more factor in it. Multiplication commutes, so where it
+ * enters the product does not matter; WHICH TWO PIXELS it reads does.
+ *
+ * ## Which two pixels: "this layer" and "underlying layer"
+ *
+ * ONE RULE, no special cases: blend-if is evaluated at the `blendInto` call
+ * where the layer's own opacity and blend mode are spent. "This layer" is the
+ * source handed to that call, "underlying layer" is the buffer it is being
+ * blended ONTO. Everything else follows from that:
+ *
+ *   - a plain layer: its own pixels against the canvas so far.
+ *   - a layer CLIPPED to a base: its own pixels against the GROUP buffer, i.e.
+ *     the base plus whatever clipped layers already went down on it. Not the
+ *     canvas. A clipped layer is blended into the group, so the group is the
+ *     thing underlying it -- reading the canvas instead would be reading a
+ *     backdrop it never touches.
+ *   - the BASE of a clip run: the group buffer against the canvas, at step 4,
+ *     because that is where the base's opacity and mode are spent. Its "this
+ *     layer" is therefore the composited run, not the base's own pixels. The
+ *     run is blended as a unit and blend-if belongs to the unit.
+ *   - a group: the group's flattened buffer against the canvas.
+ *
+ * NO FIXTURE EXERCISES THE CLIPPED CASES -- `blend-if.src.psd` is two unclipped
+ * layers -- so the three readings above are a stated choice, not a measured
+ * one. They are the reading that needs no branch anywhere.
+ *
+ * ## Cost
+ *
+ * NO PER-LAYER BUFFER. The factor depends on the destination pixel, which
+ * `blendInto` is already holding when it needs it, so it is computed inline in
+ * the loop that was already running. Per layer this costs one small parsed
+ * object (~200 bytes, `parseBlendIf` below), and null on the twenty of
+ * twenty-one fixtures whose ranges are all default -- so documents that do not
+ * use blend-if pay one `if` per layer and nothing per pixel.
+ */
+
+/**
+ * The value a Gray range is compared against.
+ *
+ * Photoshop's own 8-bit RGB->grey weighting, as integers over 256. Same curve
+ * as the `lum` the non-separable blend modes use (0.301/0.590/0.109 against
+ * 0.30/0.59/0.11), but the weights sum to 256 EXACTLY, so a neutral grey comes
+ * back as itself rather than as 127.99999999999999. A stop lands on an exact
+ * integer, so a float that misses by 1e-14 is the difference between a pixel
+ * being kept and being cut -- and `lum` misses.
+ */
+const blendIfGray = (r, g, b) => (r * 77 + g * 151 + b * 28) / 256;
+
+/** A range is four bytes: black low, black high, white low, white high. */
+const RANGE_IS_DEFAULT = (r) =>
+  !r || r.length < 4 || (r[0] === 0 && r[1] === 0 && r[2] === 255 && r[3] === 255);
+
+/**
+ * One slider's contribution: 0 where the value is cut, 1 where it is kept, and
+ * a ramp between the halves of a split stop.
+ *
+ * THE RAMP DIVIDES BY (b1 - b0 + 1), NOT (b1 - b0), and offsets the value by
+ * half a step. That is not a fudge -- it was READ OFF the fixture. Averaging
+ * Photoshop's own composite over every pixel of each underlying grey level
+ * (blend-if.src.psd has ~1000 per level) gives an alpha curve that the naive
+ * (v - b0) / (b1 - b0) misses by a consistent +0.7/255 near the black stop
+ * while agreeing at the top, and that
+ *
+ *     f = (v - b0 + 0.5) / (b1 - b0 + 1)
+ *
+ * tracks to within 0.4/255 across the whole span. It is the ordinary
+ * "N buckets, sample at the centre" quantisation: the stops are inclusive
+ * integer bounds, so the ramp covers b1 - b0 + 1 values, not b1 - b0.
+ * On the fixture the difference is 1.76% of pixels wrong versus 1.26%.
+ *
+ * AN UNSPLIT STOP IS A HARD CUT, and has to be its own branch rather than a
+ * zero-width ramp: the bucket formula would put a value sitting exactly ON an
+ * unsplit stop at half alpha, and the DEFAULT range is an unsplit stop at 0, so
+ * every pure-black pixel in every document that has no blend-if at all would
+ * come out 50% transparent.
+ *
+ * `v < b0`, not `<=`, for the same reason: a default black stop at 0 must keep
+ * a pixel of value 0.
+ *
+ * At and above b1 the layer is fully visible -- the last half-step of the ramp
+ * is dropped so that a fully white underlying pixel is exactly 1 rather than
+ * 0.997. No fixture reaches the top of a ramp, so that is a stated choice.
+ */
+function rangeFactor(v, b0, b1, w0, w1) {
+  let f = 1;
+  if (b0 === b1) { if (v < b0) return 0; }
+  else if (v < b1) {
+    f = (v - b0 + 0.5) / (b1 - b0 + 1);
+    if (f <= 0) return 0;
+  }
+  if (w0 === w1) { if (v > w0) return 0; }
+  else if (v > w0) {
+    const g = (w1 - v + 0.5) / (w1 - w0 + 1);
+    if (g <= 0) return 0;
+    f *= g;
+  }
+  return f;
+}
+
+/**
+ * Read a layer's blending ranges into the smallest thing the inner loop can
+ * use, or `null` when every stop is at its default and there is nothing to do.
+ *
+ * ag-psd's field names are its own, typo included:
+ *   `compositeGrayBlendSource`            -- Gray, This Layer
+ *   `compositeGraphBlendDestinationRange` -- Gray, Underlying Layer
+ *   `ranges[i].sourceRange / .destRange`  -- per colour channel
+ *
+ * CHANNEL ORDER IS ASSUMED, NOT VERIFIED. `ranges` is written in the layer's
+ * own channel order and no fixture here carries a non-default per-channel
+ * range, so `ranges[0..2]` are taken to be R, G, B for an RGB document. A
+ * document that does use them raises a warning saying so rather than rendering
+ * a confident guess in silence.
+ *
+ * @returns {{graySrc:number[]|null, grayDst:number[]|null,
+ *            chans:{i:number, src:number[]|null, dst:number[]|null}[]} | null}
+ */
+export function parseBlendIf(layer) {
+  const br = layer && layer.blendingRanges;
+  if (!br) return null;
+
+  const graySrc = RANGE_IS_DEFAULT(br.compositeGrayBlendSource) ? null : br.compositeGrayBlendSource;
+  const grayDst = RANGE_IS_DEFAULT(br.compositeGraphBlendDestinationRange)
+    ? null : br.compositeGraphBlendDestinationRange;
+
+  const chans = [];
+  const ranges = br.ranges || [];
+  for (let i = 0; i < ranges.length && i < 3; i++) {
+    const src = RANGE_IS_DEFAULT(ranges[i].sourceRange) ? null : ranges[i].sourceRange;
+    const dst = RANGE_IS_DEFAULT(ranges[i].destRange) ? null : ranges[i].destRange;
+    if (src || dst) chans.push({ i, src, dst });
+  }
+
+  if (!graySrc && !grayDst && !chans.length) return null;
+  return { graySrc, grayDst, chans };
+}
+
+/**
+ * The alpha multiplier for one pixel: source RGB against destination RGB.
+ *
+ * Every active slider multiplies, so a layer restricted on both Gray and Red
+ * shows only where both agree. Photoshop's dialog offers one channel at a time
+ * but keeps what you set on the others, and the file stores all of them.
+ *
+ * @returns {number} 0..1
+ */
+export function blendIfFactor(bi, sr, sg, sb, dr, dg, db) {
+  let f = 1;
+  if (bi.graySrc) {
+    f = rangeFactor(blendIfGray(sr, sg, sb), bi.graySrc[0], bi.graySrc[1], bi.graySrc[2], bi.graySrc[3]);
+    if (f <= 0) return 0;
+  }
+  if (bi.grayDst) {
+    f *= rangeFactor(blendIfGray(dr, dg, db), bi.grayDst[0], bi.grayDst[1], bi.grayDst[2], bi.grayDst[3]);
+    if (f <= 0) return 0;
+  }
+  for (let k = 0; k < bi.chans.length; k++) {
+    const c = bi.chans[k];
+    const s = c.i === 0 ? sr : c.i === 1 ? sg : sb;
+    const d = c.i === 0 ? dr : c.i === 1 ? dg : db;
+    if (c.src) { f *= rangeFactor(s, c.src[0], c.src[1], c.src[2], c.src[3]); if (f <= 0) return 0; }
+    if (c.dst) { f *= rangeFactor(d, c.dst[0], c.dst[1], c.dst[2], c.dst[3]); if (f <= 0) return 0; }
+  }
+  return f;
+}
+
 // ---------------------------------------------------------------- buffers
 
 export const createBuffer = (width, height) => ({
@@ -122,8 +304,12 @@ export const createBuffer = (width, height) => ({
 /**
  * Source-over compositing with a blend function, straight (unassociated) alpha.
  * Iterates only the source rectangle, so cost scales with layer size, not canvas.
+ *
+ * `blendIf` is a parseBlendIf() descriptor or null. It is one more factor in
+ * the same `as` product as opacity, the mask and clipAlpha -- see the blend-if
+ * section above for which two pixels it reads and why it needs no buffer.
  */
-export function blendInto(dest, src, rect, opacity, mode, clipAlpha) {
+export function blendInto(dest, src, rect, opacity, mode, clipAlpha, blendIf) {
   const fn = SEPARABLE[mode];
   const nonSep = NON_SEPARABLE.has(mode);
   const blend = fn || SEPARABLE.normal;
@@ -142,6 +328,10 @@ export function blendInto(dest, src, rect, opacity, mode, clipAlpha) {
       let as = (src[si + 3] / 255) * opacity;
       if (rect.mask) as *= rect.mask[sy * rect.width + (x - rect.left)] / 255;
       if (clipAlpha) as *= clipAlpha[y * dest.width + x] / 255;
+      // Reads the destination pixel, so it has to be here rather than in a
+      // precomputed plane -- the destination is what this loop is writing.
+      if (blendIf) as *= blendIfFactor(blendIf, src[si], src[si + 1], src[si + 2],
+        dest.data[di], dest.data[di + 1], dest.data[di + 2]);
       if (as <= 0) continue;
 
       const ab = dest.data[di + 3] / 255;
@@ -201,19 +391,25 @@ function renderList(list, width, height, ctx) {
       const opacity = layer.opacity ?? 1;
       const mode = layer.blendMode || 'normal';
 
+      // One descriptor per layer, per composite. Null on every document that
+      // does not use blend-if, which is twenty of the twenty-one fixtures.
+      const blendIf = parseBlendIf(layer);
+      if (blendIf && blendIf.chans.length)
+        ctx.warnings.add('A per-channel Blend If range is applied under an assumed R,G,B channel order — no fixture verifies it.');
+
       if (mode === 'dissolve') ctx.warnings.add('`dissolve` blend mode is not implemented — rendered as normal.');
       if (layer.adjustment) ctx.warnings.add('Adjustment layers are not applied — the composite will differ where they appear.');
       if (layer.effects) ctx.warnings.add('Layer effects (drop shadow, stroke, glow…) are not applied.');
 
       if (layer.children) {
         const inner = renderList(layer.children, width, height, ctx);
-        if (mode === 'pass through' && opacity === 1 && !clipped.length) {
+        if (mode === 'pass through' && opacity === 1 && !clipped.length && !blendIf) {
           blendInto(dest, inner.data, { left: 0, top: 0, width, height }, 1, 'normal');
         } else {
           if (mode === 'pass through')
             ctx.warnings.add('A pass-through group has opacity or blending applied — rendered as a normal group.');
           blendInto(dest, inner.data, { left: 0, top: 0, width, height }, opacity,
-            mode === 'pass through' ? 'normal' : mode);
+            mode === 'pass through' ? 'normal' : mode, null, blendIf);
         }
       } else if (layer.imageData) {
         const rect = layerRect(layer);
@@ -232,11 +428,16 @@ function renderList(list, width, height, ctx) {
               const cr = layerRect(c);
               if (cr.width <= 0 || cr.height <= 0) continue;
               cr.mask = projectMask(c, cr);
-              blendInto(group, c.imageData.data, cr, c.opacity ?? 1, c.blendMode || 'normal', base);
+              // "Underlying" for a clipped layer is `group` -- the buffer it is
+              // actually blending onto -- not `dest`. See the blend-if note.
+              blendInto(group, c.imageData.data, cr, c.opacity ?? 1, c.blendMode || 'normal',
+                base, parseBlendIf(c));
             }
-            blendInto(dest, group.data, { left: 0, top: 0, width, height }, opacity, mode);
+            // The base's blend-if is spent HERE, with its opacity and mode, so
+            // its "this layer" is the composited run rather than its own pixels.
+            blendInto(dest, group.data, { left: 0, top: 0, width, height }, opacity, mode, null, blendIf);
           } else {
-            blendInto(dest, layer.imageData.data, rect, opacity, mode);
+            blendInto(dest, layer.imageData.data, rect, opacity, mode, null, blendIf);
           }
         }
       }
