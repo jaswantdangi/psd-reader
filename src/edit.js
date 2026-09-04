@@ -782,8 +782,60 @@ export function discardTo(project, historyLength) {
 // ---------------------------------------------------------------- hit testing
 
 /**
- * Topmost visible layer whose pixel at (x, y) is not transparent.
+ * What a layer DRAWS at a document point, 0..255 -- its pixel alpha times its
+ * mask. Or `null` when it has no buffer to read at all.
+ *
+ * The product is the one `blendInto` computes: `prepareLayer` resamples
+ * `layer.mask` into the destination rect and `blendInto` multiplies `as` by
+ * it, so anything that reads alpha alone is reading a layer's old shape rather
+ * than its drawn one.
+ *
+ * `disabled` is honoured for exactly the reason `prepareLayer` honours it:
+ * Photoshop saves switched-off masks, and applying one hides a layer that is
+ * fully on screen -- as wrong as ignoring an enabled one, in the other
+ * direction.
+ *
+ * NEAREST on both planes. render.js resamples the mask BILINEARLY into the
+ * rect, but this reads one point instead of building a plane, and hitTest has
+ * always read its pixels nearest; the two can disagree only on the sub-pixel
+ * edge of a soft mask, which is finer than a fingertip.
+ *
+ * The mask is sampled on ITS OWN grid rather than the pixel grid. `toLayer`
+ * builds the two on identical dimensions on purpose, so today the ratio is 1 --
+ * but `layer.rendered` is a re-render at whatever size the text needed, and
+ * mapping by ratio costs nothing and cannot drift.
+ *
+ * @param {object} layer  the point must already be inside its bounds
+ * @returns {number|null}
+ */
+function coverageAt(layer, x, y) {
+  const pixels = layer.rendered || layer.pixels;
+  if (!pixels) return null;
+
+  // Map the document point back into the layer's own (unscaled) pixel grid.
+  const sx = Math.floor(((x - layer.x) / layer.w) * pixels.width);
+  const sy = Math.floor(((y - layer.y) / layer.h) * pixels.height);
+  if (sx < 0 || sy < 0 || sx >= pixels.width || sy >= pixels.height) return 0;
+
+  const alpha = pixels.data[(sy * pixels.width + sx) * 4 + 3];
+  const mask = layer.mask;
+  if (!alpha || !mask || mask.disabled || !mask.data || mask.width <= 0 || mask.height <= 0)
+    return alpha;
+
+  const mx = Math.min(mask.width - 1, Math.floor(((x - layer.x) / layer.w) * mask.width));
+  const my = Math.min(mask.height - 1, Math.floor(((y - layer.y) / layer.h) * mask.height));
+  return (alpha * mask.data[my * mask.width + mx]) / 255;
+}
+
+/**
+ * Topmost visible layer that actually DRAWS something at (x, y).
  * Falls back to bounds for layers we re-render (text being retyped).
+ *
+ * "Draws something" is pixel alpha times the layer's mask, thresholded at 8 --
+ * the same product `blendInto` multiplies into `as`, so a tap agrees with the
+ * picture. It used to be pixel alpha alone, and a layer masked down to a small
+ * shape stayed pickable across its whole bounding box: the user tapped what
+ * was visibly the layer underneath and selected the masked one instead.
  *
  * `x`/`y` are CANVAS coordinates — the space `viewToDoc` produces, and the
  * space the rendered buffer is in. On a cropped document that is the frame's
@@ -802,14 +854,11 @@ export function hitTest(project, canvasX, canvasY) {
     if (!layer.visible || layer.opacity === 0) continue;
     if (x < layer.x || y < layer.y || x >= layer.x + layer.w || y >= layer.y + layer.h) continue;
 
-    const pixels = layer.rendered || layer.pixels;
-    if (!pixels) return layer;
-
-    // Map canvas point back into the layer's own (unscaled) pixel grid.
-    const sx = Math.floor(((x - layer.x) / layer.w) * pixels.width);
-    const sy = Math.floor(((y - layer.y) / layer.h) * pixels.height);
-    if (sx < 0 || sy < 0 || sx >= pixels.width || sy >= pixels.height) continue;
-    if (pixels.data[(sy * pixels.width + sx) * 4 + 3] > 8) return layer;
+    const covered = coverageAt(layer, x, y);
+    // No buffer at all: bounds are all there is to go on, so the layer takes
+    // the tap. `0` would mean "transparent here" and is a different answer.
+    if (covered === null) return layer;
+    if (covered > 8) return layer;
   }
   return null;
 }

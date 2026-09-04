@@ -96,6 +96,124 @@ test('hit test finds the top opaque layer and misses empty space', () => {
   assert.equal(hitTest(project, -50, -50), null, 'expected a miss outside the canvas');
 });
 
+// -------------------------------------------------------------- masks and taps
+//
+// `hitTest` thresholded the layer's own pixel alpha and never consulted
+// `layer.mask`, so a layer masked down to a small shape stayed selectable
+// across its whole bounding box -- and swallowed the taps meant for whatever
+// is actually drawn underneath it.
+//
+// vector-and-mask.src.psd is used rather than a shape invented to make the
+// assertion true: its single layer is opaque colour under a real Photoshop
+// mask, and the two points below were read off the RENDER, not off the mask.
+const maskProject = createProject(
+  await readDocument(new Uint8Array(fs.readFileSync('fixtures/vector-and-mask.src.psd')),
+    { pixels: 'eager', metadata: false }),
+  'vector-and-mask.src.psd');
+const maskLayer = maskProject.layers[0];
+const maskRender = renderProject(maskProject);
+const drawnAlpha = (x, y) => maskRender.data[(y * maskRender.width + x) * 4 + 3];
+
+/** Masked away: opaque pixels, mask 0, nothing on the canvas. */
+const HIDDEN = { x: 43, y: 35 };
+/** Masked in: opaque pixels, mask 255, solid on the canvas. */
+const SHOWN = { x: 35, y: 35 };
+
+test('the fixture really does carry a mask that hides drawn pixels', () => {
+  // Without this the next test could pass on a fixture whose mask covers
+  // everything, which is the same as carrying no mask at all.
+  assert.ok(maskLayer.mask, 'vector-and-mask.src.psd must carry a layer mask');
+  assert.equal(maskLayer.mask.disabled, false, 'and it must be switched ON in the file');
+  const px = maskLayer.pixels;
+  const sx = Math.floor(((HIDDEN.x - maskLayer.x) / maskLayer.w) * px.width);
+  const sy = Math.floor(((HIDDEN.y - maskLayer.y) / maskLayer.h) * px.height);
+  assert.equal(px.data[(sy * px.width + sx) * 4 + 3], 255, 'HIDDEN sits on opaque pixels');
+  assert.equal(maskLayer.mask.data[sy * maskLayer.mask.width + sx], 0, 'that the mask erases');
+  assert.equal(drawnAlpha(HIDDEN.x, HIDDEN.y), 0, 'so the renderer draws nothing there');
+  assert.equal(drawnAlpha(SHOWN.x, SHOWN.y), 255, 'and draws solid colour at SHOWN');
+});
+
+test('a point the mask hides is not selectable', () => {
+  assert.equal(hitTest(maskProject, HIDDEN.x, HIDDEN.y)?.name ?? null, null,
+    'the renderer draws nothing here - picking the layer anyway is the bug');
+});
+
+test('a point the mask keeps is still selectable', () => {
+  assert.equal(hitTest(maskProject, SHOWN.x, SHOWN.y)?.id, maskLayer.id);
+});
+
+test('a disabled mask behaves as no mask at all', () => {
+  // Photoshop saves switched-off masks. Applying one is as wrong as ignoring
+  // an enabled one, just in the other direction: the layer is fully drawn, so
+  // it must be fully pickable.
+  maskLayer.mask.disabled = true;
+  try {
+    assert.equal(hitTest(maskProject, HIDDEN.x, HIDDEN.y)?.id, maskLayer.id,
+      'a switched-off mask must not remove the layer from the pick');
+  } finally {
+    maskLayer.mask.disabled = false;
+  }
+  assert.equal(hitTest(maskProject, HIDDEN.x, HIDDEN.y)?.name ?? null, null,
+    'and switching it back on restores the hole');
+});
+
+// Hand-built from here, because no fixture stacks a masked layer over another
+// one - and reaching what is underneath a hole is the user-visible point of
+// the whole fix.
+const plane = (w, h, fn) => {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const [r, g, b, a] = fn(x, y);
+      const o = (y * w + x) * 4;
+      data[o] = r; data[o + 1] = g; data[o + 2] = b; data[o + 3] = a;
+    }
+  return { width: w, height: h, data };
+};
+const solidLeaf = (name, [left, top, right, bottom], rgb, extra = {}) => ({
+  name, left, top, right, bottom,
+  imageData: plane(right - left, bottom - top, () => [rgb[0], rgb[1], rgb[2], 255]),
+  ...extra,
+});
+/** A greyscale mask node on its own bounds, in the shape ag-psd reports one. */
+const greyMask = ([left, top, right, bottom], fn, extra = {}) => ({
+  left, top, right, bottom, defaultColor: 0,
+  imageData: plane(right - left, bottom - top, (x, y) => { const v = fn(x, y); return [v, v, v, 255]; }),
+  ...extra,
+});
+
+// 40x40. `under` fills the canvas; `over` covers it too, but its mask keeps
+// only the right half, so the left half is a hole straight through to `under`.
+const holeDoc = () => ({
+  width: 40, height: 40,
+  children: [
+    solidLeaf('under', [0, 0, 40, 40], [30, 30, 30]),
+    solidLeaf('over', [0, 0, 40, 40], [200, 60, 60],
+      { mask: greyMask([0, 0, 40, 40], (x) => (x < 20 ? 0 : 255)) }),
+  ],
+});
+
+test('the layer below is reached through a hole in the mask', () => {
+  const p = createProject(holeDoc(), 'hole.psd');
+  const [under, over] = p.layers;
+  assert.equal(hitTest(p, 30, 20)?.id, over.id, 'the masked-in half still picks the top layer');
+  assert.equal(hitTest(p, 10, 20)?.id, under.id,
+    'through the hole the tap must reach what is actually drawn there');
+});
+
+test('tap-cycling still walks down the pile', () => {
+  // How the canvas cycles a repeated tap: the engine's own rule applied to a
+  // SHORTER stack (project.service.ts `hitTestBelow`). A shallow project has
+  // to keep working - and a clipping base has to still be findable inside it,
+  // which it is, because a run's base is always at or below its members.
+  const p = createProject(holeDoc(), 'hole.psd');
+  const [under, over] = p.layers;
+  const below = (x, y, index) => hitTest({ ...p, layers: p.layers.slice(0, index) }, x, y);
+  assert.equal(hitTest(p, 30, 20)?.id, over.id);
+  assert.equal(below(30, 20, 1)?.id, under.id, 'the second tap reaches the layer beneath');
+  assert.equal(below(30, 20, 0)?.name ?? null, null, 'and the third finds nothing left to walk to');
+});
+
 console.log('\nrender\n');
 
 test('renders at document resolution', () => {
