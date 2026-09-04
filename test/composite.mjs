@@ -12,6 +12,8 @@ console.log(
 console.log('-'.repeat(100));
 
 let exact = 0, close = 0, off = 0, skipped = 0;
+/** fixture -> {real, maxDelta} for this run, checked against CEILINGS below. */
+const measured = new Map();
 
 for (const f of files) {
   const name = f.replace(/\.src\.(psd|psb)$/, '');
@@ -46,6 +48,8 @@ for (const f of files) {
         : /dissolve/.test(w) ? 'dissolve' : /pass-through/.test(w) ? 'pass-through' : '?'))
       .join(', ');
 
+    measured.set(name, { real: stat.percentReal, maxDelta: stat.maxDelta });
+
     console.log(
       name.padEnd(18) +
       `${doc.width}x${doc.height}`.padEnd(13) +
@@ -64,3 +68,92 @@ for (const f of files) {
 console.log('-'.repeat(100));
 console.log(`${files.length} files  |  <0.5% diff: ${exact}   <10%: ${close}   >=10%: ${off}   skipped: ${skipped}`);
 console.log('\nA non-zero diff is expected wherever adjustments/effects appear — we do not apply those.');
+
+/**
+ * PER-FIXTURE CEILINGS. Nothing may get worse than the number beside it.
+ *
+ * The summary line above was treated as this project's stop condition for
+ * months and ENFORCED NOTHING. It printed three bucket counts and always exited
+ * 0, so a compositing regression went green and would be caught only if someone
+ * happened to read the number and remember what it used to be.
+ *
+ * Buckets alone would still be too weak, because they are counts: one fixture
+ * improving while another regresses leaves 12/6/3 completely unchanged. These
+ * are per-fixture, so the two cannot cancel out.
+ *
+ * maxDelta is checked as well as the percentage. A change can move a few pixels
+ * far further wrong while barely touching the percentage, and maxDelta is the
+ * half that catches it -- `gradient` sits at 0.00% with maxDelta 1, where the
+ * percentage alone would notice nothing at all if it broke.
+ *
+ * A fixture missing from this table is an ERROR, not a skip. Adding one to
+ * fixtures/ has to be a deliberate act that records what it scores, or the
+ * corpus silently grows an unguarded file.
+ *
+ * The non-zero entries are unimplemented features, not bugs: effects (layer
+ * styles), smart-filters-2, layer-comps, adjustments, stroke. They are ceilings
+ * on known gaps, not targets.
+ */
+const CEILINGS = new Map(Object.entries({
+  'adjustments':     { real: 4.60,  maxDelta: 71 },
+  'annotations':     { real: 0,     maxDelta: 0 },
+  'artboards':       { real: 9.79,  maxDelta: 255 },
+  'blend-if':        { real: 1.26,  maxDelta: 3 },
+  'boolean':         { real: 0.18,  maxDelta: 57 },
+  'effects':         { real: 23.03, maxDelta: 186 },
+  'float-color':     { real: 7.96,  maxDelta: 89 },
+  'gradient':        { real: 0,     maxDelta: 1 },
+  'group-blend':     { real: 0,     maxDelta: 1 },
+  'layer-comps':     { real: 10.84, maxDelta: 255 },
+  'masks':           { real: 4.57,  maxDelta: 58 },
+  'psb2':            { real: 0,     maxDelta: 0 },
+  'shapes':          { real: 0,     maxDelta: 0 },
+  'smart':           { real: 0,     maxDelta: 0 },
+  'smart-filters-2': { real: 46.38, maxDelta: 255 },
+  'stroke':          { real: 6.18,  maxDelta: 172 },
+  'text':            { real: 0,     maxDelta: 0 },
+  'text-box':        { real: 0,     maxDelta: 0 },
+  'vector-and-mask': { real: 0,     maxDelta: 0 },
+  'vectors':         { real: 0,     maxDelta: 0 },
+  'werps':           { real: 0,     maxDelta: 0 },
+}));
+
+// Compared at 2 decimal places, the precision the table above prints. Anything
+// finer is noise from the last bit of a float, not a change in what we render.
+const round2 = (v) => Math.round(v * 100) / 100;
+
+const regressions = [];
+const improvements = [];
+
+for (const [name, got] of measured) {
+  const ceiling = CEILINGS.get(name);
+  if (!ceiling) {
+    regressions.push(`${name}: not in CEILINGS -- add it, recording real ${round2(got.real)} / maxDelta ${got.maxDelta}`);
+    continue;
+  }
+  if (round2(got.real) > ceiling.real)
+    regressions.push(`${name}: real ${round2(got.real)}% is worse than its ceiling ${ceiling.real}%`);
+  if (got.maxDelta > ceiling.maxDelta)
+    regressions.push(`${name}: maxDelta ${got.maxDelta} is worse than its ceiling ${ceiling.maxDelta}`);
+  if (round2(got.real) < ceiling.real || got.maxDelta < ceiling.maxDelta)
+    improvements.push(`${name}: ${ceiling.real}% / ${ceiling.maxDelta} -> ${round2(got.real)}% / ${got.maxDelta}`);
+}
+
+for (const name of CEILINGS.keys())
+  if (!measured.has(name))
+    regressions.push(`${name}: has a ceiling but did not run -- it failed to parse, or left fixtures/`);
+
+if (improvements.length) {
+  console.log('\nIMPROVED. Tighten these ceilings in test/composite.mjs, or they stop guarding the ground just won:');
+  for (const line of improvements) console.log('  ' + line);
+}
+
+if (regressions.length) {
+  console.log('\nACCURACY REGRESSION -- our composite moved away from Photoshop:');
+  for (const line of regressions) console.log('  ' + line);
+  console.log('\nThese are per-fixture ceilings, not bucket counts, so this cannot be');
+  console.log('a rounding artefact of one file improving while another got worse.');
+  process.exitCode = 1;
+} else {
+  console.log(`\nAll ${measured.size} fixtures within their accuracy ceilings.`);
+}
