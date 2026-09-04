@@ -2,7 +2,22 @@ import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@a
 import { NgTemplateOutlet } from '@angular/common';
 import { SyncService } from '../services/sync.service';
 
-const DEFAULT_RELAY = 'ws://localhost:8787';
+const LOCAL_RELAY = 'ws://localhost:8787';
+
+/**
+ * Where the relay lives, from `<meta name="psd-relay">` in index.html.
+ *
+ * Runtime rather than build time on purpose: one artifact then serves local
+ * development, a Pages preview and production, and the Android wrapper does
+ * not need a build of its own to point somewhere else. Falls back to loopback
+ * so `npm start` works with no configuration at all.
+ */
+function configuredRelay(): string {
+  const meta = typeof document === 'undefined'
+    ? null
+    : document.querySelector('meta[name="psd-relay"]');
+  return meta?.getAttribute('content')?.trim() || LOCAL_RELAY;
+}
 
 /**
  * Connect this file to the same file open in Photoshop.
@@ -171,7 +186,7 @@ const DEFAULT_RELAY = 'ws://localhost:8787';
 })
 export class SyncSheet {
   protected sync = inject(SyncService);
-  protected relay = signal(DEFAULT_RELAY);
+  protected relay = signal(configuredRelay());
 
   /**
    * Refusals grouped by reason and counted.

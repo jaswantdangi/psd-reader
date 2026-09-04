@@ -1,0 +1,75 @@
+#
+# The sync relay on Cloudflare Workers.
+#
+# `npx wrangler deploy` from the repo root. `npx wrangler dev` runs it locally
+# on workerd, which is the ONLY way to find out whether any of this works --
+# see the note at the bottom.
+#
+# There is deliberately no `nodejs_compat` flag. The whole import graph is pure
+# ESM with zero Node built-ins:
+#
+#   worker/index.js -> worker/hub.js -> src/sync/protocol.js -> src/sync/identity.js
+#                                    -> server/pairing.js
+#                                    -> server/net.js
+#                                    -> worker/config.js
+#
+# That is not luck. `server/pairing.js` used `node:crypto.randomInt` and was
+# changed to `crypto.getRandomValues`, precisely so the pairing policy -- which
+# IS the security model -- has one implementation rather than one per runtime.
+# If a Node built-in ever appears in that graph, fix the import rather than
+# reaching for the compat flag.
+#
+name = "psd-sync-relay"
+main = "worker/index.js"
+compatibility_date = "2026-01-01"
+
+# One instance, by name. A pairing code has to be findable by whoever types it,
+# and they arrive on a different connection from whoever was given it, so the
+# code table cannot be sharded by connection.
+[[durable_objects.bindings]]
+name = "RELAY_HUB"
+class_name = "RelayHub"
+
+# SQLite-backed, which is what makes Durable Objects available without the
+# paid Workers plan. `new_classes` (the key-value backing) is the older form.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayHub"]
+
+[vars]
+# REQUIRED. The Worker refuses to start without it -- unlike the Node relay,
+# where this is only mandatory once the bind is reachable, because on Workers
+# there is no unreachable bind to be the exception.
+#
+# Exact origins, comma separated, no wildcards. This must list wherever the
+# Angular app is actually served from, e.g. the Pages domain:
+RELAY_ALLOWED_ORIGINS = "https://psd-editor.pages.dev"
+
+# Optional. Defaults live in worker/config.js and match server/config.js.
+# RELAY_PAIR_TTL_MS            = "300000"
+# RELAY_SESSION_TTL_MS         = "3600000"
+# RELAY_MAX_MESSAGE_BYTES      = "8388608"
+# RELAY_MAX_SESSION_BYTES      = "268435456"
+# RELAY_SESSION_BYTE_REFILL    = ""          # derived: cap / 256 per second
+# RELAY_RATE_LIMIT_MAX         = "10"
+# RELAY_GLOBAL_RATE_LIMIT_MAX  = "10000"     # 0 disables the cross-key ceiling
+
+# RELAY_STATS_TOKEN is a SECRET, not a var -- never put it here:
+#   npx wrangler secret put RELAY_STATS_TOKEN
+# Without it `GET /stats` is unreachable, which is the correct default. There is
+# no loopback exemption on this runtime the way there is on Node, because
+# nothing calling a Worker is provably on the same machine.
+
+#
+# NOT VERIFIED. No part of this has run on workerd. `server/relay.js` has 64
+# tests against a real Node server on a real port; this transport has the ones
+# in test/worker.mjs, which drive the Durable Object's message handling with
+# fake sockets and fake storage. That covers the policy and NOTHING about
+# whether Cloudflare accepts the WebSocketPair, honours the attachments across
+# a real hibernation, or fires the alarm. Run `npx wrangler dev` before
+# believing any of it.
+#
+# KNOWN LOSS vs. the Node relay: there is no backpressure. Workers exposes no
+# `bufferedAmount` and no way to pause a reader. The decaying byte budget
+# bounds throughput in its place, but not the runtime's own send queue.
+#

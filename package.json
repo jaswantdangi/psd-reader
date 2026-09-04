@@ -22,8 +22,11 @@
     "test:frame": "node --max-old-space-size=6144 test/frame.mjs",
     "test:sync": "node test/sync.mjs",
     "test:clip": "node test/clip.mjs",
-    "test:engine": "node test/shim.mjs && node test/run.mjs && node test/composite.mjs && node test/edit.mjs && node test/text-engine.mjs && node test/fonts.mjs && node test/bundle.mjs && node --max-old-space-size=6144 test/proxy.mjs && node test/gpu.mjs && node --max-old-space-size=6144 test/export.mjs && node --max-old-space-size=6144 test/layers.mjs && node --max-old-space-size=6144 test/adjust.mjs && node --max-old-space-size=6144 test/creative.mjs && node --max-old-space-size=6144 test/frame.mjs && node test/sync.mjs && node --max-old-space-size=6144 test/segment.mjs && node test/clip.mjs && node test/relay.mjs",
-    "test:app": "npm --prefix app test -- --watch=false"
+    "test:engine": "node test/shim.mjs && node test/run.mjs && node test/composite.mjs && node test/edit.mjs && node test/text-engine.mjs && node test/fonts.mjs && node test/bundle.mjs && node --max-old-space-size=6144 test/proxy.mjs && node test/gpu.mjs && node --max-old-space-size=6144 test/export.mjs && node --max-old-space-size=6144 test/layers.mjs && node --max-old-space-size=6144 test/adjust.mjs && node --max-old-space-size=6144 test/creative.mjs && node --max-old-space-size=6144 test/frame.mjs && node test/sync.mjs && node --max-old-space-size=6144 test/segment.mjs && node test/clip.mjs && node test/relay.mjs && node test/worker.mjs",
+    "test:app": "npm --prefix app test -- --watch=false",
+    "test:worker": "node test/worker.mjs",
+    "relay:dev": "wrangler dev",
+    "relay:deploy": "wrangler deploy"
   },
   "keywords": [],
   "author": "",
@@ -33,5 +36,8 @@
     "ag-psd": "^31.0.2",
     "exifr": "^7.1.3",
     "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "wrangler": "^4.127.1"
   }
 }

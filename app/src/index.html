@@ -10,6 +10,18 @@
        user is typing into and no CSS inside the sheet can move it. Ignored on
        iOS Safari, which resizes the visual viewport instead. -->
   <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+
+  <!-- Where the Photoshop sync relay lives. Read at RUNTIME rather than baked
+       in at build time, deliberately: the same artifact then serves local
+       development, a Pages preview and production, and the Android wrapper
+       does not need its own build to point somewhere else. Change it per
+       deployment by editing this line in the published index.html, or by
+       adding a Pages build step that rewrites it.
+
+       The Worker refuses any origin not in RELAY_ALLOWED_ORIGINS, so pointing
+       this at a relay that has not been told about this origin fails closed. -->
+  <meta name="psd-relay" content="ws://localhost:8787">
+
   <link rel="icon" type="image/x-icon" href="favicon.ico">
 </head>
 <body>

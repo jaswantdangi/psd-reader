@@ -9,14 +9,38 @@
  * `src/sync/protocol.js`, which is also what validates an inbound `pair` frame.
  * One definition, so an issued code can never fall outside what validation
  * accepts.
+ *
+ * Nothing in this file is Node-specific, deliberately. It is the one piece of
+ * `server/` the Cloudflare Worker also runs, so `worker/` gets the same
+ * pairing policy rather than a second copy of it -- and a second copy of the
+ * thing that IS the security model is the last place a divergence should be
+ * allowed to hide. `globalThis.crypto` is the only ambient it touches, and it
+ * is present in Node 19+ and in workerd alike.
  */
-import { randomInt } from 'node:crypto';
 import { PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH } from '../src/sync/protocol.js';
+
+/**
+ * A uniformly random index into the alphabet.
+ *
+ * Rejection sampling rather than `byte % n`. With today's 32-character
+ * alphabet the modulo would happen to be exact -- 256 is 8 x 32 -- but that is
+ * a property of the alphabet, not of the code, and the day someone drops a
+ * character from it the bias would appear silently in the one number that has
+ * to stay uniform.
+ */
+function uniformIndex(n) {
+  const limit = Math.floor(256 / n) * n;
+  const byte = new Uint8Array(1);
+  for (;;) {
+    crypto.getRandomValues(byte);
+    if (byte[0] < limit) return byte[0] % n;
+  }
+}
 
 /** ~32^6 = 1.07e9 codes; the rate limit is what makes that enough. */
 function mintCode() {
   let code = '';
-  for (let i = 0; i < PAIR_CODE_LENGTH; i++) code += PAIR_CODE_ALPHABET[randomInt(PAIR_CODE_ALPHABET.length)];
+  for (let i = 0; i < PAIR_CODE_LENGTH; i++) code += PAIR_CODE_ALPHABET[uniformIndex(PAIR_CODE_ALPHABET.length)];
   return code;
 }
 
@@ -128,8 +152,37 @@ export function createPairingDesk({
     for (const [ip, entry] of attempts) if (at >= entry.resetAt) attempts.delete(ip);
   }
 
+  /**
+   * The desk's whole state as plain data, and back again.
+   *
+   * A Durable Object can be evicted between two pairing attempts. If the codes
+   * and the rate-limit buckets lived only in this closure they would come back
+   * empty -- which loses an issued code (merely annoying) and RESETS AN
+   * ATTACKER'S BUDGET (not annoying at all). So the Worker persists them.
+   *
+   * The Node relay never calls these: its process is the store, and it holds a
+   * live socket in `owner`, which does not serialise. The Worker keeps a socket
+   * ID there instead, which is the whole reason `owner` is opaque to this file.
+   */
+  const snapshot = () => ({
+    codes: [...codes],
+    attempts: [...attempts],
+    global,
+    globalRefusals,
+  });
+
+  const restore = (state) => {
+    if (!state) return;
+    codes.clear();
+    for (const [code, entry] of state.codes ?? []) codes.set(code, entry);
+    attempts.clear();
+    for (const [ip, entry] of state.attempts ?? []) attempts.set(ip, entry);
+    global = state.global ?? { count: 0, resetAt: 0 };
+    globalRefusals = state.globalRefusals ?? 0;
+  };
+
   return {
-    issue, redeem, revokeFor, sweep, allow,
+    issue, redeem, revokeFor, sweep, allow, snapshot, restore,
     size: () => codes.size,
     /** Counts only: how much of the cross-key budget is spent, and refusals so far. */
     globalSpent: () => (now() < global.resetAt ? global.count : 0),
