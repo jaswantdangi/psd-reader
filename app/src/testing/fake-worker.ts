@@ -69,6 +69,22 @@ export class FakeWorker {
 }
 
 /**
+ * Wait for the nth worker to be constructed.
+ *
+ * Needed where the service under test starts one several `await`s deep — the
+ * bundle path unzips before it opens — so the test cannot simply flush one
+ * microtask and reach for `FakeWorker.last`.
+ */
+export async function nextWorker(index = 0, tries = 200): Promise<FakeWorker> {
+  for (let i = 0; i < tries; i++) {
+    const worker = FakeWorker.instances[index];
+    if (worker) return worker;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error(`worker ${index} was never constructed`);
+}
+
+/**
  * Install `FakeWorker` as the global `Worker` for one test.
  *
  * @returns the restore function; call it in `afterEach`.
