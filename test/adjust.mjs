@@ -1203,9 +1203,19 @@ test('the transformed rows really do go through resample', () => {
 });
 
 test('Table D declares that it has no GPU to compare against', () => {
-  // Until 1B-2 lands the route runs JS against itself. A green table that means
-  // nothing is worse than an absent one, so the note is not optional.
-  assert.match(CONFORMANCE_TABLE_D_NOTE, /no GPU|JS against itself|1B-2/i);
+  // A green table that means nothing is worse than an absent one, so the note
+  // is not optional -- when the device reaches no GPU tier the route runs the
+  // JS renderer against itself and every row is green by construction.
+  //
+  // Asserted on MEANING, not on phrasing. This matched the literal string
+  // "JS against itself" and broke the moment the note was reworded to "JS
+  // renderer against ITSELF" -- a strictly better sentence, failed by a test
+  // that was pinning prose. The two claims below are what the note has to
+  // make; how it words them is the author's business.
+  assert.match(CONFORMANCE_TABLE_D_NOTE, /\bitself\b/i,
+    'must say the comparison is against itself');
+  assert.match(CONFORMANCE_TABLE_D_NOTE, /\bnot\b[\s\S]*\bGPU\b|\bGPU\b[\s\S]*\bnot\b/i,
+    'must say this is not evidence about the GPU path');
 });
 
 console.log('\nthe image overlay\n');
