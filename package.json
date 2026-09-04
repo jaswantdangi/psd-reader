@@ -27,7 +27,8 @@
     "test:worker": "node test/worker.mjs",
     "relay:dev": "wrangler dev",
     "relay:deploy": "wrangler deploy",
-    "plugin:vendor": "node scripts/vendor-plugin.mjs"
+    "plugin:vendor": "node scripts/vendor-plugin.mjs",
+    "sync:live": "node tools/live-sync-check.mjs"
   },
   "keywords": [],
   "author": "",
