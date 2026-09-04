@@ -18,9 +18,16 @@
        deployment by editing this line in the published index.html, or by
        adding a Pages build step that rewrites it.
 
+       This is the DEPLOYED relay, so a fresh clone builds something that
+       works. Working locally does not need this line changed — the sync sheet
+       has an editable relay field, so type ws://localhost:8787 into it after
+       `npx wrangler dev`.
+
        The Worker refuses any origin not in RELAY_ALLOWED_ORIGINS, so pointing
-       this at a relay that has not been told about this origin fails closed. -->
-  <meta name="psd-relay" content="ws://localhost:8787">
+       this at a relay that has not been told about this origin fails closed:
+       the socket is refused with 403 before it opens, and the sheet says the
+       relay could not be reached. -->
+  <meta name="psd-relay" content="wss://psd-sync-relay.jaswantdangi00.workers.dev">
 
   <link rel="icon" type="image/x-icon" href="favicon.ico">
 </head>
