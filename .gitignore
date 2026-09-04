@@ -15,3 +15,7 @@ Thumbs.db
 
 # Subagent-driven development scratch (ledger, briefs, review packages).
 .superpowers/
+
+# Local Durable Object state from `wrangler dev`. Per-machine, and two dev
+# instances sharing it is what produces SQLITE_BUSY on reload.
+.wrangler/
