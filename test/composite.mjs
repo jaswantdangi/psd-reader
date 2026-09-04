@@ -44,7 +44,8 @@ for (const f of files) {
     else off++;
 
     const why = ours.warnings
-      .map((w) => (/Adjustment/.test(w) ? 'adjustments' : /effects/.test(w) ? 'effects'
+      .map((w) => (/Adjustment/.test(w) ? 'adjustments' : /Smart filters/.test(w) ? 'smart filters'
+        : /effects/.test(w) ? 'effects'
         : /dissolve/.test(w) ? 'dissolve' : /pass-through/.test(w) ? 'pass-through' : '?'))
       .join(', ');
 
@@ -91,19 +92,44 @@ console.log('\nA non-zero diff is expected wherever adjustments/effects appear â
  * corpus silently grows an unguarded file.
  *
  * The non-zero entries are unimplemented features, not bugs: effects (layer
- * styles), smart-filters-2, layer-comps, adjustments, stroke. They are ceilings
- * on known gaps, not targets.
+ * styles), smart-filters-2, adjustments, stroke. They are ceilings on known
+ * gaps, not targets.
+ *
+ * `layer-comps` is the exception and does NOT belong in that list. Its 10.84%
+ * is one layer's visibility, not a compositing gap: hide "Layer 3" and we match
+ * Photoshop at 0.00% / maxDelta 0 over the whole canvas. The file disagrees
+ * with itself -- the layer record says visible (flags 0x08, a real 1073-byte
+ * alpha channel, no mask, no lsct/lfx2/FMsk, and the lastApplied comp
+ * 510999610 lists it enabled:true), yet the composite Photoshop embedded omits
+ * it. `layer-comps.expected.psd` was saved separately and agrees with the
+ * embedded one exactly, so it reproduces across saves. Nothing in the file
+ * tells a renderer to skip that layer.
+ *
+ * So this ceiling guards a fixture we cannot score to zero without rendering
+ * something other than what its own layer records describe. Do not "fix" the
+ * compositor to chase it, and do not implement layer comps expecting this
+ * number to move -- applying comp 510999610 yields exactly today's output.
+ *
+ * `artboards` used to sit here at 9.79% with the "unapplied features" column
+ * blank, because the compositor emitted no warning for it. It was not a
+ * mystery and not a gap in blending: its three zero-bounds layers each carry
+ * an `artb` record with the board's rect and background type, and we applied
+ * neither. "Layer 2" spans x 121..1881, crossing out of its own board into
+ * the one beside it, so it bled across the canvas over ground Photoshop
+ * paints white. `applyArtboard` in src/composite.js now clips and fills, and
+ * the fixture is bit-exact. Its ceiling is 0/0 -- keep it there.
  */
 const CEILINGS = new Map(Object.entries({
   'adjustments':     { real: 4.60,  maxDelta: 71 },
   'annotations':     { real: 0,     maxDelta: 0 },
-  'artboards':       { real: 9.79,  maxDelta: 255 },
+  'artboards':       { real: 0,     maxDelta: 0 },
   'blend-if':        { real: 1.26,  maxDelta: 3 },
   'boolean':         { real: 0.18,  maxDelta: 57 },
   'effects':         { real: 23.03, maxDelta: 186 },
   'float-color':     { real: 7.96,  maxDelta: 89 },
   'gradient':        { real: 0,     maxDelta: 1 },
   'group-blend':     { real: 0,     maxDelta: 1 },
+  // Not a compositing gap -- see the note above. Bit-exact once "Layer 3" is hidden.
   'layer-comps':     { real: 10.84, maxDelta: 255 },
   'masks':           { real: 4.57,  maxDelta: 58 },
   'psb2':            { real: 0,     maxDelta: 0 },

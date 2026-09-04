@@ -384,6 +384,66 @@ function alphaMap(width, height, rect, pixels, mask, opacity) {
   return map;
 }
 
+/**
+ * The smart filters on a layer, by type, or null when it has none.
+ *
+ * A smart object alone is NOT this: `smart.src.psd` is two placed layers and
+ * scores 0.00%, because Photoshop bakes the placed pixels into the layer. It is
+ * the FILTER LIST that is unapplied, and it lives on the `SoLd` record ag-psd
+ * decodes to `placedLayer.filter`.
+ *
+ * Disabled filters are excluded — an effect that is switched off in the file is
+ * not a difference between us and Photoshop.
+ */
+function smartFiltersOn(layer) {
+  const list = layer.placedLayer?.filter?.list;
+  if (!Array.isArray(list)) return null;
+  const on = list.filter((f) => f && f.enabled !== false).map((f) => f.type || f.name || 'unknown');
+  return on.length ? on : null;
+}
+
+/** `artboard.backgroundType` for the transparent ground. Every other type fills. */
+const ARTBOARD_TRANSPARENT = 3;
+
+/**
+ * Artboards clip their contents to their own frame and paint a background
+ * beneath them. Photoshop keeps both on the group layer, in the `artb` record
+ * ag-psd decodes to `layer.artboard`.
+ *
+ * Skipping this does not just lose the background: a layer that overhangs its
+ * artboard bleeds across the whole canvas. `artboards.src.psd` has exactly
+ * that — "Layer 2" spans x 121..1881, starting inside one board and ending in
+ * another, and Photoshop shows only the part within its own.
+ *
+ * The type is consulted only to spot the transparent case; every other type
+ * carries the colour to fill with in `color`, so white/black/custom all take
+ * the same path. Runs in place on the group's buffer, which is scratch here.
+ */
+function applyArtboard(buffer, artboard) {
+  const rect = artboard.rect;
+  if (!rect) return;
+
+  const { width, height, data } = buffer;
+  const x0 = Math.max(0, rect.left), x1 = Math.min(width, rect.right);
+  const y0 = Math.max(0, rect.top), y1 = Math.min(height, rect.bottom);
+  const fill = artboard.backgroundType === ARTBOARD_TRANSPARENT ? null : artboard.color;
+
+  for (let y = 0; y < height; y++) {
+    const withinRows = y >= y0 && y < y1;
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (!withinRows || x < x0 || x >= x1) { data[i + 3] = 0; continue; }
+      if (!fill) continue;
+      // Straight alpha over an opaque ground, matching blendInto's convention.
+      const a = data[i + 3] / 255;
+      data[i] = data[i] * a + fill.r * (1 - a);
+      data[i + 1] = data[i + 1] * a + fill.g * (1 - a);
+      data[i + 2] = data[i + 2] * a + fill.b * (1 - a);
+      data[i + 3] = 255;
+    }
+  }
+}
+
 function renderList(list, width, height, ctx) {
   const dest = createBuffer(width, height);
 
@@ -408,9 +468,15 @@ function renderList(list, width, height, ctx) {
       if (mode === 'dissolve') ctx.warnings.add('`dissolve` blend mode is not implemented — rendered as normal.');
       if (layer.adjustment) ctx.warnings.add('Adjustment layers are not applied — the composite will differ where they appear.');
       if (layer.effects) ctx.warnings.add('Layer effects (drop shadow, stroke, glow…) are not applied.');
+      // Named rather than generic: `smart-filters-2` diverges 46% on a single
+      // Liquify, and "smart filters are not applied" does not tell the next
+      // person that the gap is a mesh warp rather than a blur they could add.
+      const filters = smartFiltersOn(layer);
+      if (filters) ctx.warnings.add(`Smart filters are not applied — this document uses: ${[...new Set(filters)].sort().join(', ')}.`);
 
       if (layer.children) {
         const inner = renderList(layer.children, width, height, ctx);
+        if (layer.artboard) applyArtboard(inner, layer.artboard);
         if (mode === 'pass through' && opacity === 1 && !clipped.length && !blendIf) {
           blendInto(dest, inner.data, { left: 0, top: 0, width, height }, 1, 'normal');
         } else {

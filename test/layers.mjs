@@ -1026,4 +1026,81 @@ test('the editor renders Blend If exactly as the inspector does', () => {
   assert.equal(percentReal, 0, 'renderer and compositor agree on blend-if.src.psd');
 });
 
+console.log('\nunapplied features are named\n');
+
+const smartFiltersDoc = await readDocument(bytesOf('fixtures/smart-filters-2.src.psd'), { pixels: 'eager', metadata: false });
+const smartDoc = await readDocument(bytesOf('fixtures/smart.src.psd'), { pixels: 'eager', metadata: false });
+
+test('a smart FILTER is disclosed, and named', () => {
+  // `smart-filters-2` sits at 46% and the accuracy table used to attribute it
+  // to nothing at all, because the compositor said nothing about it. A blank
+  // cause column is how `artboards` went unlabelled for months.
+  const warning = compositeDocument(smartFiltersDoc).warnings.find((w) => /Smart filters/.test(w));
+  assert.ok(warning, 'a document with an enabled smart filter has to say so');
+  assert.match(warning, /liquify/, 'and name it -- a mesh warp is not a blur someone could just add');
+});
+
+test('a smart OBJECT alone is not a smart filter', () => {
+  // The distinction the warning turns on: `smart.src.psd` is two placed layers
+  // with no filter list, and it is bit-exact. Warning about it would train
+  // everyone to ignore the column.
+  assert.equal(compositeDocument(smartDoc).warnings.find((w) => /Smart filters/.test(w)), undefined);
+});
+
+console.log('\nartboards\n');
+
+/** A solid opaque rectangle, positioned on the canvas. */
+const solid = (left, top, width, height, [r, g, b]) => {
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < width * height; i++)
+    data[i * 4] = r, data[i * 4 + 1] = g, data[i * 4 + 2] = b, data[i * 4 + 3] = 255;
+  return { name: 'content', left, top, right: left + width, bottom: top + height,
+           imageData: { width, height, data } };
+};
+
+/** 10x10 doc, one artboard covering the top-left 5x5, holding a layer that overhangs it. */
+const boardDoc = (artboard) => ({
+  width: 10, height: 10,
+  children: [{ name: 'board', artboard, children: [solid(2, 2, 6, 6, [255, 0, 0])] }],
+});
+
+const boardPx = (buf, x, y) => [...buf.data.slice((y * buf.width + x) * 4, (y * buf.width + x) * 4 + 4)];
+
+const WHITE_BOARD = { rect: { top: 0, left: 0, bottom: 5, right: 5 },
+                      backgroundType: 1, color: { r: 255, g: 255, b: 255 } };
+
+test('an artboard clips content that overhangs its frame', () => {
+  const out = compositeDocument(boardDoc(WHITE_BOARD));
+  assert.deepEqual(boardPx(out, 3, 3), [255, 0, 0, 255], 'inside the frame the layer draws');
+  assert.deepEqual(boardPx(out, 6, 6), [0, 0, 0, 0], 'outside it the layer is gone, not merely covered');
+});
+
+test('an artboard paints its background under its contents', () => {
+  const out = compositeDocument(boardDoc(WHITE_BOARD));
+  assert.deepEqual(boardPx(out, 0, 0), [255, 255, 255, 255], 'bare ground inside the frame is filled');
+  assert.deepEqual(boardPx(out, 9, 9), [0, 0, 0, 0], 'the fill stops at the frame');
+});
+
+test('backgroundType 3 is the transparent ground and fills nothing', () => {
+  // The type is read ONLY to spot this case -- white, black and custom all
+  // carry the colour to use in `color`, so they share one path.
+  const out = compositeDocument(boardDoc({ ...WHITE_BOARD, backgroundType: 3, color: { r: 83, g: 83, b: 83 } }));
+  assert.deepEqual(boardPx(out, 0, 0), [0, 0, 0, 0], 'no ground is painted');
+  assert.deepEqual(boardPx(out, 3, 3), [255, 0, 0, 255], 'but the contents still draw');
+  assert.deepEqual(boardPx(out, 6, 6), [0, 0, 0, 0], 'and are still clipped to the frame');
+});
+
+test('a custom background uses the colour on the record, not a hardcoded table', () => {
+  const out = compositeDocument(boardDoc({ ...WHITE_BOARD, backgroundType: 4, color: { r: 217, g: 117, b: 117 } }));
+  assert.deepEqual(boardPx(out, 0, 0), [217, 117, 117, 255]);
+});
+
+test('a plain group is untouched -- clipping is the artboard record, not grouping', () => {
+  const doc = boardDoc(WHITE_BOARD);
+  delete doc.children[0].artboard;
+  const out = compositeDocument(doc);
+  assert.deepEqual(boardPx(out, 6, 6), [255, 0, 0, 255], 'without an artb record nothing is clipped');
+  assert.deepEqual(boardPx(out, 0, 0), [0, 0, 0, 0], 'and no ground is painted');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);
