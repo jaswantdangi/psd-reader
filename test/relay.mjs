@@ -716,7 +716,15 @@ test('a vanished peer fails the send cleanly and takes the session with it', () 
   const closed = await plugin.waitClose();
   assert.equal(closed.code, 1001, 'the surviving side is closed with going-away, not left hanging');
   await until(() => ctx.relay.stats().sessions.length === 0, 'the session to be reaped');
-  assert.equal(ctx.relay.stats().connections, 0, 'no socket is left behind');
+  // WAITED FOR, not asserted outright. The session leaves `sessions` when it is
+  // torn down; a socket leaves `connections` when its own close event fires,
+  // and those are two separate turns of the loop. Asserting this one instantly
+  // passed on a fast machine for months and failed on the first CI runner it
+  // met, with `1 !== 0` -- one socket's close had simply not landed yet.
+  //
+  // The property is unchanged: `until` still requires it to reach zero. What is
+  // dropped is the accidental requirement that it get there in the same tick.
+  await until(() => ctx.relay.stats().connections === 0, 'both sockets to be dropped');
 }));
 
 test('an app that leaves before its code is redeemed takes the code with it', () => withRelay({}, async (ctx) => {
