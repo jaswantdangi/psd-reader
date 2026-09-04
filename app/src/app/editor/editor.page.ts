@@ -25,11 +25,13 @@ import { LayerSheet } from './layer-sheet';
 import { LayersSheet } from './layers-sheet';
 import { OverlaySheet } from './overlay-sheet';
 import { SheetShell } from './sheet-shell';
+import { SyncService } from '../services/sync.service';
+import { SyncSheet } from './sync-sheet';
 import { TextSheet } from './text-sheet';
 
 type SheetId =
   | 'layers' | 'layer' | 'text' | 'adjust' | 'filter' | 'hsl' | 'overlay'
-  | 'fonts' | 'warnings' | 'export';
+  | 'fonts' | 'warnings' | 'export' | 'sync';
 
 /** The rail carries only tools that work. Phase 4-5 entries are absent, not greyed. */
 const RAIL: ReadonlyArray<{ id: SheetId; icon: string; label: string; needsLayer: boolean }> = [
@@ -86,6 +88,7 @@ const TITLES: Record<SheetId, string> = {
   fonts: 'Fonts',
   warnings: 'This file',
   export: 'Export',
+  sync: 'Photoshop sync',
 };
 
 @Component({
@@ -104,6 +107,7 @@ const TITLES: Record<SheetId, string> = {
     LayersSheet,
     OverlaySheet,
     SheetShell,
+    SyncSheet,
     TextSheet,
   ],
   template: `
@@ -209,6 +213,24 @@ const TITLES: Record<SheetId, string> = {
             <span class="text-xs font-semibold tabular-nums">{{ svc.warnings().length }}</span>
           </button>
         }
+
+        <!-- Sync state has to be visible from OUTSIDE its sheet: a live pairing
+             keeps changing the canvas while the sheet is closed, and a
+             connection you cannot see is one you cannot trust. -->
+        <button
+          type="button"
+          class="relative flex h-12 w-12 items-center justify-center rounded-xl active:bg-white/10 disabled:opacity-30"
+          [class.text-emerald-400]="sync.connected()"
+          [class.text-neutral-300]="!sync.connected()"
+          [attr.aria-label]="sync.connected() ? 'Photoshop sync, connected' : 'Photoshop sync'"
+          [disabled]="svc.state() !== 'ready'"
+          (click)="open('sync')"
+        >
+          <app-icon name="link" />
+          @if (sync.status() === 'live') {
+            <span class="absolute right-2 top-2 h-2 w-2 rounded-full bg-emerald-400"></span>
+          }
+        </button>
 
         <button
           type="button"
@@ -605,6 +627,7 @@ const TITLES: Record<SheetId, string> = {
                 @case ('hsl') { <app-hsl-sheet /> }
                 @case ('overlay') { <app-overlay-sheet /> }
                 @case ('fonts') { <app-fonts-sheet /> }
+                @case ('sync') { <app-sync-sheet /> }
                 @case ('warnings') {
                   <ul class="divide-y divide-white/5">
                     @for (warning of svc.warnings(); track $index) {
@@ -750,6 +773,7 @@ export class EditorPage {
   protected exporter = inject(ExportService);
   protected fonts = inject(FontsService);
   protected bundle = inject(BundleService);
+  protected sync = inject(SyncService);
   protected stage = viewChild(CanvasStage);
 
   protected readonly rail = RAIL;

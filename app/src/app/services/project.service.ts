@@ -10,8 +10,12 @@ import {
   findLayer as engineFindLayer,
   hitTest as engineHitTest,
   nextGestureKey as engineNextGestureKey,
+  setFrame as engineSetFrame,
 } from '@engine/edit.js';
 import {
+  // Aliased for the same reason as `replaceImage` below: the method that wraps
+  // it carries the same name.
+  removeLayer as removeLayerCmd,
   insertTextLayer, retypeText, resizeTextBox, insertImageLayer,
   // Aliased: the method below has the same name, and a bare `replaceImage`
   // inside it would read as recursion to anyone skimming.
@@ -389,6 +393,29 @@ export class ProjectService {
     const project = this.project();
     if (!project || fromIndex === toIndex) return;
     engineReorderLayer(project, fromIndex, toIndex);
+    this.version.update((v) => v + 1);
+  }
+
+  /**
+   * Take a layer out. Undoable — the engine keeps the layer object on the
+   * history entry, so undo puts back the same pixels at the same index.
+   *
+   * @returns true when a layer was removed; false when nothing had that id.
+   */
+  removeLayer(id: number): boolean {
+    const project = this.project();
+    if (!project) return false;
+    if (!removeLayerCmd(project, id)) return false;
+    if (this.selectedId() === id) this.selectedId.set(null);
+    this.version.update((v) => v + 1);
+    return true;
+  }
+
+  /** The document frame — a crop, or a canvas resize. `null` restores the full frame. */
+  setFrame(rect: any | null, coalesceKey?: string): void {
+    const project = this.project();
+    if (!project) return;
+    engineSetFrame(project, rect, coalesceKey);
     this.version.update((v) => v + 1);
   }
 

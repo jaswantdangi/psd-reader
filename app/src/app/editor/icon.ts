@@ -30,6 +30,7 @@ const PATHS: Record<string, string> = {
   fit: 'M4 9 V4 H9 M15 4 H20 V9 M20 15 V20 H15 M9 20 H4 V15',
   file: 'M6 3 H14 L19 8 V21 H6 Z M14 3 V8 H19',
   select: 'M4 3 L11 20 L13.5 12.6 L21 10.1 Z',
+  link: 'M10 14 a5 5 0 0 0 7 0 l3 -3 a5 5 0 0 0 -7 -7 l-1.5 1.5 M14 10 a5 5 0 0 0 -7 0 l-3 3 a5 5 0 0 0 7 7 l1.5 -1.5',
 };
 
 @Component({
