@@ -745,6 +745,114 @@ test('an idle session past its life is closed', () => withRelay({ sessionTtlMs: 
   await until(() => ctx.relay.stats().sessions.length === 0, 'the expired session to be removed');
 }));
 
+// ------------------------------------------------------------- heartbeat
+
+/**
+ * `ws` answers a ping at the protocol level whether or not the application is
+ * listening, so a client that merely stops SENDING is still perfectly alive --
+ * which is the point. The socket this guards against answers nothing, and
+ * `autoPong: false` is the only way to build one without hand-rolling a
+ * handshake over a raw TCP socket.
+ */
+test('a silent peer is closed by the heartbeat and its session torn down', () => withRelay(
+  { heartbeatMs: 80, heartbeatTimeoutMs: 40 },
+  async (ctx) => {
+    const app = ctx.client();
+    await app.open();
+    app.send({ type: 'hello', role: 'app', version: '1.0.0' });
+    const { code } = await app.next();
+
+    const mute = ctx.client(ctx.url, { autoPong: false });
+    await mute.open();
+    mute.send({ type: 'hello', role: 'plugin', version: '1.0.0' });
+    mute.send({ type: 'pair', code });
+    await app.next();
+    await mute.next();
+    assert.equal(ctx.relay.stats().sessions.length, 1, 'the session exists before the heartbeat notices anything');
+
+    // The half-open socket does not close itself and does not error. Only the
+    // ping it never answers distinguishes it from an idle peer.
+    const frame = await app.next(5000);
+    assert.equal(frame.type, 'error');
+    assert.equal(frame.code, 'peer-timeout',
+      'the surviving side is told the peer stopped answering, not that it disconnected -- those are different events');
+    const closed = await app.waitClose();
+    assert.equal(closed.code, 1001);
+
+    await until(() => ctx.relay.stats().sessions.length === 0, 'the session to be torn down, not merely reported');
+    await until(() => ctx.relay.stats().connections === 0, 'both sockets to be released');
+    assert.ok(ctx.relay.stats().heartbeatDrops >= 1, 'and the drop was counted');
+  },
+));
+
+test('a peer that answers is left alone, however quiet the session goes', () => withRelay(
+  { heartbeatMs: 40, heartbeatTimeoutMs: 40 },
+  async (ctx) => {
+    const { app, plugin } = await pairedPair(ctx);
+    await sleep(500); // ~12 heartbeat rounds carrying no application traffic at all
+    assert.equal(ctx.relay.stats().heartbeatDrops, 0, 'silence is not death');
+    assert.equal(ctx.relay.stats().sessions.length, 1);
+    plugin.send({ type: 'event', change: 'move', layerID: 7, props: { x: 1, y: 2 } });
+    assert.equal((await app.next()).change, 'move', 'and the session still routes afterwards');
+  },
+));
+
+/**
+ * The two mechanisms have to coexist: one deliberately makes a socket go quiet,
+ * the other kills sockets that go quiet.
+ *
+ * The app here reads in bursts, so the relay pauses and resumes its sender many
+ * times while a dozen heartbeat rounds pass. Nothing may be dropped, and the
+ * stream must still arrive whole and in order afterwards.
+ *
+ * NOT proved here, and worth knowing: `heartbeat()` also skips a socket the
+ * relay has itself paused, because `pause()` stops the stream that would parse
+ * that socket's pong. That branch is reasoned, not measured -- it only bites
+ * when a receiver drains slower than ~25 KB/s while still answering pings, and
+ * a `ws` client cannot be made to read that slowly without also suspending its
+ * own pong. Every arrangement reachable from a test makes BOTH peers go quiet
+ * together, so the branch has no observable effect on the session.
+ */
+test('the heartbeat leaves a session under backpressure alone', () => withRelay(
+  {
+    maxMessageBytes: 1024 * 1024, maxSessionBytes: 128 * 1024 * 1024, highWaterBytes: 128 * 1024,
+    heartbeatMs: 40, heartbeatTimeoutMs: 150,
+  },
+  async (ctx) => {
+    const { app, plugin } = await pairedPair(ctx);
+    const blob = 'z'.repeat(256 * 1024);
+    app.ws.pause();
+    for (let i = 0; i < 60; i++) plugin.send({ type: 'event', change: 'brush', layerID: 7, props: { blob, i } });
+    await until(() => ctx.relay.stats().sessions[0]?.senderPaused, 'the relay to pause its reader');
+
+    for (let round = 0; round < 8; round++) {
+      app.ws.resume();          // read a little, and answer the ping
+      await sleep(20);
+      app.ws.pause();           // and fall behind again
+      await sleep(80);
+    }
+
+    assert.equal(ctx.relay.stats().heartbeatDrops, 0,
+      'a peer that is merely behind, and still reading, must not be dropped as dead');
+    assert.equal(ctx.relay.stats().sessions.length, 1, 'and the session survived');
+
+    app.ws.resume();
+    const seen = [];
+    await until(() => { seen.push(...app.drained()); return seen.length >= 60; }, 'the backlog to drain', 30_000);
+    assert.deepEqual(seen.map((f) => f.props.i), Array.from({ length: 60 }, (_, i) => i),
+      'backpressure still delivers everything, in order, across the heartbeat');
+  },
+));
+
+test('the heartbeat defaults notice a dead peer inside a minute, not inside the session TTL', () => withRelay({}, async (ctx) => {
+  assert.equal(ctx.relay.config.heartbeatMs, 30 * 1000);
+  assert.equal(ctx.relay.config.heartbeatTimeoutMs, 10 * 1000);
+  assert.ok(ctx.relay.config.heartbeatMs + ctx.relay.config.heartbeatTimeoutMs < ctx.relay.config.sessionTtlMs / 10,
+    'a half-open socket must not be left to the idle sweeper, which is an hour away');
+  assert.throws(() => createRelay({ port: 0, heartbeatMs: 0 }), /must both be positive/,
+    'there is no supported way to switch it off');
+}));
+
 test('closing the relay drops every socket', () => withRelay({}, async (ctx) => {
   const { app, plugin } = await pairedPair(ctx);
   await ctx.relay.close();

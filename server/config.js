@@ -66,6 +66,21 @@ export const DEFAULTS = {
   rateLimitWindowMs: 60 * 1000,
 
   /**
+   * Heartbeat: how long a socket may say nothing before it is pinged, and how
+   * long it then has to pong before it is treated as gone.
+   *
+   * A half-open socket -- a network that died without a FIN, a laptop that
+   * closed -- is indistinguishable from an idle one until something asks. Until
+   * it is asked, it holds a session, a routing entry, and the peer on the other
+   * side, which sits waiting for events from a Photoshop that is no longer
+   * there. `sessionTtlMs` would eventually reap it, an hour later.
+   *
+   * 30 s + 10 s puts the worst case at ~40 s, plus one tick.
+   */
+  heartbeatMs: 30 * 1000,
+  heartbeatTimeoutMs: 10 * 1000,
+
+  /**
    * The addresses whose `X-Forwarded-For` this relay believes. Empty means the
    * header is ignored completely and the immediate peer is the key.
    *
@@ -123,6 +138,8 @@ const ENV = {
   rateLimitMax: 'RELAY_RATE_LIMIT_MAX',
   rateLimitWindowMs: 'RELAY_RATE_LIMIT_WINDOW_MS',
   trustedProxies: 'RELAY_TRUSTED_PROXIES',
+  heartbeatMs: 'RELAY_HEARTBEAT_MS',
+  heartbeatTimeoutMs: 'RELAY_HEARTBEAT_TIMEOUT_MS',
 };
 
 /**
@@ -278,5 +295,8 @@ export function resolveConfig(overrides = {}, env = process.env) {
   assertNoSilentDowngrade(config);
   assertOriginPolicy(config);
   assertRateLimitKeyIsMeaningful(config);
+  if (config.heartbeatMs < 1 || config.heartbeatTimeoutMs < 1) {
+    throw new Error(`${ENV.heartbeatMs} and ${ENV.heartbeatTimeoutMs} must both be positive -- there is no supported way to switch the heartbeat off, because a half-open socket holds a session and its peer until something asks`);
+  }
   return config;
 }

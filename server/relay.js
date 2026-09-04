@@ -65,6 +65,8 @@ export function createRelay(options = {}) {
   let closed = false;
   let secure = false;
   let originRefusals = 0;
+  let heartbeatDrops = 0;
+  let pulse = null;
 
   // ------------------------------------------------------------- framing
 
@@ -263,7 +265,13 @@ export function createRelay(options = {}) {
   function onClose(conn) {
     connections.delete(conn);
     desk.revokeFor(conn);
-    if (conn.session) endSession(conn.session, 'peer-gone', 'the paired peer disconnected');
+    if (!conn.session) return;
+    // A tab that closed and a peer whose network died without saying so are
+    // different events. The surviving side is told which, because "check your
+    // connection" is the wrong advice for the first and the right advice for
+    // the second.
+    if (conn.timedOut) endSession(conn.session, 'peer-timeout', 'the paired peer stopped answering heartbeats');
+    else endSession(conn.session, 'peer-gone', 'the paired peer disconnected');
   }
 
   /**
@@ -291,15 +299,79 @@ export function createRelay(options = {}) {
   function onConnection(ws, req) {
     // Not `remoteAddress`: behind a proxy that is one address for the whole
     // internet. Not the raw forwarded header either. See `clientKeyFor`.
-    const conn = { ws, rateKey: clientKeyFor(req, config.trustedProxies), role: null, version: null, session: null };
+    const conn = {
+      ws,
+      rateKey: clientKeyFor(req, config.trustedProxies),
+      role: null,
+      version: null,
+      session: null,
+      lastSeen: Date.now(),
+      pingSentAt: 0,
+      timedOut: false,
+    };
     connections.add(conn);
     ws.on('message', (data, isBinary) => {
+      // Anything at all off this socket answers the liveness question, so a
+      // session carrying traffic is never pinged.
+      conn.lastSeen = Date.now();
+      conn.pingSentAt = 0;
       try { onMessage(conn, data, isBinary); }
       catch { refuse(conn, 'internal', 'the relay could not handle that frame'); }
     });
+    ws.on('pong', () => { conn.lastSeen = Date.now(); conn.pingSentAt = 0; });
     ws.on('close', () => onClose(conn));
     // Never log a socket error: the message can carry the frame that caused it.
     ws.on('error', () => { try { ws.terminate(); } catch { /* already gone */ } });
+  }
+
+  /**
+   * Ping what has gone quiet; drop what does not answer.
+   *
+   * A socket whose network died without a FIN stays `OPEN` forever. It reads as
+   * an idle peer, so it keeps its session, its routing entry, and the peer on
+   * the other side -- which sits waiting for events from a Photoshop that is no
+   * longer there. Nothing distinguishes the two states until something asks.
+   *
+   * Application traffic counts as an answer, so a busy session is never pinged.
+   *
+   * A peer that has stopped reading for a whole heartbeat plus its timeout is
+   * dropped whether it is dead or merely wedged, and that IS the intent: those
+   * two are not distinguishable from here, and the wedged case is the one that
+   * holds a session open indefinitely. Backpressure buys such a peer time to
+   * catch up; it does not buy it forever.
+   */
+  function heartbeat() {
+    const now = Date.now();
+    for (const conn of [...connections]) {
+      if (conn.ws.readyState !== WebSocket.OPEN) continue;
+
+      // A socket the relay ITSELF paused cannot deliver its own pong: `pause()`
+      // stops the stream that would parse it. Timing that out would kill the
+      // healthy sender that backpressure is deliberately holding still --
+      // punishing it for the relay's own decision.
+      //
+      // Reasoned, not measured: it only bites when a receiver drains slower
+      // than ~25 KB/s while still answering pings, and no arrangement a test
+      // can reach separates those two states. See the note in test/relay.mjs.
+      if (conn.ws.isPaused) {
+        conn.lastSeen = now;
+        conn.pingSentAt = 0;
+        continue;
+      }
+
+      if (conn.pingSentAt) {
+        if (now - conn.pingSentAt < config.heartbeatTimeoutMs) continue;
+        conn.timedOut = true;
+        heartbeatDrops += 1;
+        log(`socket dropped: no pong within ${config.heartbeatTimeoutMs}ms`);
+        try { conn.ws.terminate(); } catch { /* already gone */ }
+        continue;
+      }
+
+      if (now - conn.lastSeen < config.heartbeatMs) continue;
+      conn.pingSentAt = now;
+      try { conn.ws.ping(); } catch { /* the close handler will pick this up */ }
+    }
   }
 
   function sweep() {
@@ -354,6 +426,10 @@ export function createRelay(options = {}) {
         server.on('error', () => {});
         sweeper = setInterval(sweep, config.sweepMs);
         sweeper.unref();
+        // Tick at the finer of the two, so the timeout is honoured with the
+        // granularity it was configured at rather than the heartbeat interval.
+        pulse = setInterval(heartbeat, Math.max(1, Math.min(config.heartbeatMs, config.heartbeatTimeoutMs)));
+        pulse.unref();
         const { address, port } = server.address();
         log(`relay bound scheme=${secure ? 'wss' : 'ws'} tls=${secure ? 'local' : (config.behindProxy ? 'upstream' : 'none')}`);
         resolve(`${secure ? 'wss' : 'ws'}://${address}:${port}`);
@@ -365,6 +441,7 @@ export function createRelay(options = {}) {
     if (closed) return Promise.resolve();
     closed = true;
     if (sweeper) clearInterval(sweeper);
+    if (pulse) clearInterval(pulse);
     for (const session of [...sessions]) endSession(session, 'relay-closing', 'the relay is shutting down');
     for (const conn of [...connections]) { try { conn.ws.terminate(); } catch { /* already gone */ } }
     connections.clear();
@@ -386,6 +463,7 @@ export function createRelay(options = {}) {
       connections: connections.size,
       pendingCodes: desk.size(),
       originRefusals,
+      heartbeatDrops,
       sessions: [...sessions].map((s) => ({
         id: s.id,
         framesRead: s.framesRead,
