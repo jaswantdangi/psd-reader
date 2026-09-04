@@ -328,8 +328,23 @@ test('a message over the per-message cap is refused without being buffered', () 
   plugin.send({ type: 'event', change: 'brush', layerID: 7, props: { blob: 'x'.repeat(16 * 1024) } });
   const closed = await plugin.waitClose();
   assert.equal(closed.code, 1009, 'ws refuses an oversize frame at the protocol level (1009 = message too big)');
-  assert.equal(app.seen(), 0);
   await until(() => ctx.relay.stats().sessions.length === 0, 'the session tears down after the oversize close');
+
+  // NOT `app.seen() === 0`, which is what this asserted and why it failed.
+  // The other three cap tests use that form and are right to: their sessions
+  // survive, so the app should hear nothing at all. This one requires the
+  // session to TEAR DOWN on the line above, and teardown notifies the peer --
+  // from the same statement in endSession the 'vanished peer' test depends on.
+  // So exactly one frame is not just permitted here, it is the point.
+  //
+  // What must never cross is the PAYLOAD. Asserting that directly says what
+  // the cap is for, and cannot be satisfied by the relay simply going quiet.
+  const frames = app.drained();
+  assert.ok(frames.length <= 1, `only the teardown notice may reach the app, got ${frames.length}`);
+  for (const f of frames) {
+    assert.notEqual(f.type, 'event', 'the oversize event itself must never be forwarded');
+    assert.ok(!JSON.stringify(f).includes('xxxx'), 'no fragment of the oversize payload crosses');
+  }
 }));
 
 test('a session that exceeds its byte cap is closed, both sides told why', () => withRelay(
