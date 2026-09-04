@@ -9,7 +9,7 @@
  * — the whole stack is recomposited on every change, so a 4000x4000 canvas at
  * full resolution would not keep up.
  */
-import { createBuffer, blendInto } from './composite.js';
+import { createBuffer, blendInto, parseBlendIf } from './composite.js';
 import { create2dSurface } from './surface.js';
 import { resampleMask } from './mask.js';
 import { isNeutralAdjust, lutFor, adjustCostOf } from './adjust/lut.js';
@@ -438,7 +438,11 @@ export function drawLayerInto(dest, layer, scale = 1, options = {}) {
   if (!layer.visible || layer.opacity <= 0) return;
   const prepared = prepareLayer(dest, layer, scale, options);
   if (!prepared) return;
-  blendInto(dest, prepared.pixels.data, prepared.rect, layer.opacity, layer.blendMode);
+  // Blend If: ONE implementation, composite.js's. It is another factor in the
+  // same `as` product as opacity and the mask, and `dest` is the "underlying
+  // layer" it reads -- see the blend-if note in composite.js.
+  blendInto(dest, prepared.pixels.data, prepared.rect, layer.opacity, layer.blendMode,
+    null, parseBlendIf(layer));
 }
 
 /**
@@ -702,6 +706,9 @@ export function drawClipRunInto(dest, layers, index, scale = 1, options = {}) {
   const { group, alpha } = acquireClipScratch(
     options.clipScratch || DEFAULT_CLIP_SCRATCH, dest.width, dest.height);
 
+  // NO blend-if here. The base's own is spent in step 4 below, with its
+  // opacity and blend mode, against the canvas it actually blends onto -- the
+  // group buffer is empty at this point and would be no backdrop at all.
   blendInto(group, prepared.pixels.data, prepared.rect, 1, 'normal');
   // BEFORE any further prepareLayer call. `prepared.pixels` can be a view into
   // the shared adjustment scratch, which the next clipped layer overwrites.
@@ -713,11 +720,14 @@ export function drawClipRunInto(dest, layers, index, scale = 1, options = {}) {
     if (!layer.visible || layer.opacity <= 0) continue;
     const clipped = prepareLayer(group, layer, scale, options);
     if (!clipped) continue;
-    blendInto(group, clipped.pixels.data, clipped.rect, layer.opacity, layer.blendMode, alpha);
+    // "Underlying" for a clipped layer is `group`, the buffer it is blending
+    // onto -- base plus whatever clipped layers already went down on it.
+    blendInto(group, clipped.pixels.data, clipped.rect, layer.opacity, layer.blendMode,
+      alpha, parseBlendIf(layer));
   }
 
   blendInto(dest, group.data, { left: 0, top: 0, width: dest.width, height: dest.height },
-    base.opacity, base.blendMode);
+    base.opacity, base.blendMode, null, parseBlendIf(base));
   return end;
 }
 

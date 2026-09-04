@@ -177,6 +177,8 @@ function blendNonSeparable(mode, br, bg, bb, sr, sg, sb) {
  */
 const blendIfGray = (r, g, b) => (r * 77 + g * 151 + b * 28) / 256;
 
+const EMPTY_CHANS = [];
+
 /** A range is four bytes: black low, black high, white low, white high. */
 const RANGE_IS_DEFAULT = (r) =>
   !r || r.length < 4 || (r[0] === 0 && r[1] === 0 && r[2] === 255 && r[3] === 255);
@@ -254,15 +256,21 @@ export function parseBlendIf(layer) {
   const grayDst = RANGE_IS_DEFAULT(br.compositeGraphBlendDestinationRange)
     ? null : br.compositeGraphBlendDestinationRange;
 
-  const chans = [];
+  // Nothing is allocated until something is actually non-default. render.js
+  // calls this for every layer on every preview frame, and the answer on a
+  // document that does not use blend-if has to be free.
+  let chans = EMPTY_CHANS;
   const ranges = br.ranges || [];
   for (let i = 0; i < ranges.length && i < 3; i++) {
     const src = RANGE_IS_DEFAULT(ranges[i].sourceRange) ? null : ranges[i].sourceRange;
     const dst = RANGE_IS_DEFAULT(ranges[i].destRange) ? null : ranges[i].destRange;
-    if (src || dst) chans.push({ i, src, dst });
+    if (src || dst) {
+      if (chans === EMPTY_CHANS) chans = [];
+      chans.push({ i, src, dst });
+    }
   }
 
-  if (!graySrc && !grayDst && !chans.length) return null;
+  if (!graySrc && !grayDst && chans === EMPTY_CHANS) return null;
   return { graySrc, grayDst, chans };
 }
 
