@@ -131,6 +131,14 @@ export function decontaminate(pixels, mask, options = {}) {
   const { width, height } = pixels;
   const { radius = 6, threshold = 8 } = options;
   const n = width * height;
+  // guidedRefine has always thrown on a mismatch; this did not, and the
+  // consequence was worse than a throw. Past the end of a short mask
+  // `mask[i]` is undefined, `1 - undefined / 255` is NaN, and a
+  // Uint8ClampedArray stores NaN as 0 -- so the tail of the image went BLACK,
+  // with alpha left at 255 so it did not even read as transparent. Silent,
+  // and indistinguishable from a legitimately dark image.
+  if (mask.length !== n)
+    throw new Error(`mask/pixels mismatch: ${mask.length} vs ${n}`);
   const src = pixels.data;
   const out = new Uint8ClampedArray(src.length);
   out.set(src);
@@ -195,8 +203,14 @@ export function refineCutout(mask, pixels, options = {}) {
   const refined = options.refine === false
     ? Uint8Array.from(mask)
     : guidedRefine(mask, pixels, options);
+  // A copy, not `pixels`. This returned the caller's own object when
+  // decontamination was off, contradicting this function's own promise of new
+  // pixel data and leaving the two aliased -- so writing to the result wrote
+  // through to the source. The same shape as the resample() identity-return
+  // this codebase was already bitten by, where writing into the output
+  // permanently destroyed layer.pixels.
   const cleaned = options.decontaminate === false
-    ? pixels
+    ? { data: Uint8ClampedArray.from(pixels.data), width: pixels.width, height: pixels.height }
     : decontaminate(pixels, refined, options);
   return { mask: refined, pixels: cleaned };
 }

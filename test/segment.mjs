@@ -210,20 +210,23 @@ test('zero-length planes combine to a zero-length plane under every mode', () =>
     assert.equal(combineMask(new Uint8Array(0), new Uint8Array(0), mode).length, 0, mode);
 });
 
-test('FINDING: an unrecognised mode silently behaves as `intersect`', () => {
-  // The ternary chain ends in the intersect branch with no guard, so a typo'd
-  // or future mode string does not throw and does not fall back to `replace` --
-  // it INTERSECTS, which for a fresh selection over an empty mask yields
-  // nothing at all and reads to the user as "the tool did not work".
-  // Pinned as the behaviour that exists, not as the behaviour that is wanted.
+test('an unrecognised mode throws instead of quietly intersecting', () => {
+  // Was a FINDING, now fixed. The ternary chain used to end in the intersect
+  // branch with no guard, so a typo'd or future mode string neither threw nor
+  // fell back to `replace` -- it INTERSECTED, which for a fresh selection over
+  // an empty mask yields nothing at all and reads to the user as "the tool did
+  // not work". Failing closed is the only one of the three that cannot be
+  // mistaken for a working tool.
   const base = plane(4, 1, (x) => x * 60);
   const patch = plane(4, 1, () => 128);
-  same(combineMask(base, patch, 'ADD'), combineMask(base, patch, 'intersect'));
-  same(combineMask(base, patch, 'union'), combineMask(base, patch, 'intersect'));
+  assert.throws(() => combineMask(base, patch, 'ADD'), /unknown mask mode/);
+  assert.throws(() => combineMask(base, patch, 'union'), /unknown mask mode/);
+  assert.throws(() => combineMask(base, patch, null), /unknown mask mode/);
+  // undefined is still the parameter default, which is a legitimate call.
   same(combineMask(base, patch, undefined), combineMask(base, patch, 'replace'),
     'an explicit undefined still takes the parameter default');
-  same(combineMask(base, patch, null), combineMask(base, patch, 'intersect'),
-    'but null does not -- a default only fires on undefined');
+  for (const mode of MASK_MODES)
+    assert.doesNotThrow(() => combineMask(base, patch, mode), mode);
 });
 
 // ---------------------------------------------------------------------------
@@ -671,14 +674,15 @@ test('neither reads or writes past the plane, and neither mutates it', () => {
   same(m, before);
 });
 
-test('FINDING: cutFraction of a ZERO-LENGTH plane is NaN, not a number in 0..1', () => {
-  // `cut / mask.length` is 0/0. A degenerate layer therefore produces a
-  // "fraction cut" that fails every comparison it is put into -- a `< 0.01`
-  // "nothing found" guard reads false, and a percentage reaches the UI as NaN.
-  // Pinned as the behaviour that exists. isOpaque answers `true` on the same
-  // input, which at least is the safe direction.
-  assert.ok(Number.isNaN(cutFraction(new Uint8Array(0))), 'this now returns a number -- fixed?');
-  assert.equal(isOpaque(new Uint8Array(0)), true);
+test('cutFraction of a ZERO-LENGTH plane is 0, not NaN', () => {
+  // Was a FINDING, now fixed. `cut / mask.length` was 0/0, so a degenerate
+  // layer produced a "fraction cut" that failed every comparison it was put
+  // into -- a `< 0.01` "nothing found" guard read false, and a percentage
+  // reached the UI as NaN. Nothing cut out of nothing is zero.
+  assert.equal(cutFraction(new Uint8Array(0)), 0);
+  // The comparisons the NaN used to break, asserted directly.
+  assert.equal(cutFraction(new Uint8Array(0)) < 0.01, true, 'a "nothing found" guard now reads true');
+  assert.equal(isOpaque(new Uint8Array(0)), true, 'unchanged, and the safe direction');
 });
 
 // ---------------------------------------------------------------------------
@@ -954,24 +958,20 @@ test('an all-opaque mask makes the pass a pure copy', () => {
   same(out.data, px.data);
 });
 
-test('FINDING: decontaminate has NO mask-length guard, unlike guidedRefine', () => {
-  // guidedRefine throws `mask/guide mismatch`; decontaminate reads straight off
-  // the end of the array. `mask[i]` is undefined there, so BOTH threshold
-  // comparisons are false (the pixel is not skipped), the weight is NaN, and
-  // the rewritten colour is NaN -- which Uint8ClampedArray stores as 0. A short
-  // mask therefore paints the tail of the image BLACK, silently, with the alpha
-  // channel left intact so it does not even read as transparent.
+test('a short mask throws rather than blackening the tail of the image', () => {
+  // Was a FINDING, now fixed, and it was the worst of the four. guidedRefine
+  // has always thrown `mask/guide mismatch`; this read straight off the end,
+  // where `mask[i]` is undefined -- so both threshold comparisons were false
+  // (the pixel was not skipped), the weight was NaN, the rewritten colour was
+  // NaN, and Uint8ClampedArray stores NaN as 0. The tail of the image went
+  // BLACK with alpha left at 255, so it did not even read as transparent:
+  // silent, and indistinguishable from a legitimately dark image.
   const w = 8, h = 8;
   const px = image(w, h, () => [200, 150, 100, 255]);
   const short = fullMask(w, h - 4);                  // half the plane it should be
-  const out = decontaminate(px, short, { radius: 2 });
-  assert.doesNotThrow(() => decontaminate(px, short, { radius: 2 }),
-    'a guard was added -- update this test');
-  const tail = (h - 1) * w * 4;
-  assert.equal(out.data[tail], 0, 'the out-of-range tail is no longer blackened');
-  assert.equal(out.data[tail + 1], 0);
-  assert.equal(out.data[tail + 2], 0);
-  assert.equal(out.data[tail + 3], 255, 'and its alpha still claims the pixel is solid');
+  assert.throws(() => decontaminate(px, short, { radius: 2 }), /mask\/pixels mismatch/);
+  // A correctly sized mask still works, so the guard is a guard and not a wall.
+  assert.doesNotThrow(() => decontaminate(px, fullMask(w, h), { radius: 2 }));
 });
 
 // ---------------------------------------------------------------------------
@@ -1003,17 +1003,24 @@ test('refine: false skips the filter but still hands back a FRESH mask', () => {
   same(out.mask, mask);
 });
 
-test('ALIASING FINDING: decontaminate: false returns the CALLER\'S OWN pixels object', () => {
-  // Every other exit from this module allocates. This one does not: with
-  // decontamination off, `result.pixels` IS the object that was passed in, so a
-  // caller that believes the module's own docstring ("Returns NEW pixel data;
-  // the layer's original buffer is never mutated") and writes into the result
-  // destroys `layer.pixels` permanently. This repo has already been bitten by
-  // exactly this shape via `resample()`'s identity return.
+test('decontaminate: false still hands back FRESH pixels, never the caller\'s', () => {
+  // Was an ALIASING FINDING, now fixed. Every other exit from this module
+  // allocates; this one returned the object it was given, so a caller that
+  // believed the module's own docstring ("Returns NEW pixel data; the layer's
+  // original buffer is never mutated") and wrote into the result destroyed
+  // `layer.pixels` permanently. This repo has already been bitten by exactly
+  // this shape via `resample()`'s identity return.
   const { px, mask } = spillScene();
   const out = refineCutout(mask, px, { decontaminate: false, radius: 3 });
-  assert.equal(out.pixels, px, 'this now allocates -- fixed?');
-  assert.equal(out.pixels.data, px.data);
+  assert.notEqual(out.pixels, px, 'a distinct object');
+  assert.notEqual(out.pixels.data, px.data, 'backed by a distinct buffer');
+  assert.deepEqual(Array.from(out.pixels.data), Array.from(px.data), 'with identical contents');
+  assert.equal(out.pixels.width, px.width);
+  assert.equal(out.pixels.height, px.height);
+  // The point of the copy: writing to the result must not reach the source.
+  const before = px.data[0];
+  out.pixels.data[0] = before ^ 0xff;
+  assert.equal(px.data[0], before, 'the source is untouched');
 });
 
 test('both flags off is the cheapest path and changes nothing', () => {

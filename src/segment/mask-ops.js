@@ -38,6 +38,12 @@ export const MASK_MODES = ['replace', 'add', 'subtract', 'intersect'];
 export function combineMask(base, patch, mode = 'replace') {
   if (base.length !== patch.length)
     throw new Error(`mask size mismatch: ${base.length} vs ${patch.length}`);
+  // A mode this does not recognise used to fall through the chain below and
+  // silently become `intersect` -- so a typo did not throw, did not default to
+  // `replace`, and quietly returned the one result the caller was least likely
+  // to want. Fail closed, next to the length check that already does.
+  if (!MASK_MODES.includes(mode))
+    throw new Error(`unknown mask mode: ${JSON.stringify(mode)}`);
 
   const out = new Uint8Array(base.length);
   for (let i = 0; i < base.length; i++) {
@@ -207,6 +213,12 @@ export function isOpaque(mask) {
 
 /** Fraction of the plane that is fully or partly transparent, 0..1. */
 export function cutFraction(mask) {
+  // An empty mask divided 0 by 0 and returned NaN, which fails every
+  // comparison a "did we find anything?" guard puts it in -- including
+  // `fraction > 0`, so "nothing was cut" read as "nothing was cut" only by
+  // accident, and `fraction < 1` read as false. Nothing cut out of nothing is
+  // zero.
+  if (mask.length === 0) return 0;
   let cut = 0;
   for (let i = 0; i < mask.length; i++) cut += (255 - mask[i]) / 255;
   return cut / mask.length;
