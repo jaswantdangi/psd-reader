@@ -14,8 +14,13 @@ import { ExportService } from '../services/export.service';
 import { FontsService } from '../services/fonts.service';
 import { ProjectService } from '../services/project.service';
 import { SegmentService } from '../services/segment.service';
+import { ToolService } from '../services/tool.service';
+import { ColorService } from '../services/color.service';
+import { CropService } from '../services/crop.service';
 import { AdjustSheet } from './adjust-sheet';
 import { CanvasStage } from './canvas-stage';
+import { CropOverlay } from './crop-overlay';
+import { CropSheet } from './crop-sheet';
 import { CutoutPanel } from './cutout-panel';
 import { FilterSheet } from './filter-sheet';
 import { FontsSheet } from './fonts-sheet';
@@ -98,6 +103,8 @@ const TITLES: Record<SheetId, string> = {
   imports: [
     AdjustSheet,
     CanvasStage,
+    CropOverlay,
+    CropSheet,
     CutoutPanel,
     FilterSheet,
     FontsSheet,
@@ -173,6 +180,37 @@ const TITLES: Record<SheetId, string> = {
             <span class="text-[11px] font-semibold">Select</span>
           }
         </button>
+
+        <!-- Foreground / background, and the eyedropper that fills them.
+             In the HEADER for the same reason as the Select tool above: the
+             moment you want to pick a colour off the picture is while the sheet
+             that will use it — text, overlay — is already open, and the rail is
+             behind that sheet. Tapping the pair swaps them, which is what X
+             does on a keyboard nobody has here. -->
+        @if (svc.state() === 'ready') {
+          <button
+            type="button"
+            class="relative h-9 w-9 shrink-0 rounded-lg active:bg-white/10"
+            [attr.aria-label]="'Swap colours — foreground ' + color.foreground() + ', background ' + color.background()"
+            (click)="color.swap()"
+          >
+            <span class="absolute right-1 top-1 h-5 w-5 rounded border border-white/40"
+                  [style.background]="color.background()"></span>
+            <span class="absolute bottom-1 left-1 h-5 w-5 rounded border border-white/60"
+                  [style.background]="color.foreground()"></span>
+          </button>
+
+          <button
+            type="button"
+            class="flex h-12 w-11 shrink-0 items-center justify-center rounded-xl"
+            [class]="tool.active() === 'eyedropper' ? 'bg-sky-500 text-white' : 'text-neutral-300 active:bg-white/10'"
+            [attr.aria-pressed]="tool.active() === 'eyedropper'"
+            aria-label="Eyedropper — tap the picture to take its colour"
+            (click)="toggleEyedropper()"
+          >
+            <app-icon name="eyedropper" [size]="20" />
+          </button>
+        }
 
         <span class="mx-1 min-w-0 flex-1 truncate text-center text-[13px] text-neutral-400">
           {{ svc.fileName() || 'No document' }}
@@ -325,6 +363,12 @@ const TITLES: Record<SheetId, string> = {
         @switch (svc.state()) {
           @case ('ready') {
             <app-canvas-stage />
+
+            <!-- Above the stage, and pointer-transparent except on the rect
+                 itself, so a pinch anywhere else still reaches the canvas. -->
+            @if (tool.active() === 'crop') {
+              <app-crop-overlay />
+            }
 
             <div class="pointer-events-none absolute left-3 top-3 flex flex-col items-start gap-2">
               <!-- What the zip actually achieved, stated where it cannot be
@@ -565,7 +609,31 @@ const TITLES: Record<SheetId, string> = {
             <app-icon name="layer" />
             <span class="text-[11px]">Cut out</span>
           </button>
+
+          <!-- Crop, for the same reason as Cut out: it is a MODE the canvas is
+               in, not a sheet opener, so ToolService drives it rather than the
+               sheet signal. It needs no layer selected — it frames the
+               document, not a layer. -->
+          <button
+            type="button"
+            class="flex w-20 shrink-0 flex-col items-center justify-center gap-1.5 rounded-xl"
+            [class]="tool.active() === 'crop' ? 'bg-white/10 text-sky-300' : 'text-neutral-300'"
+            [attr.aria-pressed]="tool.active() === 'crop'"
+            (click)="toggleCrop()"
+          >
+            <app-icon name="crop" />
+            <span class="text-[11px]">Crop</span>
+          </button>
         </nav>
+      }
+
+      <!-- The crop sheet is not in the block below: that one is keyed on
+           the sheet signal, and crop is a tool mode. It gets no scrim either —
+           the whole point is judging the rect against the picture behind it. -->
+      @if (tool.active() === 'crop' && svc.state() === 'ready') {
+        <div class="absolute inset-x-0 bottom-0 z-30">
+          <app-crop-sheet />
+        </div>
       }
 
       <!-- ── sheets ──────────────────────────────────────────────── -->
@@ -796,6 +864,9 @@ export class EditorPage {
   /** Which meaning a canvas tap currently has: '', 'add', 'subtract', 'erase', 'restore'. */
   protected readonly cutMode = signal('');
   protected readonly seg = inject(SegmentService);
+  protected readonly tool = inject(ToolService);
+  protected readonly color = inject(ColorService);
+  protected readonly crop = inject(CropService);
   protected readonly prompt = signal('');
   protected readonly exporting = signal(false);
   protected readonly exportNote = signal('');
@@ -987,6 +1058,30 @@ export class EditorPage {
     const next = !this.cutout();
     this.cutout.set(next);
     if (!next) { this.cutMode.set(''); this.seg.tool.set(''); }
+  }
+
+  /**
+   * Arming crop closes whatever sheet is open.
+   *
+   * Crop draws its own sheet at the bottom of the screen, and two sheets
+   * stacked there is one covering the other. Nothing is lost by closing: crop
+   * commits nothing until Apply, and every other sheet's work is already
+   * committed and undoable.
+   */
+  protected toggleCrop(): void {
+    if (this.tool.active() === 'crop') { this.crop.cancel(); return; }
+    this.sheet.set(null);
+    this.crop.begin();
+    this.tool.select('crop');
+  }
+
+  /**
+   * The eyedropper is a sticky mode, like Select — the same argument applies.
+   * It does NOT close the open sheet: taking a colour for the sheet you are
+   * already in is the reason it exists.
+   */
+  protected toggleEyedropper(): void {
+    this.tool.active() === 'eyedropper' ? this.tool.reset() : this.tool.select('eyedropper');
   }
 
   protected open(id: SheetId): void {

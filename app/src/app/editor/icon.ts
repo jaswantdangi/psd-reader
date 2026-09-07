@@ -31,6 +31,10 @@ const PATHS: Record<string, string> = {
   file: 'M6 3 H14 L19 8 V21 H6 Z M14 3 V8 H19',
   select: 'M4 3 L11 20 L13.5 12.6 L21 10.1 Z',
   link: 'M10 14 a5 5 0 0 0 7 0 l3 -3 a5 5 0 0 0 -7 -7 l-1.5 1.5 M14 10 a5 5 0 0 0 -7 0 l-3 3 a5 5 0 0 0 7 7 l1.5 -1.5',
+  move: 'M12 3 V21 M3 12 H21 M12 3 L9 6 M12 3 L15 6 M12 21 L9 18 M12 21 L15 18 M3 12 L6 9 M3 12 L6 15 M21 12 L18 9 M21 12 L18 15',
+  crop: 'M6 2 V16 a2 2 0 0 0 2 2 H22 M2 6 H16 a2 2 0 0 1 2 2 V22',
+  eyedropper: 'M17.5 3.5 a2.1 2.1 0 0 1 3 3 L16 11 l-3 -3 Z M13 8 L4 17 V20 H7 L16 11',
+  swap: 'M7 4 L4 7 L7 10 M4 7 H16 a4 4 0 0 1 0 8 M17 20 L20 17 L17 14 M20 17 H8',
 };
 
 @Component({
