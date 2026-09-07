@@ -10,10 +10,6 @@ import { BUNDLE_FILE_ACCEPT } from '@engine/bundle.js';
 import { renderProject } from '@engine/render.js';
 import { isPreviewQuality } from '@engine/view.js';
 import { CLASS_A_ORDER, OPS, isNeutralHsl, isNeutralOverlay } from '@engine/adjust/ops.js';
-
-/** `OPS` is a plain object literal in untyped JS; index it through one alias — as adjust-sheet does. */
-const OPERATIONS = OPS as Record<string, any>;
-const CLASS_A: string[] = CLASS_A_ORDER;
 import { BundleService } from '../services/bundle.service';
 import { ExportService } from '../services/export.service';
 import { FontsService } from '../services/fonts.service';
@@ -38,6 +34,10 @@ import { SheetShell } from './sheet-shell';
 import { SyncService } from '../services/sync.service';
 import { SyncSheet } from './sync-sheet';
 import { TextSheet } from './text-sheet';
+
+/** `OPS` is a plain object literal in untyped JS; index it through one alias — as adjust-sheet does. */
+const OPERATIONS = OPS as Record<string, any>;
+const CLASS_A: string[] = CLASS_A_ORDER;
 
 type SheetId =
   | 'layers' | 'layer' | 'text' | 'adjust' | 'filter' | 'hsl' | 'overlay'
@@ -135,7 +135,7 @@ const TITLES: Record<SheetId, string> = {
       >
         <button
           type="button"
-          class="flex h-12 w-12 items-center justify-center rounded-xl text-neutral-300 active:bg-white/10"
+          class="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-neutral-300 active:bg-white/10"
           aria-label="Close document"
           (click)="back()"
         >
@@ -144,7 +144,7 @@ const TITLES: Record<SheetId, string> = {
 
         <button
           type="button"
-          class="flex h-12 w-12 items-center justify-center rounded-xl active:bg-white/10 disabled:opacity-30"
+          class="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl active:bg-white/10 disabled:opacity-30"
           aria-label="Undo"
           [disabled]="!svc.canUndo()"
           (click)="svc.undo()"
@@ -154,7 +154,7 @@ const TITLES: Record<SheetId, string> = {
 
         <button
           type="button"
-          class="flex h-12 w-12 items-center justify-center rounded-xl active:bg-white/10 disabled:opacity-30"
+          class="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl active:bg-white/10 disabled:opacity-30"
           aria-label="Redo"
           [disabled]="!svc.canRedo()"
           (click)="svc.redo()"
@@ -173,7 +173,7 @@ const TITLES: Record<SheetId, string> = {
              it says so — lit, labelled, and echoed on the canvas. -->
         <button
           type="button"
-          class="flex h-12 min-w-[48px] items-center justify-center gap-1.5 rounded-xl px-2.5 disabled:opacity-30"
+          class="flex h-12 min-w-[48px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-2.5 disabled:opacity-30"
           [class]="svc.selectMode() ? 'bg-accent-500 text-white' : 'text-neutral-300 active:bg-white/10'"
           [disabled]="svc.state() !== 'ready'"
           [attr.aria-pressed]="svc.selectMode()"
@@ -236,7 +236,7 @@ const TITLES: Record<SheetId, string> = {
         @if (fonts.demand().wanted) {
           <button
             type="button"
-            class="flex h-12 items-center gap-1 rounded-xl px-2 active:bg-white/10"
+            class="flex h-12 shrink-0 items-center gap-1 rounded-xl px-2 active:bg-white/10"
             [class]="fonts.missing() ? 'text-amber-400' : 'text-neutral-500'"
             [attr.aria-label]="fontsLabel()"
             (click)="open('fonts')"
@@ -253,7 +253,7 @@ const TITLES: Record<SheetId, string> = {
         @if (svc.warnings().length) {
           <button
             type="button"
-            class="flex h-12 items-center gap-1 rounded-xl px-2 text-amber-400 active:bg-white/10"
+            class="flex h-12 shrink-0 items-center gap-1 rounded-xl px-2 text-amber-400 active:bg-white/10"
             [attr.aria-label]="svc.warnings().length + ' notes about this file'"
             (click)="open('warnings')"
           >
@@ -282,7 +282,7 @@ const TITLES: Record<SheetId, string> = {
 
         <button
           type="button"
-          class="flex h-12 w-12 items-center justify-center rounded-xl text-accent-400 active:bg-white/10 disabled:opacity-30"
+          class="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-accent-400 active:bg-white/10 disabled:opacity-30"
           aria-label="Export"
           [disabled]="svc.state() !== 'ready'"
           (click)="open('export')"
@@ -1100,8 +1100,25 @@ export class EditorPage {
    */
   protected toggleCutout(): void {
     const next = !this.cutout();
+    if (next) this.tool.reset();
     this.cutout.set(next);
     if (!next) { this.cutMode.set(''); this.seg.tool.set(''); }
+  }
+
+  /**
+   * Put the canvas back in its resting state.
+   *
+   * Crop, the eyedropper and the cut-out brush all claim the single-pointer
+   * path in `canvas-stage.onPointerDown`, and that function reads them in a
+   * fixed order — so two armed at once does not mean "both", it means the one
+   * that happens to be checked first, silently. They are modes of the same
+   * surface and only one can be true.
+   */
+  private clearCanvasModes(): void {
+    this.tool.reset();
+    this.cutout.set(false);
+    this.cutMode.set('');
+    this.seg.tool.set('');
   }
 
   /**
@@ -1115,6 +1132,7 @@ export class EditorPage {
   protected toggleCrop(): void {
     if (this.tool.active() === 'crop') { this.crop.cancel(); return; }
     this.close();
+    this.clearCanvasModes();
     this.crop.begin();
     this.tool.select('crop');
   }
@@ -1125,8 +1143,12 @@ export class EditorPage {
    * already in is the reason it exists.
    */
   protected toggleEyedropper(): void {
-    if (this.tool.active() === 'eyedropper') this.tool.reset();
-    else this.tool.select('eyedropper');
+    if (this.tool.active() === 'eyedropper') { this.tool.reset(); return; }
+    // Does NOT close the open sheet — taking a colour for the sheet you are
+    // already in is the reason it exists — but it does stand down the other
+    // canvas modes, which claim the same single pointer.
+    this.clearCanvasModes();
+    this.tool.select('eyedropper');
   }
 
 

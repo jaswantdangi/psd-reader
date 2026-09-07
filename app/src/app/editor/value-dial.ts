@@ -34,7 +34,8 @@ const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
     <button
       type="button"
       class="flex w-16 shrink-0 flex-col items-center gap-1.5 rounded-xl py-1 active:bg-white/5"
-      [attr.aria-pressed]="active()"
+      role="tab"
+      [attr.aria-selected]="active()"
       [attr.aria-label]="label() + ', ' + value()"
       (click)="pick.emit()"
     >

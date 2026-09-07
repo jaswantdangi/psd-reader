@@ -34,6 +34,7 @@ import {
   RETAP_SLOP_CSS_PX,
 } from '@engine/gesture.js';
 import { liveTextRect } from '@engine/creative/index.js';
+import { frameOf } from '@engine/frame/index.js';
 import { ProjectService } from '../services/project.service';
 import { SegmentService } from '../services/segment.service';
 import { ToolService } from '../services/tool.service';
@@ -174,6 +175,8 @@ export class CanvasStage implements OnDestroy {
    */
   private pickRun: { x: number; y: number; index: number } | null = null;
   private fittedFor: any = null;
+  /** The frame the view was last fitted to — a crop mutates in place, so identity is not enough. */
+  private fittedFrame = '';
   /** Reused destination for putImageData. Allocated here, so writing into it is ours to do. */
   private image: ImageData | null = null;
 
@@ -194,6 +197,10 @@ export class CanvasStage implements OnDestroy {
     const layer = this.svc.selected();
     const view = this.svc.view();
     if (!layer) return null;
+    // Crop draws its own rect with its own four handles. Leaving the layer's
+    // selection box up as well puts two rectangles and eight handles on the
+    // picture at once, and the pair the user drags is whichever they guess.
+    if (this.tool.active() === 'crop') return null;
     const a = docToView(view, layer.x, layer.y, ORIGIN);
     const b = docToView(view, layer.x + layer.w, layer.y + layer.h, ORIGIN);
     return { left: a.x, top: a.y, width: b.x - a.x, height: b.y - a.y };
@@ -229,9 +236,19 @@ export class CanvasStage implements OnDestroy {
     effect(() => {
       const project = this.svc.project();
       const size = this.size();
+      // A crop MUTATES the project in place, so object identity alone never
+      // sees it: the document changed size under a view still framing the old
+      // one, and the result sat off-centre or half off-screen with no way to
+      // tell that anything had refitted wrongly. `fitView` already reads the
+      // frame through `canvasSize` — it was simply never asked again.
+      this.svc.version();
       if (!project || size.width < 1 || size.height < 1) return;
-      if (this.fittedFor === project) return;
+
+      const frame = frameOf(project);
+      const framing = `${frame.x},${frame.y},${frame.width},${frame.height}`;
+      if (this.fittedFor === project && this.fittedFrame === framing) return;
       this.fittedFor = project;
+      this.fittedFrame = framing;
       queueMicrotask(() => this.fit());
     });
 
@@ -386,6 +403,20 @@ export class CanvasStage implements OnDestroy {
       if (this.seg.isBrush()) this.svc.gesturing.set(true);
       return;
     }
+
+    /*
+     * Crop owns the whole canvas while it is armed.
+     *
+     * The crop overlay is pointer-transparent everywhere except its own rect,
+     * which is what keeps pinch working — but it also means a single finger
+     * landing OUTSIDE the rect fell through to `arbitrate` and dragged a layer.
+     * Moving the artwork underneath while framing it is never what the gesture
+     * meant, and the frame you were setting is still where you left it, so the
+     * damage is silent.
+     *
+     * Placed after the two-pointer branch, so a pinch still reaches the stage.
+     */
+    if (this.tool.active() === 'crop') return;
 
     /*
      * The eyedropper samples and is done — no drag, no gesture state, so

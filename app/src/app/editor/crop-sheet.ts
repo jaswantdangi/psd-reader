@@ -28,7 +28,7 @@ import { ASPECT_RATIOS } from '@engine/frame/index.js';
     <app-sheet-shell
       title="Crop"
       cancelLabel="Cancel crop"
-      maxHeight="46vh"
+      maxHeight="32vh"
       (cancel)="crop.cancel()"
       (confirm)="crop.apply()"
     >
