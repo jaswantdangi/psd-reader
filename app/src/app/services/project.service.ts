@@ -22,6 +22,10 @@ import {
   replaceImage as replaceImageCmd,
 } from '@engine/creative/index.js';
 import { createView } from '@engine/view.js';
+import {
+  setRatio as engineSetRatio,
+  framingReport as engineFramingReport,
+} from '@engine/frame/index.js';
 
 /**
  * The engine is plain JavaScript, so TypeScript reads its JSDoc as the
@@ -417,6 +421,37 @@ export class ProjectService {
     if (!project) return;
     engineSetFrame(project, rect, coalesceKey);
     this.version.update((v) => v + 1);
+  }
+
+  /**
+   * Crop to the largest centred rect of a named ratio — `'1:1'`, `'4:5'`,
+   * `'9:16'`, `'16:9'`, or `'free'` to restore the whole document.
+   *
+   * Commits immediately, so this is the CANVAS-SIZE verb rather than the crop
+   * one: the crop tool holds a pending rect and applies it once.
+   */
+  setRatio(ratio: string | number | null, coalesceKey?: string): void {
+    const project = this.project();
+    if (!project) return;
+    engineSetRatio(project, ratio, coalesceKey);
+    this.version.update((v) => v + 1);
+  }
+
+  /**
+   * What a frame costs, so a sheet can say it out loud BEFORE Apply.
+   *
+   * `frame` is optional so the crop tool can ask about its PENDING rect rather
+   * than the committed one — a warning that only appears after the crop has
+   * already happened is not a warning.
+   *
+   * The `warnings` sentences are the engine's own and should be shown verbatim:
+   * they get the singular right and they say the layers are recoverable, which
+   * is the half a re-implementation drops.
+   */
+  framingReport(frame?: any): { outside: any[]; clipped: any[]; warnings: string[] } | null {
+    const project = this.project();
+    if (!project) return null;
+    return frame ? engineFramingReport(project, frame) : engineFramingReport(project);
   }
 
   undo(): void {

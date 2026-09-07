@@ -467,4 +467,50 @@ describe('ProjectService', () => {
       expect(FakeWorker.instances.length).toBe(0);
     });
   });
+
+  describe('crop', () => {
+    it('locks the frame to the largest centred rect of a named ratio', () => {
+      svc.project.set(makeProject([{}], { width: 200, height: 100 }));
+      const before = svc.version();
+
+      svc.setRatio('1:1');
+
+      // Derived from the SOURCE document, not from the current frame — which is
+      // what makes a second tap on the same chip a no-op rather than a shrink.
+      expect(svc.project().frame).toEqual({ x: 50, y: 0, width: 100, height: 100 });
+      expect(svc.version()).toBeGreaterThan(before);
+    });
+
+    it('restores the whole document on free', () => {
+      svc.project.set(makeProject([{}], { width: 200, height: 100 }));
+      svc.setRatio('1:1');
+      svc.setRatio('free');
+      expect(svc.project().frame).toBeNull();
+    });
+
+    it('reports what a crop would cost, for a frame not yet applied', () => {
+      // Leaves default to 0,0,10,10. A frame in the far corner leaves both of
+      // them outside it — without ever committing that frame.
+      svc.project.set(makeProject([{}, {}]));
+
+      const report = svc.framingReport({ x: 50, y: 50, width: 20, height: 20 });
+
+      expect(report!.outside.length).toBe(2);
+      expect(report!.warnings.length).toBe(1);
+      // The engine's own sentence, which says the layers are recoverable.
+      expect(report!.warnings[0]).toContain('not deleted');
+      // Asking did not change anything.
+      expect(svc.project().frame).toBeNull();
+    });
+
+    it('reports against the committed frame when asked about none', () => {
+      svc.project.set(makeProject([{}, {}]));
+      expect(svc.framingReport()!.outside.length).toBe(0);
+    });
+
+    it('reports nothing when no document is open', () => {
+      svc.project.set(null);
+      expect(svc.framingReport()).toBeNull();
+    });
+  });
 });
