@@ -1075,7 +1075,7 @@ export class EditorPage {
    */
   protected toggleCrop(): void {
     if (this.tool.active() === 'crop') { this.crop.cancel(); return; }
-    this.sheet.set(null);
+    this.close();
     this.crop.begin();
     this.tool.select('crop');
   }
@@ -1092,6 +1092,12 @@ export class EditorPage {
 
 
   protected open(id: SheetId): void {
+    // Crop draws its own sheet in the same corner at the same z-index, so two
+    // open at once is one covering the other. Guarded HERE rather than in
+    // openTool because the fonts, warnings, export and sync buttons all reach
+    // a sheet without going through the rail. Nothing is lost: a pending crop
+    // commits nothing.
+    if (this.tool.active() === 'crop') this.crop.cancel();
     if (id !== 'layers') this.prompt.set('');
     this.exportNote.set('');
     // The font note reports what the LAST pick did. Carrying it into a fresh
