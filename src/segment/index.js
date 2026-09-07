@@ -7,8 +7,8 @@
  * mistake for a third subsystem was not worth the consistency.
  */
 export {
-  MODELS, BASE, CLICK, PORTRAIT, FAST,
-  availableModels, canSegment, fitsBudget, unavailableReason,
+  MODELS, BASE, CLICK, PORTRAIT, LITE, FEATHER,
+  availableModels, autoModel, canSegment, fitsBudget, unavailableReason, tierNote,
   totalDownloadBytes, DOCUMENT_HEADROOM_BYTES,
 } from './models.js';
 export {
@@ -16,7 +16,8 @@ export {
   stampBrush, stampInto, strokeMask, isOpaque, cutFraction, MASK_MODES,
 } from './mask-ops.js';
 export { guidedRefine, decontaminate, refineCutout } from './refine.js';
+export { NEUTRAL_EDGE, normaliseEdge, isNeutralEdge, applyEdge } from './edge.js';
 export {
-  resampleLogits, buildCutout, applyCutout, paintMask, clearCutout,
+  resampleLogits, buildCutout, applyCutout, paintMask, clearCutout, setMaskEdge,
   exportSoftnessNote,
 } from './cutout.js';

@@ -22,12 +22,14 @@ export { installPlainPixelBackend } from './canvas.js';
 export { compositeDocument, compareBuffers, differenceBuffer, createBuffer, flattenOnto, SUPPORTED_BLEND_MODES } from './composite.js';
 export { layerRect, pixelRect, projectMask, downscaleMask, resampleMask } from './mask.js';
 export {
-  MODELS, BASE, CLICK, PORTRAIT, FAST,
-  availableModels, canSegment, fitsBudget, unavailableReason, totalDownloadBytes,
+  MODELS, BASE, CLICK, PORTRAIT, LITE, FEATHER,
+  availableModels, autoModel, canSegment, fitsBudget, unavailableReason, tierNote,
+  totalDownloadBytes, DOCUMENT_HEADROOM_BYTES,
   fullMask, emptyMask, combineMask, invertMask, featherMask, strokeMask,
   isOpaque, cutFraction, MASK_MODES,
   guidedRefine, decontaminate, refineCutout,
-  resampleLogits, buildCutout, applyCutout, paintMask, clearCutout,
+  resampleLogits, buildCutout, applyCutout, paintMask, clearCutout, setMaskEdge,
+  NEUTRAL_EDGE, normaliseEdge, isNeutralEdge, applyEdge,
   exportSoftnessNote,
 } from './segment/index.js';
 export {

@@ -1,187 +1,240 @@
-# Handoff: Browser PSD Reader, Compositor + Editor
+# Handoff: AI Background Removal in the Browser PSD Editor
 
-**Generated**: 2026-08-22 (updated)
-**Repo**: https://github.com/jaswantdangi/psd-reader — **private**, branch `main`, working tree clean, pushed through `383a59a`
-**Status**: In Progress — read, composite and edit all working and verified. No PSD writing by design.
+**Generated**: 2026-09-02
+**Repo**: `a:/test-rnd` — branch `phase-1-engine-gpu-memory`, HEAD `9bd242e`
+**Deployed**: https://psd-editor.pages.dev (Cloudflare Pages project `psd-editor`, build `90c07ff4`)
+**Status**: In Progress — automatic cut, edge controls and brush working; SAM tap path unverified.
+
+> Supersedes the 2026-08-22 handoff, which described the repo at `383a59a` and was
+> ~130 commits stale. The still-valid parts of its Failed Approaches are carried
+> forward below.
 
 ## Goal
 
-A browser-based PSD/PSB pipeline: recover as much of the file as possible, composite layers at exact position and order, and edit them — size, placement, text, blending, layer order.
+Add background removal to the browser PSD editor: cut a subject out of a layer,
+correct the result by hand, and tune the edge — entirely on-device, no server,
+inside a memory budget that assumes a cheap Android phone.
 
 ## Completed
 
-- [x] Reader (`src/reader.js`) — `readDocument()` with `pixels: 'none' | 'eager' | 'stream'`
-- [x] Metadata ag-psd discards entirely: ICC (`src/icc.js`), IPTC (`src/iim.js`), EXIF (via exifr), raw block extraction (`src/resources.js`)
-- [x] Compositor (`src/composite.js`) — position, order, opacity, masks, groups, clipping runs, 20 separable + 6 non-separable blend modes
-- [x] Editor model (`src/edit.js`) — command-based mutations, undo/redo with drag coalescing, hit testing, project JSON
-- [x] Editor renderer (`src/render.js`) — non-destructive transforms, bilinear resampling, live text rasterisation
-- [x] Two demos: `demo/index.html` (inspector, 3-way composite comparison) and `demo/editor.html` (editing)
-- [x] Four test suites, all passing: shim / read / composite / edit
-- [x] Git repo created and pushed; fixtures excluded with a fetch script
-- [x] Fixed pixelated text on scale (commit `383a59a`)
+- [x] **Engine `src/segment/`** — pure JS, no browser APIs, runnable in Node:
+  - `models.js` — model registry, per-device selection (`autoModel`), licences, sizes
+  - `mask-ops.js` — combine/invert/feather, O(n) box blur, soft brush, interpolated stroke
+  - `refine.js` — guided filter (pulls alpha onto the real edge) + colour decontamination
+  - `cutout.js` — logits→mask resample, `applyCutout`, `paintMask`, `setMaskEdge`
+  - `edge.js` — non-destructive edge recipe (blur/shift/contrast/smooth/fade)
+- [x] **Masks are writable and persistent.** Generated masks ride the existing
+  `set` command (invertible for free) and are written into the project JSON.
+- [x] **App wiring** — `bg-remove.worker.ts`, `segment.service.ts`, `cutout-panel.ts`.
+- [x] **Selection tool** — armed explicitly; only then does it take the pointer.
+- [x] **Edge sliders** — five controls, re-derived from the model's own output.
+- [x] **Loader** — determinate during download, indeterminate during inference.
+- [x] Deployed to production and confirmed working by the user.
 
 ## Not Yet Done
 
-- [ ] **Image replacement** — you can transform an image layer but not swap the image. Most-requested obvious gap.
-- [ ] Layer effects (`fx`) — biggest compositor accuracy gap, affects 4 of 21 fixtures
-- [ ] Adjustment layers, smart filters, blend-if ranges, artboard background colour, layer comps
-- [ ] Multi-select, alignment, rotation
-- [ ] Add / delete / duplicate layers
-- [ ] Move decode + composite into a Web Worker (both block the main thread)
-- [ ] `dissolve` blend mode; pass-through groups with opacity/blend
-- [ ] Streaming reader (needs an ag-psd fork — see Warnings)
-- [ ] PSD write support — deliberately dropped, see Key Decisions
+- [ ] **No test file covers `src/segment/**`.** Built at the user's explicit
+      direction ("no testing"). `npm test` does not touch any of it.
+- [ ] **SAM tap-to-correct is unverified end-to-end.** The pointer path reaches
+      the model (proved by the error it produced), but no successful tap observed.
+- [ ] Guided upsample at export — see the softness warning under Warnings.
+- [ ] Cancellation for a running cut (same gap export already has).
+- [ ] `costOf` quotes a download the HTTP cache may already hold across sessions.
 
 ## Failed Approaches (Don't Repeat These)
 
-**Most of these were silent — they passed Node tests, or produced convincing wrong numbers.**
+**The WebGPU saga — three attempts, two shipped broken.** Read this before
+touching device selection.
 
-1. **`icc` npm package** — needs Node's `Buffer` (`readUInt32BE`), throws on a plain `Uint8Array`. Passes every Node test, dies in the browser. Replaced with `src/icc.js` (~90 lines, zero deps). **Do not reinstall it.**
+1. **Drove `AutoModel` directly and guessed tensor names.** The input/output
+   names differ between the BiRefNet, ormbg and MODNet exports and nothing in
+   the repo could settle them. Replaced with transformers.js's
+   `background-removal` pipeline, which owns that mapping upstream. **Verified
+   from the installed package's source**, not assumed:
+   `dist/transformers.web.js` → `cloned.putAlpha(masks[i].mask)`, so the result
+   is the original image with alpha = mask, 4 channels.
 
-2. **`const { default: exifr } = await import('exifr')`** — exifr's ESM build has **no default export**; Node's CJS interop invents one. In the browser `exifr` was `undefined`, `.parse` threw, and the `try/catch` swallowed it into a warning. EXIF would have silently died in production with a green suite. Now takes `mod.parse || mod.default?.parse`.
+2. **Caught the WebGPU failure at model CONSTRUCTION.** Shipped; changed nothing.
+   onnxruntime-web compiles WebGPU kernels **lazily**, so the operator error
+   throws at **inference**, not at session creation.
 
-3. **Adding an `ag-psd` import without updating `demo/shims/ag-psd.js`** — blanks the page:
-   > `Uncaught SyntaxError: The requested module 'ag-psd' does not provide an export named 'getCompositeImageData'`
+3. **Moved the catch to wrap load-and-run.** Also shipped; also failed. Root
+   cause of both: **nothing in this repo can execute WebGPU**, so every fix was
+   written blind. The Node probes that "verified" the models ran on
+   **onnxruntime-node (native CPU)** — not the browser's WASM backend and not
+   WebGPU at all, so they never covered the failing layer.
 
-   ESM named exports are static and the browser gets the shim, not the package. `test/shim.mjs` guards this and runs **first** in `npm test`.
+   **Resolution: WebGPU is disabled.** `pickDevice()` returns `'wasm'`
+   unconditionally, with the reasoning in-file. To re-enable, confirm ONE model
+   on a real device then gate **per-model** — a blanket `requestAdapter()` check
+   is the wrong question, because the capability is **per-operator**.
 
-4. **`ag-psd/dist-es/index.js`** — the `module` field points here but it contains **CommonJS**. The demo loads `dist/bundle.js` (UMD, global `window.agPsd`).
+4. **Made BiRefNet_lite the default.** It publishes only fp32 (224 MB) and fp16
+   (115 MB) — no 8-bit build — and fp16 on WASM is unreliable. Forcing the CPU
+   path would have broken the default. ormbg q8 is now the default.
 
-5. **Rasterising text once at natural size, then bitmap-scaling it** — this was the "text looks pixelated when scaled" bug. Text is vector; it must be drawn at the final size. `rasteriseTextAt()` scales the canvas transform (`sx`/`sy` independent) instead of resampling. **Never route text through `resample()`.**
+5. **Ranked subject match above model rank in `autoModel`.** At 81.9 MB a
+   "people" request picked MODNet (7 MB) over ormbg (45 MB), which is both
+   higher-ranked *and* human-trained. Subject now only breaks ties at equal rank.
 
-6. **Clearing `layer.rendered` without clearing `layer.renderedKey`** — the next cache lookup hit a matching key, got `null`, and the layer **disappeared**. Invalidate the key.
+6. **Backticks inside an HTML comment in a component template.** The template is
+   a JS template literal; a backtick terminates it. Produced
+   `TS2304: Cannot find name 'none'` pointing at `pointer-events-none`. The repo
+   had already been broken this way once (commit `06aacba`). **Never use
+   backticks inside these templates, comments included.**
 
-7. **Comparing all 4 RGBA channels against the embedded composite** — Photoshop stores **white** in RGB under fully transparent pixels; we store zero. Both invisible. Reported `text` and `text-box` as 98% wrong when pixel-perfect. Use `flattenOnto()` on both first.
+7. **Stated twice that "the editor has zero mask support."** It was true when
+   `docs/BACKLOG.md` recorded it and false by the time I read it — `src/mask.js`
+   already existed. **Verify backlog entries against the code before acting.**
 
-8. **Counting a delta of 1 as a mismatch** — different rounding of intermediate blend results. `gradient` showed 26% differing at `maxΔ = 1`. Use `stat.percentReal` (tolerance 1), never `stat.percent`. Together, 7 and 8 made a correct compositor look 5/21 right instead of 12/21.
+**Carried forward from the previous handoff (still true):**
 
-9. **`bytes.buffer.slice(...)` unconditionally in `readDocument`** — copied the whole file, costing 261 MB peak on a 261 MB PSD.
-
-10. **Releasing streamed layers by nulling `_`-prefixed fields** — wrong field. Retained channels live on **`layer.rawData`**. Null `imageData`, `canvas` **and `rawData`**.
-
-11. **IIM parser ignoring record numbers** — reported record-1 character-set markers as `City`. Only **record 2** is content. Corrected IPTC from an apparent 10/21 to a true 2/21 (8 files carry an empty envelope).
-
-12. **`flatten()` hiding a whole group** — `for (const l of out) l.visible = false` marked *every* layer flattened so far, not just that group's. Capture `out.length` before recursing.
-
-13. **A test that silently skipped** — the text-layer cases ran against `effects.psd`, which has no text layer, and printed "skipped" while counting as passing. Now runs against `text.src.psd` with an assertion that the layer exists.
-
-14. **`git add <dir>`** — `src/resources.js` was missed from an explicit staging list and would have broken the clone (`reader.js` imports it). Always read `git diff --staged --name-only` and verify every relative import resolves.
-
-15. **Planned to fork ag-psd for block passthrough** — correct for read+write, **wrong for read-only**. Everything ag-psd drops, it drops on *save*. For reading it handles 343/343 keys.
-
-16. **Considered `@webtoon/psd`** — 3× faster structure parse but 80% block coverage, read-only, no document metadata, stale since 2023, **reverse layer order**. Rejected, uninstalled.
-
-17. **Considered writing a PSD codec from scratch** — months. ag-psd is the only free PSD writer in existence, which tells you how hard it is.
+- **Adding an `ag-psd` import without updating `demo/shims/ag-psd.js` blanks the
+  page.** `test/shim.mjs` guards this and runs first in `npm test`.
+- **Never route text through `resample()`** — text is vector and must be drawn at
+  final size, or it looks pixelated when scaled.
+- **Clearing `layer.rendered` without `layer.renderedKey`** makes the layer
+  disappear. Invalidate both.
+- **`icc` npm package and `exifr`'s default export** both pass in Node and die in
+  the browser. Do not reinstall `icc`.
 
 ## Key Decisions
 
 | Decision | Rationale |
 |---|---|
-| `ag-psd` as the spine | 343/343 block keys across 21 real files; only 3 unhandled corpus-wide (`CAI`, `OCIO`, `GenI`) |
-| Read-only; no PSD write | ag-psd's writer peaks at **3.5–4.2× decoded pixels** (1761 MB for a 512 MB doc) and silently drops `Patt`, corrupting pattern fills |
-| Canvas never in the decode path | `getImageData()` clamps to 8-bit and premultiplies alpha, destroying 16/32-bit data |
-| Non-destructive transforms | Layers keep original pixels; `x/y/w/h` apply at render time. Scale to 20% and back loses nothing |
-| Every mutation is a command | Undo/redo is replaying the inverse. Drags coalesce into one history entry |
-| Groups flattened in the editor | Keeps every layer individually editable. Lossless only for pass-through groups at full opacity — warned on open |
-| Resizing text switches it to live rendering | Photoshop's text pixels are a bitmap; upscaling can only blur. Badged `re-drawn` so it's never silent |
-| Export = PNG + project JSON | Avoids reinstating write support |
+| On-device only, no server | Matches the app's privacy model; deploys to static Pages |
+| CPU (WASM) only, WebGPU off | The only backend observed producing correct masks; see Failed Approaches |
+| ormbg q8 (45 MB, Apache-2.0) as default | Verified end-to-end; 8-bit so it runs everywhere |
+| BiRefNet MIT over RMBG / @imgly | RMBG-1.4/2.0 is **CC BY-NC**; @imgly is **AGPL**. Both unusable in a shipping product |
+| SlimSAM over SAM 3 | SAM 3 ships under Meta's own licence; SlimSAM is Apache-2.0 and smaller |
+| SlimSAM at q8, not fp16 | SAM returns a **binary** mask — no soft edge for the precision to land in — and it must survive the CPU path |
+| Mask rides the existing `set` command | `setLayer` already captures `from`, so undo is free. No new command type |
+| Edge stored as a **recipe**, not baked | Same shape as `layer.adjust`: parameters stored, result derived. Makes sliders reversible |
+| Refine + decontaminate are classical, not models | Kilobytes instead of a second 100 MB download |
+| Selection tool armed explicitly | With nothing armed the canvas behaves exactly as before; pinch is never intercepted |
 
 ## Current State
 
-**Working** — `npm test`, all four suites:
-- 21/21 fixtures parse, 0 failures
-- Metadata matches an independent block scan exactly: ICC 16/21, EXIF 21/21, IPTC 2/21, XMP 21/21
-- Compositor vs Photoshop's own output: **12/21 pixel-exact (<0.5%), 5 within 10%, 4 above** — every remaining diff traces to a named unimplemented feature
-- Editor: 20 tests passing
+**Working** (confirmed by the user in the deployed app): automatic cut, model
+download with progress, edge sliders, loader. Build exits 0.
 
-**Broken**: nothing known.
+**Unverified**: SAM tap-to-correct; the brush (erase/restore) — engine path is
+tested in Node, browser path is not.
 
-**Uncommitted**: none. Working tree clean, `main` in sync with `origin/main`.
+**Uncommitted**: 11 modified files + `src/segment/edge.js` untracked
+(~973 insertions). `git status` before doing anything.
 
 ## Files to Know
 
 | File | Why It Matters |
 |---|---|
-| `src/reader.js` | `readDocument()`. Note the `layer.rawData` release in the stream branch |
-| `src/composite.js` | Compositor for the *unedited* document + `compareBuffers` / `flattenOnto`. Blend tables at the top |
-| `src/edit.js` | Editable model, commands, undo, hit testing, project JSON |
-| `src/render.js` | Renders the *edited* project. Text goes through `textPixelsAt`, never `resample` |
-| `src/resources.js` | Raw block extraction, no ag-psd dependency. Reusable for any block ag-psd ignores |
-| `src/icc.js`, `src/iim.js` | Hand-written parsers. Do not swap for npm packages without checking browser support |
-| `demo/shims/ag-psd.js` | **Every ag-psd symbol used in `src/` must be listed here** or the browser blanks |
-| `test/shim.mjs` | Guards the above. Runs first |
-| `test/edit.mjs` | Edit model + text scaling. Stubs `globalThis.document` to test canvas maths in Node |
-| `scripts/fetch-fixtures.mjs` | Fixtures are gitignored; this downloads all 21 |
+| `src/segment/models.js` | Registry + `autoModel`. Sizes and licences live next to ids on purpose |
+| `src/segment/edge.js` | The edge recipe. Order of operations is documented and deliberate |
+| `src/segment/cutout.js` | `applyCutout` / `paintMask` / `setMaskEdge`. All amend `mask.source`, never `mask.data` |
+| `src/segment/refine.js` | Guided filter + decontamination. Refine MUST run before decontaminate |
+| `app/src/app/workers/bg-remove.worker.ts` | `pickDevice()` returns `'wasm'` — read the comment before changing it |
+| `app/src/app/services/segment.service.ts` | Worker lifetime, `tool` signal (the arbitration rule), download consent |
+| `app/src/app/editor/cutout-panel.ts` | Side panel. Must stay INSIDE `<main>` or it covers the header |
+| `src/edit.js` | `maskJson` / `decodeMaskJson` — persists source + recipe, not the derived plane |
+| `docs/BACKLOG.md` | ~20 deferred findings for this feature, with FIXED entries struck through |
 
 ## Code Context
 
 ```js
-// Reading
-const doc = await readDocument(bytes, {
-  pixels: 'none' | 'eager' | 'stream',   // default 'none'
-  onLayer,        // required for 'stream'; copy before returning, buffer is released
-  metadata: true,
-  embedded: false // also decode Photoshop's own flattened composite
-});
-// -> { width, height, channels, bitsPerChannel, colorMode, children /* [0] = BOTTOM */,
-//      layers, embeddedComposite, resources, linkedFiles, artboards, annotations,
-//      metadata: { icc, exif, iptc, xmp }, warnings }
+// The mask a layer carries. `data` is what renders; `source` is what the model
+// said; `edge` is the recipe between them. render.js reads ONLY `data`.
+layer.mask = {
+  data,            // Uint8Array, w*h, 0..255 — alpha multiplier
+  source,          // the model's own plane, never mutated
+  edge,            // { feather, shift, contrast, smooth, fade }
+  width, height,   // ALWAYS layer.pixels dimensions
+  disabled,        // honoured; Photoshop saves switched-off masks
+  generated: true, // marks it as ours, so persistence writes it out
+};
 
-// Editing
-const project = createProject(doc, fileName);   // needs pixels:'eager'
-setLayer(project, id, { x, y, w, h, opacity, blendMode, visible, rerendered }, coalesceKey);
-setLayer(project, id, { text: { content, fontSize, color, fontFamily, align, bold, italic } });
-reorderLayer(project, fromIndex, toIndex);      // 0 = bottom
-undo(project); redo(project);
-hitTest(project, x, y);                         // topmost non-transparent layer
-const buffer = renderProject(project, { scale });
-toProjectJson(project); applyProjectJson(project, json);
+// Engine entry points
+buildCutout(logits, srcW, srcH, pixels, options)  // -> { mask, pixels, coverage, empty }
+applyCutout(project, id, cut, { mode })           // mode: replace|add|subtract|intersect
+paintMask(project, id, points, { radius, hardness, erase, coalesceKey })
+setMaskEdge(project, id, { feather: 4 }, coalesceKey)
+autoModel(budgetBytes, subject)                   // 'general' | 'people'
+
+// Worker protocol
+postMessage({ requestId, kind: 'segment'|'point', pixels, modelId, dtype, points, labels })
+// <- { type: 'download', loaded, total } | { type: 'ready', id, device }
+// <- { type: 'done', requestId, data, width, height } | { type: 'error', requestId, message }
 ```
 
-**Layer shape in the editor:**
-```js
-{
-  id, name, kind: 'raster' | 'text',
-  visible, opacity /* 0..1 */, blendMode,
-  x, y, w, h,                  // current placement — NOT the source bounds
-  pixels,                      // original decoded pixels, never mutated
-  sourceW, sourceH,
-  rerendered,                  // true = we draw it, not Photoshop
-  rendered, renderedKey,       // text raster cache — invalidate BOTH
-  text: { content, originalContent, fontFamily, fontSize, color, bold, italic, align } | null,
-}
-```
+**Model selection, as it actually resolves:**
 
-**Text layer traps** (verified against `fixtures/text.src.psd`, not guessed):
-- `style.font.name` is **`"AdobeInvisFont"`** — a placeholder. Real per-run fonts live in raw EngineData that ag-psd does not model.
-- `layer.text.styleRuns` **does not exist**. Per-character styling is EngineData-only, so one text layer = one style here.
-- `layer.text.left/top/right/bottom` are all `0`. Use `layer.left/top/...` and `transform[4],[5]` for the baseline.
+| Budget | General | People |
+|---|---|---|
+| 150 MB | Standard (ormbg q8, 45 MB) | Standard |
+| 81.9 MB | Standard | Standard |
+| 40 MB | Light (MODNet q8, 7 MB) | Light |
 
 ## Resume Instructions
 
-1. `cd a:/test-rnd && npm install`
-2. `node scripts/fetch-fixtures.mjs` — fixtures are gitignored
-3. `npm test`
-   - Expected: `shim OK` → `21 files | parsed 21 | failed 0` → `<0.5% diff: 12   <10%: 5   >=10%: 4` → `20 passed`
-   - If the shim check fails: a new `ag-psd` import needs adding to `demo/shims/ag-psd.js`
-4. `npm run serve`
-   - Inspector: http://localhost:5173
-   - Editor: http://localhost:5173/demo/editor.html
-   - If a page is blank: DevTools console — it is almost always Failed Approach 3
-5. Most likely next task is **image replacement** (see Not Yet Done). The transform path already exists; it needs a file input that decodes an image into `layer.pixels` and recomputes `sourceW/sourceH`.
+1. `cd a:/test-rnd/app && npm install` — `@huggingface/transformers` 3.8.1 is required.
+2. `cd a:/test-rnd && npm test`
+   - Expected: all suites pass. **Nothing here covers `src/segment/**`.**
+3. Verify the engine without a browser:
+   ```
+   node -e "import('./src/segment/index.js').then(m=>{const W=64,H=64;
+   const s=new Uint8Array(W*H);for(let y=0;y<H;y++)for(let x=0;x<W;x++)s[y*W+x]=(x>20&&x<44&&y>20&&y<44)?255:0;
+   console.log('feather', m.applyEdge(s,W,H,{feather:4})[32*W+20]);
+   console.log('reversible', m.applyEdge(s,W,H,{feather:0}).every((v,i)=>v===s[i]));})"
+   ```
+   - Expected: `feather 113`, `reversible true`
+4. Build and deploy (the user runs builds; do not run them to "verify"):
+   ```
+   cd app && npm run build
+   npx wrangler pages deploy dist/app/browser --project-name=psd-editor --branch=main --commit-dirty=true
+   ```
+5. **Most likely next task**: commit the work (see Warnings), then verify the SAM
+   tap path on a real device.
 
 ## Setup Required
 
-- Node 24 (tested v24.19.0). No env vars, no services.
-- Demos need internet on first load (Tailwind CDN). Parsing is offline.
-- Test scripts use `--max-old-space-size=6144` for the larger fixtures.
+- Node 24. `@huggingface/transformers` ^3.8.1 in `app/`.
+- Models download from the Hugging Face CDN on first use — **first cut needs
+  internet**; afterwards the browser cache serves them.
+- Cloudflare: `npx wrangler whoami` must show `jaswantdangi00@gmail.com`.
+
+## Edge Cases & Error Handling
+
+- Model finds nothing → mask is all-255, `isOpaque` catches it, panel says
+  "Nothing found to cut out" rather than spending an undo step.
+- Device below ~31 MB budget → `autoModel` returns null, `unavailableReason`
+  explains it, **the brush still works** (no model needed).
+- Worker dies (OOM kill on a phone) → `onerror` rejects every in-flight request;
+  without it the button just stops responding.
+- Saved mask whose dimensions no longer match the layer → **refused silently**.
+  `render.js` indexes the plane with no bounds check, so restoring a mismatched
+  one would read past the end. The user is told nothing — a known gap.
 
 ## Warnings
 
-- **`gh` reverts to the wrong account between sessions.** It was on `hellomipl`, which cannot see this private repo, and `git push` failed with a misleading `Repository not found`. Fix: `gh auth switch --hostname github.com --user jaswantdangi`. Four accounts are authenticated (`jaswantdangi`, `hellomipl`, `dangijaswant`, `jaswantmipl`) — check before pushing. Commit identity is set **repo-locally** to `jaswantdangi <79034803+jaswantdangi@users.noreply.github.com>`; the global config is a different user and was left alone.
-- **`Patt` (pattern definitions) is present in 21/21 files and readable by NO library on any platform.** The reader warns about it. **Do not remove that warning** — layers with pattern fills render wrong and the user must be told.
-- **ag-psd does not read the ICC profile at all.** That is why `src/icc.js` exists. ICC is parsed for *identification* only — nothing converts colour, so CMYK and wide-gamut documents display wrong.
-- **The whole file must be resident.** `readPsd()` takes one `ArrayBuffer`; no streaming reader. A 2 GB PSB will not open. Fixing it means forking ag-psd to swap `DataView` for a windowed reader over `Blob.slice()` — feasible because every read primitive funnels through ~15 functions on a `{view, offset}` cursor.
-- **`spike/` and `fixtures/` are gitignored.** `spike/` is throwaway probe code except `spike/scan.mjs` (an independent structural PSD scanner, useful as ground truth). Several spike scripts reference `@webtoon/psd`, which is uninstalled, so they now fail — expected.
-- **32-bit float documents composite through 8-bit maths** — they decode to 8-bit before we see them.
-- Read peak ≈ file size + one layer when streaming; streaming 343 MB of pixels costs ~35 MB over structure-only. Parse is 26–54 ms on real fixtures; the ~4 s in `test/memory.mjs` is a synthetic incompressible file and not representative.
+- **Commit before anything else.** 11 files modified, `src/segment/edge.js`
+  untracked, and the deployed bundle corresponds to no commit. A redeploy from a
+  clean checkout would silently revert the feature. **Stage exact files** — the
+  tree has also carried unrelated Select-tool work.
+- **The cut-out tool and the Select tool both claim single-pointer events, and
+  the cut-out wins.** `canvas-stage.ts` checks `seg.tool()` before `selectMode`
+  reaches `arbitrate`. With Select on and a cut-out armed, taps cut rather than
+  pick and the Select toggle looks broken. Nothing states this.
+- **Export softens the cut.** The mask is generated on the 1024px proxy and
+  export streams at full resolution, so it is upscaled on the way out.
+  `exportSoftnessNote` discloses it above 2×; nothing fixes it. Guided upsampling
+  is the obvious follow-up.
+- **Decontamination rewrites `layer.pixels` at PROXY resolution**, but export
+  re-reads the original from the PSD — so the exported file keeps spill the
+  editor removed. Deliberately NOT papered over with `selfSupplied`, which would
+  be a lie about resolution.
+- **A generated mask costs ~1.4 MB of JSON per cut layer** (base64 of one byte
+  per pixel). PNG-packing would cut that ~10×.
+- **Cuts are CPU-only and single-threaded.** `app/public/_headers` deliberately
+  omits COOP/COEP, so onnxruntime-web cannot use WASM threads either. Several
+  seconds per cut is expected and the UI says so.
+- **`npm test` does not cover this feature at all.** Any "tests pass" claim about
+  background removal is meaningless.

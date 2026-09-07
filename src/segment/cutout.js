@@ -26,6 +26,7 @@
 import { setLayer, findLayer } from '../edit.js';
 import { combineMask, fullMask, strokeMask, isOpaque, cutFraction } from './mask-ops.js';
 import { refineCutout } from './refine.js';
+import { applyEdge, normaliseEdge, NEUTRAL_EDGE } from './edge.js';
 
 /**
  * Resample a model's single-channel output onto the layer's pixel grid.
@@ -108,12 +109,32 @@ export function applyCutout(project, id, cut, options = {}) {
   if (!layer) return project;
 
   const { mode = 'replace', coalesceKey } = options;
-  const base = layer.mask?.data ?? fullMask(layer.pixels.width, layer.pixels.height);
+  // Composes with the model's ORIGINAL plane, not the edge-adjusted one. Adding
+  // a region to a feathered cut must not re-feather what was already there —
+  // the edge recipe is re-applied once, at the end, to the combined result.
+  const base = layer.mask?.source ?? layer.mask?.data
+    ?? fullMask(layer.pixels.width, layer.pixels.height);
   const data = mode === 'replace' ? cut.mask : combineMask(base, cut.mask, mode);
+  // A replace starts a fresh cut, so it starts from a neutral edge. An add or a
+  // subtract is amending a cut the user has already tuned — throwing their
+  // feather away because they tapped one more object would be its own bug.
+  const edge = mode === 'replace' ? NEUTRAL_EDGE : normaliseEdge(layer.mask?.edge);
 
   const changes = {
     mask: {
-      data,
+      data: applyEdge(data, layer.pixels.width, layer.pixels.height, edge),
+      /**
+       * What the model actually said, kept alongside what is drawn.
+       *
+       * `setMaskEdge` re-derives `data` from THIS every time a slider moves, so
+       * the edge controls are re-runnable: feather to 8 and back to 0 returns
+       * the model's own bytes. Deriving from `data` instead would compound each
+       * adjustment on the last, and dragging a slider back would not undo it.
+       *
+       * Costs one extra plane per cut layer — 1 MB at a 1024 proxy.
+       */
+      source: data,
+      edge,
       width: layer.pixels.width,
       height: layer.pixels.height,
       // A generated mask is never born switched off. Carrying the old flag
@@ -152,17 +173,55 @@ export function paintMask(project, id, points, options = {}) {
   // Start from a fully-covering plane rather than an empty one: painting on an
   // unmasked layer should reveal nothing at first and then hide where the user
   // erases. Starting empty would blank the layer the moment the brush is armed.
-  const base = layer.mask?.data ?? fullMask(width, height);
-  const data = strokeMask(base, width, height, points, {
+  //
+  // Strokes land on `source`, the model's own plane, for the same reason the
+  // combine above does: the edge recipe is a lens over the mask, not part of
+  // it. Painting onto the adjusted plane would bake the current feather into
+  // every stroke and make the feather slider stop being reversible.
+  const base = layer.mask?.source ?? layer.mask?.data ?? fullMask(width, height);
+  const source = strokeMask(base, width, height, points, {
     radius: options.radius ?? 24,
     hardness: options.hardness ?? 0.5,
     flow: options.flow ?? 1,
     erase: options.erase ?? false,
   });
+  const edge = normaliseEdge(layer.mask?.edge);
 
   return setLayer(project, id, {
-    mask: { data, width, height, disabled: false, generated: true },
+    mask: {
+      source,
+      edge,
+      data: applyEdge(source, width, height, edge),
+      width, height, disabled: false, generated: true,
+    },
   }, options.coalesceKey);
+}
+
+/**
+ * Change the edge treatment, re-deriving the drawn plane from the model's own.
+ *
+ * One command, so a slider drag is one undo step when the caller passes a
+ * coalesce key — and because `data` is always rebuilt from `source`, undoing
+ * lands on the exact bytes that were there before rather than on an
+ * approximation reached by running the inverse adjustment.
+ *
+ * Silently does nothing on a layer with no generated mask: there is no source
+ * to re-derive from, and inventing one from a PSD's own mask would let a slider
+ * quietly rewrite something the file owns.
+ */
+export function setMaskEdge(project, id, edge, coalesceKey) {
+  const layer = findLayer(project, id);
+  const mask = layer?.mask;
+  if (!mask?.generated || !mask.source) return project;
+
+  const next = normaliseEdge({ ...mask.edge, ...edge });
+  return setLayer(project, id, {
+    mask: {
+      ...mask,
+      edge: next,
+      data: applyEdge(mask.source, mask.width, mask.height, next),
+    },
+  }, coalesceKey);
 }
 
 /**

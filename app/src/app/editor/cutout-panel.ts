@@ -71,20 +71,37 @@ import { ProjectService } from '../services/project.service';
                 {{ why }}
               </p>
             } @else {
+              <!-- Only the models this device can actually run. A picker that
+                   lists an option and then refuses it is worse than one that
+                   never offered it — so the filtering happens in the engine
+                   (availableModels) and this renders whatever survived. -->
               <div class="flex gap-1 rounded-xl bg-white/5 p-1">
-                @for (m of models; track m.id) {
+                <button
+                  type="button"
+                  class="min-h-[38px] flex-1 rounded-lg px-2 text-[12px] font-medium transition-colors"
+                  [class]="role() === '' ? 'bg-white/15 text-sky-300' : 'text-neutral-400 active:bg-white/10'"
+                  [attr.aria-pressed]="role() === ''"
+                  (click)="role.set('')"
+                >Auto</button>
+                @for (m of seg.choices(); track m.role) {
                   <button
                     type="button"
                     class="min-h-[38px] flex-1 rounded-lg px-2 text-[12px] font-medium transition-colors"
-                    [class]="role() === m.id ? 'bg-white/15 text-sky-300' : 'text-neutral-400 active:bg-white/10'"
-                    [attr.aria-pressed]="role() === m.id"
-                    (click)="role.set(m.id)"
+                    [class]="role() === m.role ? 'bg-white/15 text-sky-300' : 'text-neutral-400 active:bg-white/10'"
+                    [attr.aria-pressed]="role() === m.role"
+                    (click)="role.set(m.role)"
                   >
                     {{ m.label }}
                   </button>
                 }
               </div>
               <p class="text-[12px] leading-relaxed text-neutral-500">{{ purpose() }}</p>
+
+              <!-- The quality this device gives up, named. Silence here would
+                   make a soft edge look like a bug rather than a budget. -->
+              @if (role() === '' && seg.tier(); as note) {
+                <p class="text-[12px] leading-relaxed text-neutral-500">{{ note }}</p>
+              }
 
               <button
                 type="button"
@@ -116,14 +133,30 @@ import { ProjectService } from '../services/project.service';
                   </p>
                 </div>
               }
-              @if (seg.device() === 'wasm') {
+              <!-- Says CPU because it IS the CPU, on every device. GPU
+                   acceleration is off: onnxruntime-web's WebGPU backend cannot
+                   run the MaxPool these models use. Claiming "your device has
+                   no WebGPU" here would be blaming the user's hardware for our
+                   own constraint. -->
+              @if (seg.device()) {
                 <p class="text-[11px] leading-relaxed text-neutral-500">
-                  This device has no WebGPU, so the cut runs on the CPU and takes
-                  noticeably longer.
+                  Cuts run on the CPU, so allow a few seconds. Larger pictures take
+                  proportionally longer.
                 </p>
               }
             }
           </section>
+
+          <!-- The armed state, stated. The canvas gives no other sign that it
+               has stopped moving the layer and started cutting, and a tool you
+               cannot tell is on is a tool that feels broken. -->
+          @if (seg.tool(); as armed) {
+            <p class="rounded-xl border border-sky-400/30 bg-sky-400/10 px-3 py-2.5
+                      text-[12px] leading-relaxed text-sky-200" role="status">
+              {{ armedHint() }}
+              <button type="button" class="ml-1 underline" (click)="setMode(armed)">Done</button>
+            </p>
+          }
 
           <!-- ── tap to correct ──────────────────────────────────── -->
           @if (!seg.unavailable()) {
@@ -136,17 +169,17 @@ import { ProjectService } from '../services/project.service';
                   type="button"
                   class="min-h-[40px] flex-1 rounded-xl border border-white/10 text-[12px] font-medium
                          text-neutral-200 active:bg-white/10"
-                  [class]="mode() === 'add' ? 'bg-white/10 text-sky-300' : ''"
-                  [attr.aria-pressed]="mode() === 'add'"
-                  (click)="setMode('add')"
+                  [class]="seg.tool() === 'keep' ? 'bg-white/10 text-sky-300' : ''"
+                  [attr.aria-pressed]="seg.tool() === 'keep'"
+                  (click)="setMode('keep')"
                 >Keep this</button>
                 <button
                   type="button"
                   class="min-h-[40px] flex-1 rounded-xl border border-white/10 text-[12px] font-medium
                          text-neutral-200 active:bg-white/10"
-                  [class]="mode() === 'subtract' ? 'bg-white/10 text-sky-300' : ''"
-                  [attr.aria-pressed]="mode() === 'subtract'"
-                  (click)="setMode('subtract')"
+                  [class]="seg.tool() === 'remove' ? 'bg-white/10 text-sky-300' : ''"
+                  [attr.aria-pressed]="seg.tool() === 'remove'"
+                  (click)="setMode('remove')"
                 >Remove this</button>
               </div>
               <p class="text-[12px] leading-relaxed text-neutral-500">
@@ -170,29 +203,29 @@ import { ProjectService } from '../services/project.service';
                 type="button"
                 class="min-h-[40px] flex-1 rounded-xl border border-white/10 text-[12px] font-medium
                        text-neutral-200 active:bg-white/10"
-                [class]="mode() === 'erase' ? 'bg-white/10 text-sky-300' : ''"
-                [attr.aria-pressed]="mode() === 'erase'"
+                [class]="seg.tool() === 'erase' ? 'bg-white/10 text-sky-300' : ''"
+                [attr.aria-pressed]="seg.tool() === 'erase'"
                 (click)="setMode('erase')"
               >Erase</button>
               <button
                 type="button"
                 class="min-h-[40px] flex-1 rounded-xl border border-white/10 text-[12px] font-medium
                        text-neutral-200 active:bg-white/10"
-                [class]="mode() === 'restore' ? 'bg-white/10 text-sky-300' : ''"
-                [attr.aria-pressed]="mode() === 'restore'"
+                [class]="seg.tool() === 'restore' ? 'bg-white/10 text-sky-300' : ''"
+                [attr.aria-pressed]="seg.tool() === 'restore'"
                 (click)="setMode('restore')"
               >Restore</button>
             </div>
 
             <label class="block space-y-1.5">
               <span class="flex items-center justify-between text-[12px] text-neutral-400">
-                Size <span class="tabular-nums text-neutral-500">{{ radius() }} px</span>
+                Size <span class="tabular-nums text-neutral-500">{{ seg.brushRadius() }} px</span>
               </span>
               <input
                 type="range" min="4" max="120" step="1"
                 class="h-11 w-full accent-sky-400"
-                [value]="radius()"
-                (input)="radius.set($any($event.target).valueAsNumber)"
+                [value]="seg.brushRadius()"
+                (input)="seg.brushRadius.set($any($event.target).valueAsNumber)"
               />
             </label>
 
@@ -203,11 +236,49 @@ import { ProjectService } from '../services/project.service';
               <input
                 type="range" min="0" max="1" step="0.05"
                 class="h-11 w-full accent-sky-400"
-                [value]="hardness()"
-                (input)="hardness.set($any($event.target).valueAsNumber)"
+                [value]="seg.brushHardness()"
+                (input)="seg.brushHardness.set($any($event.target).valueAsNumber)"
               />
             </label>
           </section>
+
+          <!-- ── edge ────────────────────────────────────────────── -->
+          @if (hasCut()) {
+            <section class="space-y-3 border-t border-white/10 pt-4">
+              <div class="flex items-center justify-between">
+                <h3 class="text-[12px] font-semibold uppercase tracking-wider text-neutral-400">
+                  Edge
+                </h3>
+                <button
+                  type="button"
+                  class="min-h-[32px] rounded-lg px-2 text-[11px] text-neutral-400 active:bg-white/10"
+                  (click)="resetEdge()"
+                >Reset</button>
+              </div>
+
+              <!-- Each slider re-derives the drawn mask from the model's own
+                   output, so dragging one back to its default restores exactly
+                   the bytes the model produced rather than an approximation. -->
+              @for (s of edgeControls; track s.key) {
+                <label class="block space-y-1.5">
+                  <span class="flex items-center justify-between text-[12px] text-neutral-400">
+                    {{ s.label }}
+                    <span class="tabular-nums text-neutral-500">{{ edgeLabel(s) }}</span>
+                  </span>
+                  <input
+                    type="range"
+                    class="h-11 w-full accent-sky-400"
+                    [min]="s.min" [max]="s.max" [step]="s.step"
+                    [value]="edge()[s.key]"
+                    [disabled]="seg.running()"
+                    (input)="onEdge(s.key, $any($event.target).valueAsNumber)"
+                    (change)="endEdge()"
+                  />
+                  <span class="block text-[11px] leading-relaxed text-neutral-600">{{ s.hint }}</span>
+                </label>
+              }
+            </section>
+          }
 
           <!-- ── outcome ─────────────────────────────────────────── -->
           @if (seg.note()) {
@@ -254,28 +325,20 @@ export class CutoutPanel {
   protected readonly seg = inject(SegmentService);
   private readonly projects = inject(ProjectService);
 
-  protected readonly models = [
-    { id: 'base', label: 'General' },
-    { id: 'portrait', label: 'People' },
-    { id: 'fast', label: 'Quick' },
-  ];
+  /** '' means let the engine pick the best model this device can run. */
+  protected readonly role = signal('');
 
-  protected readonly role = signal('base');
-  protected readonly mode = signal('');
-  protected readonly radius = signal(24);
-  protected readonly hardness = signal(0.5);
+  /** The model a cut would actually use right now — the auto pick, or the override. */
+  private readonly chosen = computed(() => {
+    const picked = this.role();
+    const usable = this.seg.choices();
+    return picked ? usable.find((m: any) => m.role === picked) ?? null : usable[0] ?? null;
+  });
 
-  protected readonly purpose = computed(
-    () => ({
-      base: 'Works on any subject. Start here.',
-      portrait: 'Tuned for people — better on hair and shoulders.',
-      fast: 'Half resolution. Quicker, with coarser edges.',
-    })[this.role()] ?? '',
-  );
-
-  protected readonly cost = computed(() => this.seg.costOf(this.role()));
+  protected readonly purpose = computed(() => this.chosen()?.purpose ?? '');
+  protected readonly cost = computed(() => this.seg.costOf(this.chosen()?.role ?? ''));
   protected readonly clickCost = computed(() => this.seg.costOf('click'));
-  protected readonly hardnessPercent = computed(() => Math.round(this.hardness() * 100));
+  protected readonly hardnessPercent = computed(() => Math.round(this.seg.brushHardness() * 100));
 
   protected readonly hasCut = computed(() => {
     // `version()` first, always. The engine mutates the project object in
@@ -296,6 +359,72 @@ export class CutoutPanel {
     return this.seg.softnessNote(project, project.proxyScale ?? 1);
   });
 
+  protected readonly armedHint = computed(() => ({
+    keep: 'Tap the part of the picture you want to KEEP.',
+    remove: 'Tap the part you want to REMOVE.',
+    erase: 'Drag on the picture to erase. Pinch still zooms.',
+    restore: 'Drag on the picture to bring it back. Pinch still zooms.',
+  })[this.seg.tool() as string] ?? '');
+
+  /**
+   * The edge sliders. Data, so the template is one loop rather than five
+   * near-identical blocks that drift apart the first time one is edited.
+   *
+   * `hint` is not decoration: "Shift" and "Contrast" mean nothing to someone who
+   * has not used Select and Mask, and a slider whose effect you have to discover
+   * by dragging is one people leave alone.
+   */
+  protected readonly edgeControls = [
+    { key: 'feather', label: 'Blur', min: 0, max: 32, step: 1, unit: 'px',
+      hint: 'Softens the cut edge. Use for hair and fur.' },
+    { key: 'shift', label: 'Shrink / grow', min: -1, max: 1, step: 0.05, unit: '%',
+      hint: 'Pulls the edge in to remove a halo, or pushes it out.' },
+    { key: 'contrast', label: 'Sharpness', min: -1, max: 1, step: 0.05, unit: '%',
+      hint: 'Hardens or softens the transition without moving it.' },
+    { key: 'smooth', label: 'Smooth', min: 0, max: 8, step: 1, unit: 'px',
+      hint: 'Removes jagged steps along the edge.' },
+    { key: 'fade', label: 'Strength', min: 0, max: 1, step: 0.05, unit: '%',
+      hint: 'How much of the background is removed. 0 shows it all again.' },
+  ];
+
+  protected readonly edge = computed(() => {
+    this.projects.version();
+    return this.seg.edgeOf(this.projects.project(), this.layerId() as number) as any;
+  });
+
+  protected edgeLabel(s: any): string {
+    const v = this.edge()[s.key];
+    return s.unit === 'px' ? `${Math.round(v)} px` : `${Math.round(v * 100)}%`;
+  }
+
+  /**
+   * One coalesce key per drag, minted on the first input and dropped on change.
+   *
+   * `setLayer` merges commands sharing a key, so a whole sweep of the slider is
+   * one undo step. A literal key would also merge two SEPARATE drags minutes
+   * apart and make the earlier one unreachable — which is the exact trap
+   * `nextGestureKey` exists to prevent.
+   */
+  private edgeKey: string | null = null;
+
+  protected onEdge(key: string, value: number): void {
+    this.edgeKey ??= `edge#${Date.now()}`;
+    const project = this.projects.project();
+    const id = this.layerId();
+    if (project && id !== null) this.seg.setEdge(project, id, { [key]: value }, this.edgeKey);
+  }
+
+  protected endEdge(): void {
+    this.edgeKey = null;
+  }
+
+  protected resetEdge(): void {
+    const project = this.projects.project();
+    const id = this.layerId();
+    if (project && id !== null)
+      this.seg.setEdge(project, id, { feather: 0, shift: 0, contrast: 0, smooth: 0, fade: 1 });
+  }
+
   protected mb(bytes: number): number {
     return Math.round(bytes / (1024 * 1024));
   }
@@ -307,15 +436,21 @@ export class CutoutPanel {
    * needs to know which of the four meanings a tap currently has. Emitting
    * rather than reaching into the stage keeps this panel a leaf.
    */
-  protected setMode(next: string): void {
-    this.mode.set(this.mode() === next ? '' : next);
-    this.modeChange.emit(this.mode());
+  protected setMode(next: any): void {
+    // Tapping the armed button again disarms it. Without that there is no way
+    // back to moving the layer except closing the panel, and the canvas would
+    // stay captured by a tool the user has finished with.
+    const value = this.seg.tool() === next ? '' : next;
+    this.seg.tool.set(value);
+    this.modeChange.emit(value);
   }
 
   protected cut(): void {
     const project = this.projects.project();
     const id = this.layerId();
-    if (project && id) void this.seg.cut(project, id, { role: this.role() as any });
+    // An empty role is passed as undefined, not as '': the service reads
+    // "absent" as "pick for me", and '' would be a lookup miss instead.
+    if (project && id) void this.seg.cut(project, id, { role: (this.role() || undefined) as any });
   }
 
   protected clear(): void {

@@ -679,6 +679,43 @@ Noticed while building the PSD-plus-fonts zip import; deliberately not fixed.
   markup with different escape hatches. They should converge before a third one
   appears.
 
+### Update, same day — auto cut-out now runs on low-memory devices
+
+- ~~**The BiRefNet input and output tensor names are guessed.**~~ **FIXED.** The
+  worker now drives transformers.js's `background-removal` pipeline, which owns
+  the per-model tensor mapping upstream. Verified against the INSTALLED package
+  (3.8.1): `dist/transformers.web.js` carries the pipeline. The mask is the
+  alpha channel of the pipeline's result, so there is no sigmoid, transpose or
+  name probe left to be wrong.
+
+- ~~**Gated off below the 150 MB tier.**~~ **FIXED**, and the earlier gate is
+  recorded as the wrong trade: it removed the headline feature from a large
+  share of Android to protect a quality difference most users never see.
+  `autoModel()` now picks the best model that fits — BiRefNet_lite fp16 (115 MB,
+  MIT) at 150 MB, ormbg q8 (45 MB, Apache-2.0) at 81.9 MB, MODNet q8 (7 MB,
+  Apache-2.0) below that. Checked at four budgets in Node.
+
+- **`autoModel`'s subject match is deliberately weak, and that is load-bearing.**
+  A `people` request only wins when the portrait model ranks at least as high as
+  the best general one. Without that clause an 81.9 MB device asking for a
+  person got the 7 MB MODNet over the 45 MB ormbg — which is both higher-ranked
+  and itself trained on human data. Tidier rule, worse cut.
+
+- **Three of the four models remain unexercised.** Only the general path was
+  reasoned through end to end. ormbg, MODNet and BiRefNet-portrait are assumed
+  to behave identically under the `background-removal` pipeline; the pipeline
+  makes that far likelier than the old hand-rolled path did, but nothing here
+  has run any of them.
+
+- **`costOf` still reports a download that the browser may already have cached
+  across sessions.** `fetched` is session state, so a returning user is quoted
+  45 MB for a file the HTTP cache will serve instantly.
+
+- **MODNet is offered as 'Light' with a people-only caveat in its `purpose`
+  string, and nothing enforces it.** A user who picks it explicitly for a
+  product photo gets a confident wrong answer, which is the failure mode the
+  rest of this module is written to avoid.
+
 ## Noticed while building the image overlay (2026-09-01)
 
 Deliberately not fixed. The feature that shipped is `kind: 'image'` with
@@ -744,6 +781,45 @@ export worker inside `layer.adjust`.
   program-matrix problem; a texture adds a second per-layer sampler and its own
   upload on top. Nothing regresses today because `selectTier` returns TIER_JS
   for everything, but 1B-2 now has more to resolve than it did.
+
+### Update — WebGPU disabled for segmentation (2026-09-02)
+
+- **`pickDevice()` in `bg-remove.worker.ts` returns `'wasm'` unconditionally, and
+  that is a decision rather than a stub.** onnxruntime-web's WebGPU execution
+  provider does not implement `MaxPool` with `ceil_mode=1`, which every
+  U^2-Net / ISNet-family decoder uses -- ormbg and MODNet both carry it. It
+  surfaces as "using ceil() in shape computation is not yet supported for
+  MaxPool".
+
+  **Two attempts to catch it and fall back both shipped broken**, and the reason
+  is worth keeping: nothing in this repo can execute WebGPU, so both fixes were
+  written blind. The first guarded model CONSTRUCTION when the kernels compile
+  lazily and it actually throws at INFERENCE; the second guarded inference and
+  still did not help. The Node probes that "verified" the models ran on
+  onnxruntime-NODE (native CPU) -- not the browser's WASM backend and not WebGPU
+  at all, so they never covered the failing layer.
+
+  To re-enable: confirm ONE model on a real device, then gate per-MODEL in
+  `models.js`. A blanket `requestAdapter()` check is the wrong question -- the
+  capability is per-operator, not per-device.
+
+- **The default model changed because of the above.** BiRefNet_lite publishes
+  only fp32 (224 MB) and fp16 (115 MB); fp16 on WASM is unreliable and there is
+  no 8-bit build. So ormbg q8 ("Standard", 45 MB, Apache-2.0) is now the
+  top-ranked general model at every tier, and it is the one combination actually
+  observed producing a correct mask. BiRefNet stays selectable as "Sharp" with
+  the caveat stated in its `purpose` string.
+
+- **Cuts are now CPU-only and single-threaded on every device.** `public/_headers`
+  deliberately omits COOP/COEP, so onnxruntime-web cannot use WASM threads
+  either. Several seconds per cut is expected, and the panel says so.
+
+- **The cut-out tool and the new Select tool both claim single-pointer events,
+  and the cut-out wins.** `canvas-stage.ts` checks `seg.tool()` (line ~368)
+  BEFORE passing `selectMode` into `arbitrate` (line ~386). So with Select ON
+  and a cut-out tool armed, taps cut rather than pick, and the Select toggle
+  looks broken. Defensible precedence, but nothing states it and no UI shows
+  which mode owns the next tap.
 
 ## Select tool — noticed, not done
 

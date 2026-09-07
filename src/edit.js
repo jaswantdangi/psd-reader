@@ -15,6 +15,7 @@
  */
 
 import { projectMask, pixelRect } from './mask.js';
+import { applyEdge, normaliseEdge } from './segment/edge.js';
 import { createAdjust } from './adjust/ops.js';
 import { isNeutralAdjust } from './adjust/lut.js';
 import { normaliseRect, sameRect } from './frame/rect.js';
@@ -935,7 +936,17 @@ function maskJson(mask) {
     height: mask.height,
     disabled: mask.disabled === true,
     generated: true,
-    data: encodeBytes(mask.data),
+    /*
+     * The MODEL's plane plus the recipe, not the drawn result.
+     *
+     * `data` is derived from these two and is rebuilt on load, so writing it
+     * as well would store a second megabyte that can only ever disagree with
+     * its own inputs — the same reason `adjust` stores parameters and not the
+     * LUT they build. It also keeps the edge sliders reversible across a save:
+     * reopen, drag feather back to 0, and the model's own bytes are still there.
+     */
+    data: encodeBytes(mask.source ?? mask.data),
+    edge: mask.edge ? { ...mask.edge } : null,
   };
 }
 
@@ -958,7 +969,18 @@ function decodeMaskJson(saved) {
     return null;
   }
   if (data.length !== width * height) return null;
-  return { data, width, height, disabled: saved.disabled === true, generated: true };
+  // `data` is re-derived rather than restored — see maskJson. applyEdge is
+  // imported lazily through segment/edge.js to keep edit.js from depending on
+  // the whole segment module for one function.
+  const edge = normaliseEdge(saved.edge);
+  return {
+    source: data,
+    edge,
+    data: applyEdge(data, width, height, edge),
+    width, height,
+    disabled: saved.disabled === true,
+    generated: true,
+  };
 }
 
 /** Everything needed to rebuild this edit session on top of the same source PSD. */
