@@ -80,7 +80,7 @@ function configuredRelay(): string {
               Type this into the Photoshop panel
             </p>
             <p
-              class="mt-3 font-mono text-[34px] font-bold leading-none tracking-[0.28em] text-sky-300"
+              class="mt-3 font-mono text-[34px] font-bold leading-none tracking-[0.28em] text-accent-300"
               aria-label="Pairing code {{ spelled() }}"
             >
               {{ sync.code() }}
@@ -175,7 +175,7 @@ function configuredRelay(): string {
       </label>
       <button
         type="button"
-        class="w-full rounded-xl bg-sky-500 py-3 text-[13px] font-semibold text-white active:bg-sky-600 disabled:opacity-30"
+        class="w-full rounded-xl bg-accent-500 py-3 text-[13px] font-semibold text-white active:bg-accent-600 disabled:opacity-30"
         [disabled]="!relay().trim()"
         (click)="connect()"
       >

@@ -57,9 +57,18 @@ export class CropSheet {
   protected readonly crop = inject(CropService);
   private readonly svc = inject(ProjectService);
 
+  /**
+   * Labelled by the RATIO, not by its nickname.
+   *
+   * The engine calls these Square, Portrait, Story and Wide, which is what a
+   * person says out loud — but not what they check against. Someone cropping
+   * for a feed knows they need 4:5; "Portrait" makes them tap it to find out
+   * whether it is 4:5 or 3:4. `free` keeps its word, because "Free" says
+   * something the id cannot.
+   */
   protected readonly ratios = computed<SegmentedOption[]>(() =>
     (ASPECT_RATIOS as ReadonlyArray<{ id: string; label: string }>)
-      .map((preset) => ({ id: preset.id, label: preset.label })));
+      .map((preset) => ({ id: preset.id, label: preset.id === 'free' ? 'Free' : preset.id })));
 
   /**
    * The result in pixels, next to the chips.

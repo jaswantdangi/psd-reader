@@ -84,7 +84,7 @@ const BASE_MAX_SIZE = 200;
           } @else {
             <p class="flex items-start gap-2 text-[11px] leading-relaxed text-neutral-500">
               <span
-                class="mt-px shrink-0 rounded bg-sky-400/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-sky-300"
+                class="mt-px shrink-0 rounded bg-accent-400/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-accent-300"
               >
                 Re-drawn
               </span>
@@ -107,7 +107,7 @@ const BASE_MAX_SIZE = 200;
             <textarea
               id="text-content"
               rows="4"
-              class="min-h-[96px] w-full resize-y rounded-xl bg-white/5 px-3 py-3 text-sm leading-relaxed text-neutral-100 outline-none ring-1 ring-white/10 focus:ring-sky-400"
+              class="min-h-[96px] w-full resize-y rounded-xl bg-white/5 px-3 py-3 text-sm leading-relaxed text-neutral-100 outline-none ring-1 ring-white/10 focus:ring-accent-400"
               [value]="layer.text.content"
               (focus)="startTyping($event)"
               (input)="onType($event)"
@@ -247,7 +247,7 @@ const BASE_MAX_SIZE = 200;
                   </p>
                 } @else {
                   <p
-                    class="mt-2 rounded-lg bg-sky-400/10 px-3 py-2 text-[11px] leading-relaxed text-sky-300"
+                    class="mt-2 rounded-lg bg-accent-400/10 px-3 py-2 text-[11px] leading-relaxed text-accent-300"
                   >
                     <b class="font-semibold">{{ match.record.fileName }}</b> is loaded and
                     answers <b class="font-semibold">{{ source }}</b>, but this layer is
@@ -255,7 +255,7 @@ const BASE_MAX_SIZE = 200;
                   </p>
                   <button
                     type="button"
-                    class="mt-2 h-11 w-full rounded-xl border border-sky-400/50 text-sm text-sky-300"
+                    class="mt-2 h-11 w-full rounded-xl border border-accent-400/50 text-sm text-accent-300"
                     (click)="useLoaded(layer.id)"
                   >
                     Use {{ match.family }} here
@@ -282,7 +282,7 @@ const BASE_MAX_SIZE = 200;
               }
 
               @if (fonts.note(); as note) {
-                <p class="mt-2 text-[11px] leading-relaxed text-sky-300">{{ note }}</p>
+                <p class="mt-2 text-[11px] leading-relaxed text-accent-300">{{ note }}</p>
               }
             } @else {
               <p class="mt-2 text-[11px] leading-relaxed text-neutral-500">
@@ -316,7 +316,7 @@ const BASE_MAX_SIZE = 200;
 
           <button
             type="button"
-            class="h-12 w-full rounded-xl bg-sky-500 text-sm font-medium text-white"
+            class="h-12 w-full rounded-xl bg-accent-500 text-sm font-medium text-white"
             (click)="addLayer()"
           >
             Add a text layer
@@ -358,7 +358,7 @@ export class TextSheet {
 
   protected pill(active: boolean): string {
     return active
-      ? 'border-sky-400 bg-sky-400/15 text-sky-300'
+      ? 'border-accent-400 bg-accent-400/15 text-accent-300'
       : 'border-white/15 text-neutral-300';
   }
 

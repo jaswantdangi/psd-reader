@@ -68,7 +68,7 @@ const FILTER_LABELS: Record<string, string> = {
               class="h-11 shrink-0 rounded-full border px-3 text-xs font-medium"
               [class]="
                 filters().includes(id)
-                  ? 'border-sky-400 bg-sky-400/15 text-sky-300'
+                  ? 'border-accent-400 bg-accent-400/15 text-accent-300'
                   : 'border-white/15 text-neutral-300'
               "
               (click)="toggleFilter(id)"
@@ -168,7 +168,7 @@ const FILTER_LABELS: Record<string, string> = {
                         <span class="text-neutral-400">{{ row.badges.blendMode }}</span>
                       }
                       @if (row.layer.adjust) {
-                        <span class="rounded bg-sky-400/15 px-1 text-sky-300">adjusted</span>
+                        <span class="rounded bg-accent-400/15 px-1 text-accent-300">adjusted</span>
                       }
                       @if (row.badges.warned) {
                         <span class="rounded bg-amber-400/15 px-1 text-amber-300">warned</span>

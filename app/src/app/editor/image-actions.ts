@@ -109,7 +109,7 @@ interface DecodedImage {
     @if (svc.project()) {
       <div class="space-y-3 border-b border-white/10 px-3 py-4">
         <label
-          class="flex h-12 w-full cursor-pointer items-center justify-center rounded-xl bg-sky-500 text-sm font-medium text-white"
+          class="flex h-12 w-full cursor-pointer items-center justify-center rounded-xl bg-accent-500 text-sm font-medium text-white"
           [class.pointer-events-none]="busy()"
           [class.opacity-60]="busy()"
         >

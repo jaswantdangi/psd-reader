@@ -1,5 +1,33 @@
-/* You can add global styles to this file, and also import other style files */
+/* You can add global styles to this file, and other style files */
 @import "@ionic/angular/css/core.css";
 @import "@ionic/angular/css/normalize.css";
 @import "@ionic/angular/css/structure.css";
 @import "tailwindcss";
+
+/**
+ * The editor's one accent, as a token rather than a colour name.
+ *
+ * WHY A TOKEN. This started as `sky-*` spelled out in 61 places across 14
+ * components. Re-spelling all 61 to move the accent is the kind of change
+ * nobody makes twice, so the second opinion never gets tried. Now the ramp
+ * lives here and every component says `accent-400`.
+ *
+ * The values are Tailwind's amber. Deliberate: this is a photo editor, and a
+ * blue accent sits inside the same hue range as a great many photographs —
+ * sky, water, shadow — so the control that says "this is selected" competes
+ * with the picture it is pointing at. Warm amber almost never collides with
+ * the subject, and it is what the reference design uses for the same reason.
+ *
+ * ONE accent. If something needs to be "another colour", it is either state
+ * (amber), warning (amber-300 on a dark ground is already taken, so warnings
+ * use `amber` semantics via text-amber-300 sparingly) or it does not need a
+ * colour at all.
+ */
+@theme {
+  --color-accent-100: #fef3c7;
+  --color-accent-200: #fde68a;
+  --color-accent-300: #fcd34d;
+  --color-accent-400: #fbbf24;
+  --color-accent-500: #f59e0b;
+  --color-accent-600: #d97706;
+}

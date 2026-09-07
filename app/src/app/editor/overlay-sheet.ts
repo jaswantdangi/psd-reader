@@ -122,7 +122,7 @@ const FIT_NOTES: Record<string, string> = {
                   it again, so the layer is showing the truth rather than a stand-in.
                 </p>
                 <label
-                  class="flex min-h-[44px] w-full cursor-pointer items-center justify-center rounded-xl bg-sky-500 text-sm font-medium text-white"
+                  class="flex min-h-[44px] w-full cursor-pointer items-center justify-center rounded-xl bg-accent-500 text-sm font-medium text-white"
                   [class.pointer-events-none]="busy()"
                   [class.opacity-60]="busy()"
                 >
@@ -331,7 +331,7 @@ const FIT_NOTES: Record<string, string> = {
           }
           <button
             type="button"
-            class="h-12 w-full rounded-xl bg-sky-500 text-sm font-medium text-white"
+            class="h-12 w-full rounded-xl bg-accent-500 text-sm font-medium text-white"
             (click)="add(layer)"
           >
             Add gradient overlay

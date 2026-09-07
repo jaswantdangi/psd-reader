@@ -79,7 +79,7 @@ import { ProjectService } from '../services/project.service';
                 <button
                   type="button"
                   class="min-h-[38px] flex-1 rounded-lg px-2 text-[12px] font-medium transition-colors"
-                  [class]="role() === '' ? 'bg-white/15 text-sky-300' : 'text-neutral-400 active:bg-white/10'"
+                  [class]="role() === '' ? 'bg-white/15 text-accent-300' : 'text-neutral-400 active:bg-white/10'"
                   [attr.aria-pressed]="role() === ''"
                   (click)="role.set('')"
                 >Auto</button>
@@ -87,7 +87,7 @@ import { ProjectService } from '../services/project.service';
                   <button
                     type="button"
                     class="min-h-[38px] flex-1 rounded-lg px-2 text-[12px] font-medium transition-colors"
-                    [class]="role() === m.role ? 'bg-white/15 text-sky-300' : 'text-neutral-400 active:bg-white/10'"
+                    [class]="role() === m.role ? 'bg-white/15 text-accent-300' : 'text-neutral-400 active:bg-white/10'"
                     [attr.aria-pressed]="role() === m.role"
                     (click)="role.set(m.role)"
                   >
@@ -106,8 +106,8 @@ import { ProjectService } from '../services/project.service';
               <button
                 type="button"
                 class="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl
-                       bg-sky-500 px-4 text-[14px] font-semibold text-white
-                       active:bg-sky-600 disabled:opacity-40"
+                       bg-accent-500 px-4 text-[14px] font-semibold text-white
+                       active:bg-accent-600 disabled:opacity-40"
                 [disabled]="seg.running()"
                 (click)="cut()"
               >
@@ -125,7 +125,7 @@ import { ProjectService } from '../services/project.service';
               @if (seg.downloadPercent() >= 0) {
                 <div class="space-y-1.5">
                   <div class="h-1.5 overflow-hidden rounded-full bg-white/10">
-                    <div class="h-full rounded-full bg-sky-400 transition-[width]"
+                    <div class="h-full rounded-full bg-accent-400 transition-[width]"
                          [style.width.%]="seg.downloadPercent()"></div>
                   </div>
                   <p class="text-[11px] text-neutral-500">
@@ -151,8 +151,8 @@ import { ProjectService } from '../services/project.service';
                has stopped moving the layer and started cutting, and a tool you
                cannot tell is on is a tool that feels broken. -->
           @if (seg.tool(); as armed) {
-            <p class="rounded-xl border border-sky-400/30 bg-sky-400/10 px-3 py-2.5
-                      text-[12px] leading-relaxed text-sky-200" role="status">
+            <p class="rounded-xl border border-accent-400/30 bg-accent-400/10 px-3 py-2.5
+                      text-[12px] leading-relaxed text-accent-200" role="status">
               {{ armedHint() }}
               <button type="button" class="ml-1 underline" (click)="setMode(armed)">Done</button>
             </p>
@@ -169,7 +169,7 @@ import { ProjectService } from '../services/project.service';
                   type="button"
                   class="min-h-[40px] flex-1 rounded-xl border border-white/10 text-[12px] font-medium
                          text-neutral-200 active:bg-white/10"
-                  [class]="seg.tool() === 'keep' ? 'bg-white/10 text-sky-300' : ''"
+                  [class]="seg.tool() === 'keep' ? 'bg-white/10 text-accent-300' : ''"
                   [attr.aria-pressed]="seg.tool() === 'keep'"
                   (click)="setMode('keep')"
                 >Keep this</button>
@@ -177,7 +177,7 @@ import { ProjectService } from '../services/project.service';
                   type="button"
                   class="min-h-[40px] flex-1 rounded-xl border border-white/10 text-[12px] font-medium
                          text-neutral-200 active:bg-white/10"
-                  [class]="seg.tool() === 'remove' ? 'bg-white/10 text-sky-300' : ''"
+                  [class]="seg.tool() === 'remove' ? 'bg-white/10 text-accent-300' : ''"
                   [attr.aria-pressed]="seg.tool() === 'remove'"
                   (click)="setMode('remove')"
                 >Remove this</button>
@@ -203,7 +203,7 @@ import { ProjectService } from '../services/project.service';
                 type="button"
                 class="min-h-[40px] flex-1 rounded-xl border border-white/10 text-[12px] font-medium
                        text-neutral-200 active:bg-white/10"
-                [class]="seg.tool() === 'erase' ? 'bg-white/10 text-sky-300' : ''"
+                [class]="seg.tool() === 'erase' ? 'bg-white/10 text-accent-300' : ''"
                 [attr.aria-pressed]="seg.tool() === 'erase'"
                 (click)="setMode('erase')"
               >Erase</button>
@@ -211,7 +211,7 @@ import { ProjectService } from '../services/project.service';
                 type="button"
                 class="min-h-[40px] flex-1 rounded-xl border border-white/10 text-[12px] font-medium
                        text-neutral-200 active:bg-white/10"
-                [class]="seg.tool() === 'restore' ? 'bg-white/10 text-sky-300' : ''"
+                [class]="seg.tool() === 'restore' ? 'bg-white/10 text-accent-300' : ''"
                 [attr.aria-pressed]="seg.tool() === 'restore'"
                 (click)="setMode('restore')"
               >Restore</button>
@@ -223,7 +223,7 @@ import { ProjectService } from '../services/project.service';
               </span>
               <input
                 type="range" min="4" max="120" step="1"
-                class="h-11 w-full accent-sky-400"
+                class="h-11 w-full accent-accent-400"
                 [value]="seg.brushRadius()"
                 (input)="seg.brushRadius.set($any($event.target).valueAsNumber)"
               />
@@ -235,7 +235,7 @@ import { ProjectService } from '../services/project.service';
               </span>
               <input
                 type="range" min="0" max="1" step="0.05"
-                class="h-11 w-full accent-sky-400"
+                class="h-11 w-full accent-accent-400"
                 [value]="seg.brushHardness()"
                 (input)="seg.brushHardness.set($any($event.target).valueAsNumber)"
               />
@@ -267,7 +267,7 @@ import { ProjectService } from '../services/project.service';
                   </span>
                   <input
                     type="range"
-                    class="h-11 w-full accent-sky-400"
+                    class="h-11 w-full accent-accent-400"
                     [min]="s.min" [max]="s.max" [step]="s.step"
                     [value]="edge()[s.key]"
                     [disabled]="seg.running()"

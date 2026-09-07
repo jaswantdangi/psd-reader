@@ -47,7 +47,7 @@ import { Icon } from './icon';
         @if (showConfirm()) {
           <button
             type="button"
-            class="flex h-12 w-12 items-center justify-center rounded-xl text-sky-400 active:bg-white/10"
+            class="flex h-12 w-12 items-center justify-center rounded-xl text-accent-400 active:bg-white/10"
             aria-label="Done"
             (click)="confirm.emit()"
           >

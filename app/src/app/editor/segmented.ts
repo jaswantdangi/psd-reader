@@ -31,9 +31,9 @@ export type SegmentedOption = {
 const BASE =
   'relative flex min-h-[48px] shrink-0 flex-col items-center justify-center gap-1.5 rounded-xl ' +
   'border px-3 py-1.5 text-[12px] leading-none transition-colors disabled:opacity-50 ' +
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70';
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400/70';
 
-const SELECTED = 'border-sky-400 bg-sky-400/15 text-sky-300';
+const SELECTED = 'border-accent-400 bg-accent-400/15 text-accent-300';
 const UNSELECTED = 'border-white/15 text-neutral-300';
 
 /**
@@ -99,7 +99,7 @@ const UNSELECTED = 'border-white/15 text-neutral-300';
 
           @if (option.marked) {
             <span
-              class="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-sky-400"
+              class="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-accent-400"
               aria-hidden="true"
             ></span>
           }

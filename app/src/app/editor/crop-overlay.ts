@@ -37,8 +37,15 @@ import { HANDLE_HIT_CSS_PX } from '@engine/gesture.js';
       <div class="absolute right-0 bg-black/50"
            [style.top.px]="b.top" [style.left.px]="b.left + b.width" [style.height.px]="b.height"></div>
 
+      <!-- A DASHED WHITE frame, not a solid accent one.
+           The rect is drawn over a photograph, and a solid line of any single
+           colour disappears wherever the picture happens to match it. Dashes
+           alternate against whatever is beneath them, which is why every
+           editor that has ever drawn a crop uses them. White rather than the
+           accent for the same reason: the accent is for controls you press,
+           and this edge is a boundary being reported. -->
       <div
-        class="pointer-events-auto absolute touch-none border border-sky-400"
+        class="pointer-events-auto absolute touch-none border border-dashed border-white/90"
         [style.left.px]="b.left" [style.top.px]="b.top"
         [style.width.px]="b.width" [style.height.px]="b.height"
         role="application"
@@ -49,15 +56,26 @@ import { HANDLE_HIT_CSS_PX } from '@engine/gesture.js';
         (pointercancel)="onUp($event)"
       ></div>
 
+      <!-- Corner brackets, not beads.
+           A filled 24px square sits ON the corner it is meant to show you, so
+           the one pixel you are aiming at is under your own control. An L
+           bracket draws the corner instead of covering it, and still gives a
+           44px touch target through the transparent padding around it. -->
       @for (h of handles(); track h.id) {
         <div
-          class="pointer-events-auto absolute -ml-3 -mt-3 h-6 w-6 touch-none rounded-[3px] border-2 border-sky-500 bg-white"
+          class="pointer-events-auto absolute h-11 w-11 touch-none"
           [style.left.px]="h.left" [style.top.px]="h.top"
+          [style.margin-left.px]="-22" [style.margin-top.px]="-22"
           (pointerdown)="onDown($event)"
           (pointermove)="onMove($event)"
           (pointerup)="onUp($event)"
           (pointercancel)="onUp($event)"
-        ></div>
+        >
+          <span
+            class="absolute h-5 w-5 border-white"
+            [class]="h.bracket"
+          ></span>
+        </div>
       }
     }
   `,
@@ -87,14 +105,24 @@ export class CropOverlay {
     };
   });
 
+  /**
+   * The four corners, each with the two borders that draw its bracket.
+   *
+   * `bracket` is a class rather than a computed style so Tailwind can see the
+   * literal strings and keep them in the build — a class assembled at runtime
+   * would be purged.
+   */
   protected readonly handles = computed(() => {
     const b = this.box();
     if (!b) return [];
+    // The hit area is 44px with a -22px margin, so its centre sits ON the
+    // corner. Each 20px bracket is then placed so ITS corner lands on that
+    // centre and it grows INWARDS: 22px from the near edges, 2px from the far.
     return [
-      { id: 'nw', left: b.left, top: b.top },
-      { id: 'ne', left: b.left + b.width, top: b.top },
-      { id: 'se', left: b.left + b.width, top: b.top + b.height },
-      { id: 'sw', left: b.left, top: b.top + b.height },
+      { id: 'nw', left: b.left, top: b.top, bracket: 'left-[22px] top-[22px] border-l-[3px] border-t-[3px]' },
+      { id: 'ne', left: b.left + b.width, top: b.top, bracket: 'left-[2px] top-[22px] border-r-[3px] border-t-[3px]' },
+      { id: 'se', left: b.left + b.width, top: b.top + b.height, bracket: 'left-[2px] top-[2px] border-r-[3px] border-b-[3px]' },
+      { id: 'sw', left: b.left, top: b.top + b.height, bracket: 'left-[22px] top-[2px] border-l-[3px] border-b-[3px]' },
     ];
   });
 

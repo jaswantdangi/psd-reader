@@ -17,11 +17,16 @@ import { IonRange } from '@ionic/angular';
   imports: [IonRange],
   styles: [
     `
+      /* Track and knob both carry the accent, so the filled portion reads as
+         one object rather than as a coloured bar with a white bead on it. The
+         values are --color-accent-400/500 from styles.scss; ion-range takes
+         CSS custom properties, so they are spelled out here rather than
+         inherited as Tailwind classes. */
       ion-range {
         --bar-background: #3f3f46;
-        --bar-background-active: #38bdf8;
+        --bar-background-active: #f59e0b;
         --bar-height: 3px;
-        --knob-background: #f8fafc;
+        --knob-background: #fbbf24;
         --knob-size: 22px;
         --height: 44px;
         padding: 0;
@@ -55,7 +60,7 @@ import { IonRange } from '@ionic/angular';
       @if (resettable()) {
         <button
           type="button"
-          class="h-11 shrink-0 rounded-lg px-2 text-[11px] font-medium uppercase tracking-wider text-sky-400 active:bg-white/10"
+          class="h-11 shrink-0 rounded-lg px-2 text-[11px] font-medium uppercase tracking-wider text-accent-400 active:bg-white/10"
           (click)="reset.emit()"
         >
           Reset

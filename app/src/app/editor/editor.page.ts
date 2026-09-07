@@ -169,7 +169,7 @@ const TITLES: Record<SheetId, string> = {
         <button
           type="button"
           class="flex h-12 min-w-[48px] items-center justify-center gap-1.5 rounded-xl px-2.5 disabled:opacity-30"
-          [class]="svc.selectMode() ? 'bg-sky-500 text-white' : 'text-neutral-300 active:bg-white/10'"
+          [class]="svc.selectMode() ? 'bg-accent-500 text-white' : 'text-neutral-300 active:bg-white/10'"
           [disabled]="svc.state() !== 'ready'"
           [attr.aria-pressed]="svc.selectMode()"
           aria-label="Select tool — one tap picks the layer under it"
@@ -208,7 +208,7 @@ const TITLES: Record<SheetId, string> = {
           <button
             type="button"
             class="flex h-12 w-11 shrink-0 items-center justify-center rounded-xl"
-            [class]="tool.active() === 'eyedropper' ? 'bg-sky-500 text-white' : 'text-neutral-300 active:bg-white/10'"
+            [class]="tool.active() === 'eyedropper' ? 'bg-accent-500 text-white' : 'text-neutral-300 active:bg-white/10'"
             [attr.aria-pressed]="tool.active() === 'eyedropper'"
             aria-label="Eyedropper — tap the picture to take its colour"
             (click)="toggleEyedropper()"
@@ -277,7 +277,7 @@ const TITLES: Record<SheetId, string> = {
 
         <button
           type="button"
-          class="flex h-12 w-12 items-center justify-center rounded-xl text-sky-400 active:bg-white/10 disabled:opacity-30"
+          class="flex h-12 w-12 items-center justify-center rounded-xl text-accent-400 active:bg-white/10 disabled:opacity-30"
           aria-label="Export"
           [disabled]="svc.state() !== 'ready'"
           (click)="open('export')"
@@ -348,7 +348,7 @@ const TITLES: Record<SheetId, string> = {
                   <span class="text-amber-400"><app-icon name="warn" [size]="32" /></span>
                   <p class="text-sm leading-relaxed text-neutral-200">{{ bundle.message() }}</p>
                   <p class="text-xs text-neutral-500">{{ bundle.fileName() }}</p>
-                  <label class="h-12 cursor-pointer rounded-xl bg-sky-500 px-5 text-sm font-medium leading-[3rem] text-white">
+                  <label class="h-12 cursor-pointer rounded-xl bg-accent-500 px-5 text-sm font-medium leading-[3rem] text-white">
                     Pick another file
                     <input type="file" class="hidden" [accept]="accept" (change)="onPick($event)" />
                   </label>
@@ -413,7 +413,7 @@ const TITLES: Record<SheetId, string> = {
                    header button is lit too, but a thumb on the canvas is not
                    looking at the top of the screen. -->
               @if (svc.selectMode()) {
-                <span class="rounded-full bg-sky-500/20 px-2.5 py-1 text-[11px] text-sky-200 ring-1 ring-sky-400/40">
+                <span class="rounded-full bg-accent-500/20 px-2.5 py-1 text-[11px] text-accent-200 ring-1 ring-accent-400/40">
                   Select · tap to pick
                 </span>
               }
@@ -459,7 +459,7 @@ const TITLES: Record<SheetId, string> = {
               <p class="text-sm text-neutral-300">Reading {{ svc.fileName() }}…</p>
               <div class="h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-white/10">
                 <div
-                  class="h-full rounded-full bg-sky-400 transition-[width] duration-150"
+                  class="h-full rounded-full bg-accent-400 transition-[width] duration-150"
                   [style.width.%]="progressPercent()"
                 ></div>
               </div>
@@ -479,7 +479,7 @@ const TITLES: Record<SheetId, string> = {
             <div class="flex h-full flex-col items-center justify-center gap-4 px-8 text-center">
               <span class="text-amber-400"><app-icon name="warn" [size]="32" /></span>
               <p class="text-sm text-neutral-200">{{ svc.message() }}</p>
-              <label class="h-12 cursor-pointer rounded-xl bg-sky-500 px-5 text-sm font-medium leading-[3rem] text-white">
+              <label class="h-12 cursor-pointer rounded-xl bg-accent-500 px-5 text-sm font-medium leading-[3rem] text-white">
                 Pick a smaller file
                 <input type="file" class="hidden" [accept]="accept" (change)="onPick($event)" />
               </label>
@@ -515,7 +515,7 @@ const TITLES: Record<SheetId, string> = {
                   uploaded, and the fonts are not kept.
                 </p>
               </div>
-              <label class="h-12 cursor-pointer rounded-xl bg-sky-500 px-5 text-sm font-medium leading-[3rem] text-white">
+              <label class="h-12 cursor-pointer rounded-xl bg-accent-500 px-5 text-sm font-medium leading-[3rem] text-white">
                 Choose file
                 <input type="file" class="hidden" [accept]="accept" (change)="onPick($event)" />
               </label>
@@ -553,7 +553,7 @@ const TITLES: Record<SheetId, string> = {
                    A bar that pretends to know is worse than a spinner. -->
               @if (seg.downloadPercent() >= 0) {
                 <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
-                  <div class="h-full rounded-full bg-sky-400 transition-[width]"
+                  <div class="h-full rounded-full bg-accent-400 transition-[width]"
                        [style.width.%]="seg.downloadPercent()"></div>
                 </div>
                 <p class="text-[13px] font-medium text-neutral-200">
@@ -563,7 +563,7 @@ const TITLES: Record<SheetId, string> = {
                   One time only. It stays cached for the rest of this session.
                 </p>
               } @else {
-                <span class="h-7 w-7 animate-spin rounded-full border-2 border-white/15 border-t-sky-400"></span>
+                <span class="h-7 w-7 animate-spin rounded-full border-2 border-white/15 border-t-accent-400"></span>
                 <p class="text-[13px] font-medium text-neutral-200">Cutting out…</p>
                 <p class="text-center text-[11px] leading-relaxed text-neutral-500">
                   This runs on the CPU, so it takes a few seconds.
@@ -592,7 +592,7 @@ const TITLES: Record<SheetId, string> = {
             <button
               type="button"
               class="flex w-20 shrink-0 flex-col items-center justify-center gap-1.5 rounded-xl"
-              [class]="sheet() === tool.id ? 'bg-white/10 text-sky-300' : 'text-neutral-300'"
+              [class]="sheet() === tool.id ? 'bg-white/10 text-accent-300' : 'text-neutral-300'"
               (click)="openTool(tool)"
             >
               <app-icon [name]="tool.icon" />
@@ -606,7 +606,7 @@ const TITLES: Record<SheetId, string> = {
           <button
             type="button"
             class="flex w-20 shrink-0 flex-col items-center justify-center gap-1.5 rounded-xl disabled:opacity-40"
-            [class]="cutout() ? 'bg-white/10 text-sky-300' : 'text-neutral-300'"
+            [class]="cutout() ? 'bg-white/10 text-accent-300' : 'text-neutral-300'"
             [disabled]="svc.selectedId() === null"
             [attr.aria-pressed]="cutout()"
             (click)="toggleCutout()"
@@ -622,7 +622,7 @@ const TITLES: Record<SheetId, string> = {
           <button
             type="button"
             class="flex w-20 shrink-0 flex-col items-center justify-center gap-1.5 rounded-xl"
-            [class]="tool.active() === 'crop' ? 'bg-white/10 text-sky-300' : 'text-neutral-300'"
+            [class]="tool.active() === 'crop' ? 'bg-white/10 text-accent-300' : 'text-neutral-300'"
             [attr.aria-pressed]="tool.active() === 'crop'"
             (click)="toggleCrop()"
           >
@@ -665,9 +665,9 @@ const TITLES: Record<SheetId, string> = {
                directly above it. -->
           @if (svc.selectMode()) {
             <div class="px-3 pb-2" (click)="$event.stopPropagation()">
-              <div class="flex min-h-[44px] items-center gap-2 rounded-xl bg-neutral-900 px-3 py-2 ring-1 ring-sky-400/50">
-                <span class="shrink-0 text-sky-300"><app-icon name="select" [size]="16" /></span>
-                <span class="min-w-0 flex-1 text-[11px] leading-relaxed text-sky-100">
+              <div class="flex min-h-[44px] items-center gap-2 rounded-xl bg-neutral-900 px-3 py-2 ring-1 ring-accent-400/50">
+                <span class="shrink-0 text-accent-300"><app-icon name="select" [size]="16" /></span>
+                <span class="min-w-0 flex-1 text-[11px] leading-relaxed text-accent-100">
                   {{ selectBanner() }}
                 </span>
               </div>
@@ -687,7 +687,7 @@ const TITLES: Record<SheetId, string> = {
               @switch (id) {
                 @case ('layers') {
                   @if (prompt()) {
-                    <p class="border-b border-white/10 bg-sky-400/10 px-4 py-3 text-xs text-sky-300">
+                    <p class="border-b border-white/10 bg-accent-400/10 px-4 py-3 text-xs text-accent-300">
                       {{ prompt() }}
                     </p>
                   }
@@ -733,7 +733,7 @@ const TITLES: Record<SheetId, string> = {
                         <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
                           @if (exporter.determinate()) {
                             <div
-                              class="h-full rounded-full bg-sky-400 transition-[width] duration-150"
+                              class="h-full rounded-full bg-accent-400 transition-[width] duration-150"
                               [style.width.%]="exporter.percent()"
                             ></div>
                           } @else {
@@ -742,7 +742,7 @@ const TITLES: Record<SheetId, string> = {
                                  point, so a creeping bar here would be invented.
                                  A bar that pretends to move during a freeze is
                                  worse than one that admits it. -->
-                            <div class="h-full w-1/3 animate-pulse rounded-full bg-sky-400"></div>
+                            <div class="h-full w-1/3 animate-pulse rounded-full bg-accent-400"></div>
                           }
                         </div>
 
@@ -782,7 +782,7 @@ const TITLES: Record<SheetId, string> = {
                       <div class="space-y-2">
                         <button
                           type="button"
-                          class="h-12 w-full rounded-xl bg-sky-500 text-sm font-medium text-white disabled:opacity-40"
+                          class="h-12 w-full rounded-xl bg-accent-500 text-sm font-medium text-white disabled:opacity-40"
                           [disabled]="!sourceReady() || exporting()"
                           (click)="exportFull()"
                         >

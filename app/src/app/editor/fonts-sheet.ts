@@ -99,7 +99,7 @@ import { FontPicker } from './font-picker';
                   @if (pending(font); as more) {
                     <button
                       type="button"
-                      class="h-11 w-full rounded-xl border border-sky-400/50 text-sm text-sky-300"
+                      class="h-11 w-full rounded-xl border border-accent-400/50 text-sm text-accent-300"
                       (click)="useEverywhere()"
                     >
                       Use it on {{ more }} more layer{{ more === 1 ? '' : 's' }}
@@ -144,7 +144,7 @@ import { FontPicker } from './font-picker';
         @if (fonts.supported) {
           <app-font-picker label="Load font files…" />
           @if (fonts.note(); as note) {
-            <p class="text-[11px] leading-relaxed text-sky-300">{{ note }}</p>
+            <p class="text-[11px] leading-relaxed text-accent-300">{{ note }}</p>
           }
           <p class="text-[11px] leading-relaxed text-neutral-500">
             Loading a font re-draws every layer that asks for it — this app takes over from
@@ -185,7 +185,7 @@ export class FontsSheet {
 
   protected chip(font: any): string {
     if (!font.match) return 'bg-amber-400/15 text-amber-300';
-    if (this.pending(font)) return 'bg-sky-400/15 text-sky-300';
+    if (this.pending(font)) return 'bg-accent-400/15 text-accent-300';
     return 'bg-emerald-400/15 text-emerald-300';
   }
 

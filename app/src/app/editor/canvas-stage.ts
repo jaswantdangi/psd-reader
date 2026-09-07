@@ -109,7 +109,7 @@ type Gesture = {
 
       @if (box(); as b) {
         <div
-          class="pointer-events-none absolute border border-sky-400"
+          class="pointer-events-none absolute border border-accent-400"
           [style.left.px]="b.left"
           [style.top.px]="b.top"
           [style.width.px]="b.width"
@@ -123,7 +123,7 @@ type Gesture = {
         @if (!svc.gesturing() && !svc.selectMode()) {
           @for (h of handles(); track h.id) {
             <div
-              class="pointer-events-none absolute -ml-3 -mt-3 h-6 w-6 rounded-[3px] border-2 border-sky-500 bg-white"
+              class="pointer-events-none absolute -ml-3 -mt-3 h-6 w-6 rounded-[3px] border-2 border-accent-500 bg-white"
               [style.left.px]="h.x"
               [style.top.px]="h.y"
             ></div>

@@ -49,7 +49,7 @@ export class FontPicker {
 
   protected tone(): string {
     return this.variant() === 'primary'
-      ? 'bg-sky-500 text-white'
+      ? 'bg-accent-500 text-white'
       : 'border border-white/15 text-neutral-200';
   }
 
