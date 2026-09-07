@@ -88,6 +88,20 @@ describe('CropService', () => {
     expect(crop.handleAtPoint(40, 35, 5)).toBeNull();
   });
 
+  it('drags from where the gesture began, not from the last frame', () => {
+    // Every frame of a real drag calls this with the SAME start rect and a
+    // moving `to`. Re-deriving from the current rect instead would apply each
+    // frame's delta on top of the previous one and send the rect off at speed.
+    crop.begin();
+    const start = { x: 20, y: 20, width: 40, height: 30 };
+    crop.rect.set(start);
+
+    crop.drag(null, { x: 0, y: 0 }, { x: 10, y: 0 }, start);
+    crop.drag(null, { x: 0, y: 0 }, { x: 10, y: 0 }, start);
+
+    expect(crop.rect()).toEqual({ x: 30, y: 20, width: 40, height: 30 });
+  });
+
   it('commits nothing while the rect is being dragged', () => {
     crop.begin();
     crop.drag('se', { x: 200, y: 100 }, { x: 120, y: 60 });

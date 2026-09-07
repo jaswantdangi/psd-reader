@@ -112,11 +112,17 @@ export class CropService {
     return handleAt({ x: r.x, y: r.y, w: r.width, h: r.height }, docX, docY, radiusDoc);
   }
 
-  drag(handle: string | null, from: Point, to: Point): void {
+  /**
+   * @param start the rect as it was when the gesture BEGAN, not last frame.
+   *   Re-deriving from the current rect each frame would round once per frame
+   *   and let a slow drag drift; this is the same absolute-from-start bargain
+   *   `canvas-stage.ts` makes for a layer drag.
+   */
+  drag(handle: string | null, from: Point, to: Point, start: Rect = this.rect()): void {
     const project = this.svc.project();
     if (!project) return;
     this.rect.set(cropDrag(
-      this.rect(), handle, from, to,
+      start, handle, from, to,
       { x: 0, y: 0, width: project.width, height: project.height },
       this.ratio(),
     ));
