@@ -35,6 +35,10 @@ import {
 } from '@engine/gesture.js';
 import { liveTextRect } from '@engine/creative/index.js';
 import { ProjectService } from '../services/project.service';
+import { SegmentService } from '../services/segment.service';
+import { ToolService } from '../services/tool.service';
+import { ColorService } from '../services/color.service';
+import { StageSurfaceService } from '../services/stage-surface.service';
 
 /** Viewport origin for overlay geometry: the overlay is positioned inside the host. */
 const ORIGIN = { left: 0, top: 0, width: 0, height: 0 };
@@ -140,6 +144,20 @@ export class CanvasStage implements OnDestroy {
   private size = signal({ width: 0, height: 0 });
 
   private cache = createSandwichCache();
+  protected seg = inject(SegmentService);
+  private tool = inject(ToolService);
+  private color = inject(ColorService);
+  private surface = inject(StageSurfaceService);
+
+  /**
+   * The cut-out stroke in progress, in CANVAS coordinates, or null.
+   *
+   * Held here and committed once on pointer-up: `paintMask` rebuilds the whole
+   * coverage plane per call, so stamping per pointer-move would be both an
+   * allocation per frame and one undo entry per frame.
+   */
+  private cutPath: { x: number; y: number }[] | null = null;
+
   private pointers = new Map<number, { x: number; y: number }>();
   private gesture: Gesture | null = null;
   private pinch: { dist: number; midX: number; midY: number } | null = null;
@@ -231,6 +249,9 @@ export class CanvasStage implements OnDestroy {
 
   ngOnDestroy(): void {
     if (this.frame) cancelAnimationFrame(this.frame);
+    // The element is about to go. A stale reference would have the eyedropper
+    // sampling a detached canvas and reporting colours from the last document.
+    this.surface.register(null);
   }
 
   /** Scale the whole document into the viewport, centred. Called by the top bar too. */
@@ -259,6 +280,12 @@ export class CanvasStage implements OnDestroy {
     const canvas = this.cv()?.nativeElement;
     const project = this.svc.project();
     if (!canvas || !project) return;
+
+    // Published here rather than from a lifecycle hook: this is the one place
+    // that has already proved the element exists, and re-assigning a reference
+    // once per paint costs nothing. Nothing can then read a canvas that has
+    // been swapped out from under it.
+    this.surface.register(canvas);
 
     const view = this.svc.view();
     // Capped at proxyScale: `layer.pixels` IS the proxy, so asking for more
@@ -343,6 +370,47 @@ export class CanvasStage implements OnDestroy {
       return;
     }
 
+    /*
+     * The cut-out tool takes the pointer before anything else.
+     *
+     * Placed AFTER the two-pointer branch above deliberately: a pinch must keep
+     * working while the tool is armed, because the edges this tool exists to
+     * fix are exactly the ones you have to zoom in on to see. Only the
+     * single-pointer path is claimed, and only while a tool is armed — with
+     * `tool()` empty, control falls through to `arbitrate` and the stage
+     * behaves exactly as it did before this feature existed.
+     */
+    if (this.seg.tool() && this.svc.selectedId() !== null) {
+      const point = viewToDoc(this.svc.view(), event.clientX, event.clientY, this.rect);
+      this.cutPath = this.seg.isBrush() ? [point] : null;
+      if (this.seg.isBrush()) this.svc.gesturing.set(true);
+      return;
+    }
+
+    /*
+     * The eyedropper samples and is done — no drag, no gesture state, so
+     * pointer-up has nothing to finish and needs no matching branch.
+     *
+     * Beside the cut-out branch and after the two-pointer check for the same
+     * reason it gives: picking a colour off a small detail means zooming into
+     * it first, so a pinch has to keep working while this is armed. Unlike the
+     * cut-out tool it needs NO layer selected — it reads the composited
+     * picture, which is what the user is pointing at.
+     */
+    if (this.tool.active() === 'eyedropper') {
+      const project = this.svc.project();
+      if (project) {
+        const point = viewToDoc(this.svc.view(), event.clientX, event.clientY, this.rect);
+        const hex = this.surface.sampleDoc(
+          point.x, point.y, renderScaleFor(this.svc.view(), project.proxyScale),
+        );
+        // Null is off-canvas or fully transparent. Leaving the swatch alone is
+        // right for both — see ColorService.
+        if (hex) this.color.setForeground(hex);
+      }
+      return;
+    }
+
     const view = this.svc.view();
     const docPoint = viewToDoc(view, event.clientX, event.clientY, this.rect);
     const layer = this.svc.selected();
@@ -400,6 +468,12 @@ export class CanvasStage implements OnDestroy {
 
     if (this.pointers.size >= 2) {
       this.updatePinch();
+      return;
+    }
+
+    // Collect the brush path; nothing is committed until pointer-up.
+    if (this.cutPath) {
+      this.cutPath.push(viewToDoc(this.svc.view(), event.clientX, event.clientY, this.rect));
       return;
     }
 
@@ -473,6 +547,30 @@ export class CanvasStage implements OnDestroy {
       // Still pinching with what is left; rebase so the remaining fingers do
       // not jump the view by the departed one's contribution.
       this.beginPinch();
+      return;
+    }
+
+    /*
+     * Finish a cut-out interaction. Handled before the gesture teardown below
+     * because there IS no gesture — the tool claimed pointer-down and never
+     * created one, so `this.gesture` is null and the tap path would never fire.
+     */
+    if (this.seg.tool() && this.svc.selectedId() !== null) {
+      const project = this.svc.project();
+      const id = this.svc.selectedId()!;
+      const path = this.cutPath;
+      this.cutPath = null;
+      this.svc.gesturing.set(false);
+
+      if (path) {
+        // A brush: commit the whole stroke as one undo step.
+        this.seg.strokeAt(project, id, path);
+      } else {
+        // A tap: prompt the click-refine model at that point.
+        const p = viewToDoc(this.svc.view(), event.clientX, event.clientY, this.rect);
+        void this.seg.tapAt(project, id, p.x, p.y);
+      }
+      this.schedule();
       return;
     }
 

@@ -188,12 +188,10 @@ const TITLES: Record<SheetId, string> = {
              sheet. Tapping the pair swaps them, which is what X does on a
              keyboard nobody has here.
 
-             NO EYEDROPPER BUTTON YET. Sampling needs one branch in
-             canvas-stage.ts, which a concurrent session is holding, so the
-             tool cannot work — and a control that does nothing is exactly what
-             the rail's own rule refuses. It goes in with that branch, not
-             before. ColorService and StageSurfaceService are both already
-             here and tested. -->
+             The eyedropper is a sticky mode, on the Select tool's argument:
+             holding a button needs the second hand that is already holding the
+             phone. It does NOT close the open sheet — taking a colour for the
+             sheet you are already in is the whole reason it exists. -->
         @if (svc.state() === 'ready') {
           <button
             type="button"
@@ -205,6 +203,17 @@ const TITLES: Record<SheetId, string> = {
                   [style.background]="color.background()"></span>
             <span class="absolute bottom-1 left-1 h-5 w-5 rounded border border-white/60"
                   [style.background]="color.foreground()"></span>
+          </button>
+
+          <button
+            type="button"
+            class="flex h-12 w-11 shrink-0 items-center justify-center rounded-xl"
+            [class]="tool.active() === 'eyedropper' ? 'bg-sky-500 text-white' : 'text-neutral-300 active:bg-white/10'"
+            [attr.aria-pressed]="tool.active() === 'eyedropper'"
+            aria-label="Eyedropper — tap the picture to take its colour"
+            (click)="toggleEyedropper()"
+          >
+            <app-icon name="eyedropper" [size]="20" />
           </button>
         }
 
@@ -1069,6 +1078,16 @@ export class EditorPage {
     this.sheet.set(null);
     this.crop.begin();
     this.tool.select('crop');
+  }
+
+  /**
+   * The eyedropper is a sticky mode, like Select — the same argument applies.
+   * It does NOT close the open sheet: taking a colour for the sheet you are
+   * already in is the reason it exists.
+   */
+  protected toggleEyedropper(): void {
+    if (this.tool.active() === 'eyedropper') this.tool.reset();
+    else this.tool.select('eyedropper');
   }
 
 
