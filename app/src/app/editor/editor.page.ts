@@ -9,6 +9,11 @@ import {
 import { BUNDLE_FILE_ACCEPT } from '@engine/bundle.js';
 import { renderProject } from '@engine/render.js';
 import { isPreviewQuality } from '@engine/view.js';
+import { CLASS_A_ORDER, OPS, isNeutralHsl, isNeutralOverlay } from '@engine/adjust/ops.js';
+
+/** `OPS` is a plain object literal in untyped JS; index it through one alias — as adjust-sheet does. */
+const OPERATIONS = OPS as Record<string, any>;
+const CLASS_A: string[] = CLASS_A_ORDER;
 import { BundleService } from '../services/bundle.service';
 import { ExportService } from '../services/export.service';
 import { FontsService } from '../services/fonts.service';
@@ -597,6 +602,16 @@ const TITLES: Record<SheetId, string> = {
             >
               <app-icon [name]="tool.icon" />
               <span class="text-[11px]">{{ tool.label }}</span>
+
+              <!-- Carries an edit.
+                   The engine has always been able to answer this — isNeutralHsl,
+                   isNeutralOverlay and the op table's own neutral values — and
+                   nothing rendered the answer, so "have I touched HSL on this
+                   layer" cost a tap to find out. A 4px dot is the whole fix.
+                   Reserved space either way, so a dot appearing never nudges
+                   the label. -->
+              <span class="h-1 w-1 rounded-full"
+                    [class]="touched()[tool.id] ? 'bg-accent-400' : 'bg-transparent'"></span>
             </button>
           }
 
@@ -878,6 +893,30 @@ export class EditorPage {
 
   /** History length when the open sheet started, so `✕` can roll back to it. */
   private sessionStart = 0;
+
+  /**
+   * Which rail entries carry an edit on the SELECTED layer.
+   *
+   * `isNeutralAdjust` is deliberately NOT used for the Adjust dot: it also
+   * covers hsl and overlay, so changing only the hue would light three lamps
+   * and the user would go looking for an exposure change that was never made.
+   * Adjust owns the class-A parameters and nothing else, so it is checked
+   * against the op table's own neutral values — which also means a new
+   * operation in the engine is covered here with no change to this file.
+   */
+  protected readonly touched = computed<Record<string, boolean>>(() => {
+    this.svc.version();
+    const adjust = this.svc.selected()?.adjust;
+    if (!adjust) return {} as Record<string, boolean>;
+    return {
+      adjust: CLASS_A.some(
+        (id) => (adjust[id] ?? OPERATIONS[id].neutral) !== OPERATIONS[id].neutral,
+      ),
+      filter: typeof adjust.preset === 'string' && adjust.preset !== 'none',
+      hsl: !!adjust.hsl && !isNeutralHsl(adjust.hsl),
+      overlay: !!adjust.overlay && !isNeutralOverlay(adjust.overlay),
+    };
+  });
 
   protected readonly progressPercent = computed(() => {
     const total = this.svc.total();

@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { CLASS_A_ORDER, NEUTRAL_ADJUST, OPS } from '@engine/adjust/ops.js';
 import { ProjectService } from '../services/project.service';
-import { Segmented, SegmentedOption } from './segmented';
+import { ValueDial } from './value-dial';
 import { Slider } from './slider';
 
 /** `OPS` is a plain object literal in untyped JS; index it through one alias. */
@@ -24,17 +24,30 @@ const PARAMETERS: string[] = CLASS_A_ORDER;
   selector: 'app-adjust-sheet',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [Segmented, Slider],
+  imports: [ValueDial, Slider],
   template: `
     @if (svc.selected(); as layer) {
       <div class="space-y-4 px-4 py-4">
-        <app-segmented
-          variant="scroll"
-          ariaLabel="Adjustment"
-          [options]="options()"
-          [selected]="active()"
-          (pick)="active.set($event)"
-        />
+        <!-- Scrolls, because five dials at 64px overflow a narrow phone once
+             the sheet has its padding. justify-between would centre four and
+             hide the fifth; a scroller keeps the order honest. -->
+        <div
+          class="-mx-1 flex gap-1 overflow-x-auto px-1"
+          role="tablist"
+          aria-label="Adjustment"
+        >
+          @for (id of parameters; track id) {
+            <app-value-dial
+              [label]="labelOf(id)"
+              [value]="valueOf(id)"
+              [min]="rangeOf(id)[0]"
+              [max]="rangeOf(id)[1]"
+              [neutralValue]="neutralOf(id)"
+              [active]="active() === id"
+              (pick)="active.set(id)"
+            />
+          }
+        </div>
 
         <app-slider
           [label]="labelOf(active())"
@@ -89,19 +102,6 @@ export class AdjustSheet {
     // display path identical either way.
     return (layer?.adjust ?? NEUTRAL) as Record<string, any>;
   });
-
-  /**
-   * The strip as options, with each parameter's current value as its readout —
-   * so which of the five carry an edit is answered by the strip rather than by
-   * tapping through all five.
-   */
-  protected readonly options = computed<SegmentedOption[]>(() =>
-    this.parameters.map((id) => ({
-      id,
-      label: this.labelOf(id),
-      note: this.readoutOf(id),
-    })),
-  );
 
   protected labelOf(id: string): string {
     return OPERATIONS[id]?.label ?? id;
