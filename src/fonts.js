@@ -171,7 +171,38 @@ export function planFont(fileName) {
  * `registerFont` resolves it below.
  */
 export function createFontRegistry() {
-  return { faces: new Map(), failures: new Map() };
+  return { faces: new Map(), failures: new Map(), aliases: new Map() };
+}
+
+/**
+ * Bind one file to one PSD font name, overruling the matcher.
+ *
+ * ## Why this exists next to a deliberately dumb matcher
+ *
+ * The two tiers below are right for GUESSING, and the note at the top of
+ * test/fonts.mjs explains why a third fuzzy tier would be worse than none. But
+ * dumb-and-honest leaves a real document unservable: a PSD asking for
+ * `HelveticaNeue` and a legitimately licensed `HelvNeue_Rm.otf` share no stem,
+ * so no amount of matching connects them and the row says "no file loaded"
+ * forever, however many times the user picks the right file.
+ *
+ * An assignment is not a third tier of guessing. It is a FACT supplied by the
+ * only party who can know it, and it is why this does not weaken the argument
+ * against fuzzy matching — nothing here is inferred.
+ *
+ * Keyed by the NORMALISED name, so a user who assigns `HelveticaNeue` has also
+ * answered `Helvetica Neue` and `helvetica_neue`. Those are the same name
+ * written three ways, and making them three separate chores would be a bug.
+ *
+ * @param {object} registry
+ * @param {string} psdFontName  the name the document asks for
+ * @param {string} key          `record.key` of a face already registered
+ */
+export function assignFont(registry, psdFontName, key) {
+  const want = splitFontName(psdFontName);
+  if (!want.normalised || !key) return registry;
+  registry.aliases.set(want.normalised, key);
+  return registry;
 }
 
 /**
@@ -245,6 +276,26 @@ export function resolveFont(registry, psdFontName) {
   if (!want.stem) return null;
 
   const records = loadedFonts(registry);
+
+  /*
+   * An assignment is checked FIRST, and beats a name match.
+   *
+   * It is the later, more specific instruction: a user who has explicitly said
+   * "draw this name with that file" has overruled whatever the matcher would
+   * have found, and silently preferring the guess would make the control look
+   * broken. `styleMatched` is true because nobody guessed — the weight warning
+   * exists to say "we may be wrong about this", and repeating it where the user
+   * chose the file trains them to ignore it everywhere else.
+   *
+   * An alias pointing at a face that is no longer loaded — reachable whenever a
+   * later pick replaces a file with the same family and style — falls through
+   * to the ordinary tiers rather than resolving to nothing.
+   */
+  const assigned = registry.aliases?.get(want.normalised);
+  if (assigned) {
+    const record = records.find((r) => r.key === assigned);
+    if (record) return { record, family: record.family, styleMatched: true, how: 'assigned' };
+  }
 
   const byName = records.find((r) => r.normalised === want.normalised);
   if (byName)

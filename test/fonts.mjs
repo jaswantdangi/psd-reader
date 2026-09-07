@@ -26,7 +26,7 @@ import assert from 'node:assert/strict';
 
 import {
   FONT_FILE_EXTENSIONS, isFontFileName, splitFontName, planFont,
-  createFontRegistry, registerFont, recordFontFailure, loadedFonts, fontFailures,
+  createFontRegistry, registerFont, recordFontFailure, loadedFonts, fontFailures, assignFont,
   resolveFont, cssFontFamilyFor, loadedFontFamilyFor, fontDemand,
 } from '../src/fonts.js';
 
@@ -306,6 +306,73 @@ test('a document with no text at all wants nothing', () => {
   assert.deepEqual(report.fonts, []);
   assert.equal(report.wanted, 0);
   assert.equal(report.unnamed, 0);
+});
+
+/*
+ * ## Assigning a file to a name the matcher will never reach
+ *
+ * The two tiers above are deliberately dumb, and that is right for guessing.
+ * But it leaves a real document unservable: a PSD asking for `HelveticaNeue`
+ * and a legitimately licensed `HelvNeue_Rm.otf` share no stem, so no amount of
+ * matching connects them and the row just says "no file loaded" forever.
+ *
+ * An assignment is the user overruling the matcher for ONE name. It is not a
+ * third tier of guessing -- it is a fact supplied by the only party who can
+ * know it.
+ */
+test('an assignment answers a name the matcher cannot reach', () => {
+  const registry = createFontRegistry();
+  const plan = registerFont(registry, planFont('HelvNeue_Rm.otf')).record;
+
+  assert.equal(resolveFont(registry, 'HelveticaNeue'), null, 'no stem in common, so no match');
+
+  assignFont(registry, 'HelveticaNeue', plan.key);
+  const match = resolveFont(registry, 'HelveticaNeue');
+
+  assert.equal(match.family, 'HelvNeue_Rm');
+  assert.equal(match.how, 'assigned', 'reported as assigned, never as a name match');
+});
+
+test('an assignment does not warn about weight, because the user chose it', () => {
+  // The style warning exists to say "we guessed and may be wrong". Nobody
+  // guessed here, so repeating it would train the user to ignore it.
+  const registry = createFontRegistry();
+  const plan = registerFont(registry, planFont('SomeFace-Black.otf')).record;
+  assignFont(registry, 'Whatever-Light', plan.key);
+  assert.equal(resolveFont(registry, 'Whatever-Light').styleMatched, true);
+});
+
+test('an assignment beats a name match, because it is the later instruction', () => {
+  const registry = createFontRegistry();
+  registerFont(registry, planFont('Roboto-Regular.ttf'));
+  const other = registerFont(registry, planFont('Inter-Regular.ttf')).record;
+
+  assert.equal(resolveFont(registry, 'Roboto-Regular').how, 'name');
+  assignFont(registry, 'Roboto-Regular', other.key);
+  assert.equal(resolveFont(registry, 'Roboto-Regular').family, 'Inter-Regular');
+});
+
+test('an assignment to a key nothing loaded is ignored, not fatal', () => {
+  // Reachable whenever a file is replaced by a later pick with the same stem.
+  const registry = createFontRegistry();
+  registerFont(registry, planFont('Roboto-Regular.ttf'));
+  assignFont(registry, 'Georgia', 'nothing|regular');
+  assert.equal(resolveFont(registry, 'Georgia'), null);
+});
+
+test('the document report counts an assigned font as answered', () => {
+  // The whole point: the row has to stop saying "no file loaded for this name".
+  const registry = createFontRegistry();
+  const plan = registerFont(registry, planFont('HelvNeue_Rm.otf')).record;
+  assignFont(registry, 'HelveticaNeue', plan.key);
+
+  const report = fontDemand(
+    [{ name: 'headline', kind: 'text', text: { sourceFont: 'HelveticaNeue', fontFamily: '' } }],
+    registry,
+  );
+
+  assert.equal(report.substituted, 0, 'nothing is being substituted for it any more');
+  assert.equal(report.fonts[0].match.fileName, 'HelvNeue_Rm.otf');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

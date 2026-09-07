@@ -1,6 +1,7 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
 import {
   FONT_FILE_ACCEPT,
+  assignFont,
   createFontRegistry,
   fontDemand,
   loadedFontFamilyFor,
@@ -175,9 +176,61 @@ export class FontsService {
     this.note.set(this.summarise(loaded, replaced, failed, application));
   }
 
+  /**
+   * Load a file and bind it to ONE font name the document asks for.
+   *
+   * The escape hatch from name matching. `load` above can only connect a file
+   * to a name when the two are spelled compatibly; a licensed `HelvNeue_Rm.otf`
+   * shares no stem with `HelveticaNeue`, so no number of picks will ever answer
+   * that row. Here the user names the pairing and the matcher does not get a
+   * vote.
+   *
+   * Takes a list and uses the FIRST file for the binding, because the same
+   * `<input multiple>` serves both controls — the rest are still loaded and
+   * still matched normally, so picking a family and binding one of them is one
+   * trip through the picker rather than two.
+   */
+  async assignTo(psdFontName: string, files: FileList | File[] | null): Promise<void> {
+    const list = files ? Array.from(files) : [];
+    if (!list.length || !psdFontName) return;
+
+    this.note.set('');
+    if (!this.supported) {
+      this.note.set('This browser has no FontFace API, so font files cannot be loaded here.');
+      this.version.update((v) => v + 1);
+      return;
+    }
+
+    this.busy.set(true);
+    const loaded: string[] = [];
+    const replaced: string[] = [];
+    let failed = 0;
+    let bound = '';
+
+    for (const file of list) {
+      const outcome = await this.loadOne(file);
+      if (!outcome.ok) { failed++; continue; }
+      loaded.push(outcome.family);
+      if (outcome.replaced) replaced.push(outcome.replaced);
+      // The first file that actually parsed is the one bound. A file that
+      // failed to load must never become the answer to a name.
+      if (!bound) {
+        bound = outcome.family;
+        assignFont(this.registry, psdFontName, outcome.key);
+      }
+    }
+
+    const application = this.applyLoaded();
+    this.busy.set(false);
+    this.version.update((v) => v + 1);
+    this.note.set(bound
+      ? `${bound} is now drawing ${psdFontName}. ${this.summarise(loaded, replaced, failed, application)}`
+      : this.summarise(loaded, replaced, failed, application));
+  }
+
   /** One file: parse it, register it, keep its face. Never throws. */
-  private async loadOne(file: File): Promise<{ ok: boolean; family: string; replaced: string }> {
-    const miss = { ok: false, family: '', replaced: '' };
+  private async loadOne(file: File): Promise<{ ok: boolean; family: string; replaced: string; key: string }> {
+    const miss = { ok: false, family: '', replaced: '', key: '' };
     let plan: any;
     try {
       plan = planFont(file.name);
@@ -205,7 +258,7 @@ export class FontsService {
       }
       this.faces.set(plan.family, face);
       this.sources.set(plan.family, file);
-      return { ok: true, family: plan.family, replaced: replaced ? replaced.family : '' };
+      return { ok: true, family: plan.family, replaced: replaced ? replaced.family : '', key: plan.key };
     } catch (error: any) {
       recordFontFailure(
         this.registry,

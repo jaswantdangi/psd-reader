@@ -9,7 +9,7 @@ export {
 } from './engine-data.js';
 export {
   splitFontName, isFontFileName, planFont,
-  createFontRegistry, registerFont, recordFontFailure, loadedFonts, fontFailures,
+  createFontRegistry, registerFont, recordFontFailure, loadedFonts, fontFailures, assignFont,
   resolveFont, cssFontFamilyFor, loadedFontFamilyFor, fontDemand,
   FONT_FILE_EXTENSIONS, FONT_FILE_ACCEPT,
 } from './fonts.js';

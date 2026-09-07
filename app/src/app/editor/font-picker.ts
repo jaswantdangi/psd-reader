@@ -47,6 +47,16 @@ export class FontPicker {
   /** `primary` for the call to action, `quiet` where it sits beside other text. */
   readonly variant = input<'primary' | 'quiet'>('primary');
 
+  /**
+   * A PSD font name to BIND whatever is picked to, overruling the matcher.
+   *
+   * Empty is the ordinary picker: load these files and match them by name.
+   * Set, and the first file that parses answers this name however it is
+   * spelled — which is the only way a licensed file whose name shares no stem
+   * with the document's can ever draw.
+   */
+  readonly assignTo = input('');
+
   protected tone(): string {
     return this.variant() === 'primary'
       ? 'bg-accent-500 text-white'
@@ -57,6 +67,7 @@ export class FontPicker {
     const input = event.target as HTMLInputElement;
     const files = input.files;
     input.value = '';
-    await this.fonts.load(files);
+    const name = this.assignTo();
+    await (name ? this.fonts.assignTo(name, files) : this.fonts.load(files));
   }
 }

@@ -107,10 +107,23 @@ import { FontPicker } from './font-picker';
                   }
                 } @else {
                   <p class="text-[11px] leading-relaxed text-amber-300">
-                    No file loaded for this name. Look for
-                    <b class="font-semibold">{{ font.name }}</b> as a .ttf, .otf, .woff or
-                    .woff2 and load it below.
+                    No file loaded for this name. Load
+                    <b class="font-semibold">{{ font.name }}</b> below as a .ttf, .otf,
+                    .woff or .woff2 — or, if your file is named differently, pick it here
+                    and it will answer this name whatever it is called.
                   </p>
+
+                  <!-- The escape hatch from name matching.
+                       The matcher is deliberately dumb and will not guess, which is
+                       right — but it leaves a licensed HelvNeue_Rm.otf unable to ever
+                       answer HelveticaNeue, however many times it is loaded. This
+                       binds the two by hand, which is a fact the user supplies rather
+                       than a guess anyone made. -->
+                  <app-font-picker
+                    variant="quiet"
+                    [assignTo]="font.name"
+                    [label]="'Use a file for ' + font.name + '…'"
+                  />
                 }
               </li>
             }
