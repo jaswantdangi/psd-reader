@@ -1,6 +1,7 @@
 // GENERATED — do not edit.
-// Copied from src/sync/protocol.js by scripts/vendor-plugin.mjs.
-// Edit the original; test/sync.mjs fails if these two ever drift apart.
+// Converted from src/sync/protocol.js to CommonJS by scripts/vendor-plugin.mjs,
+// because UXP has no ES module support. Edit the original; test/sync.mjs
+// fails if these drift apart.
 
 /**
  * The Photoshop -> app sync wire protocol: message shapes, validation, and the
@@ -31,12 +32,12 @@
  * still goes through `setLayer` / `reorderLayer` / `setFrame` / `commit`, which
  * is what captures `from` and keeps undo working.
  */
-import { appIdFor } from './identity.js';
+const { appIdFor } = require('./identity.js');
 
 /** The six frame types. Anything else is refused by name. */
-export const MESSAGE_TYPES = ['hello', 'pair', 'paired', 'tree', 'event', 'error'];
+const MESSAGE_TYPES = ['hello', 'pair', 'paired', 'tree', 'event', 'error'];
 
-export const PROTOCOL_ERRORS = {
+const PROTOCOL_ERRORS = {
   BAD_JSON: 'bad-json',
   NOT_AN_OBJECT: 'not-an-object',
   MISSING_TYPE: 'missing-type',
@@ -49,8 +50,8 @@ export const PROTOCOL_ERRORS = {
  * typed into another, so the characters people confuse are simply absent
  * rather than corrected after the fact.
  */
-export const PAIR_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-export const PAIR_CODE_LENGTH = 6;
+const PAIR_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+const PAIR_CODE_LENGTH = 6;
 
 const ROLES = ['plugin', 'app'];
 
@@ -91,7 +92,7 @@ const CHANGE_MAP = {
   layerEffect: { requiresPixels: true },
 };
 
-export const CHANGE_KINDS = Object.keys(CHANGE_MAP);
+const CHANGE_KINDS = Object.keys(CHANGE_MAP);
 
 /**
  * The changes with no command at all. `add` is not here: it HAS a command, it
@@ -99,10 +100,10 @@ export const CHANGE_KINDS = Object.keys(CHANGE_MAP);
  * "what will never sync as an operation", which is the disclosure the design
  * asks for.
  */
-export const UNMAPPABLE_CHANGES = CHANGE_KINDS.filter((k) => !CHANGE_MAP[k].command);
+const UNMAPPABLE_CHANGES = CHANGE_KINDS.filter((k) => !CHANGE_MAP[k].command);
 
 /** What kind of change this is, without needing an event or a mapping. */
-export function classifyChange(change) {
+function classifyChange(change) {
   const spec = CHANGE_MAP[change];
   if (!spec) return { known: false, mappable: false, requiresPixels: false, command: null };
   return {
@@ -251,7 +252,7 @@ const VALIDATORS = {
  *   anything the sender added beyond the schema does not reach the rest of the
  *   app.
  */
-export function validateMessage(raw) {
+function validateMessage(raw) {
   if (!isPlainObject(raw)) return fail(PROTOCOL_ERRORS.NOT_AN_OBJECT, 'a frame must be a JSON object');
   if (!isNonEmptyString(raw.type)) return fail(PROTOCOL_ERRORS.MISSING_TYPE, 'a frame must carry a string `type`');
   const validate = Object.prototype.hasOwnProperty.call(VALIDATORS, raw.type) ? VALIDATORS[raw.type] : null;
@@ -260,7 +261,7 @@ export function validateMessage(raw) {
 }
 
 /** `JSON.parse` plus `validateMessage`, with the parse failure as a return value. */
-export function parseMessage(text) {
+function parseMessage(text) {
   let raw;
   try {
     raw = JSON.parse(text);
@@ -271,7 +272,7 @@ export function parseMessage(text) {
 }
 
 /** Build an `error` frame. One shape, so the peer only ever parses one. */
-export const errorFrame = (code, message) => ({ type: 'error', code, message: String(message ?? '') });
+const errorFrame = (code, message) => ({ type: 'error', code, message: String(message ?? '') });
 
 // ------------------------------------------------------------ translation
 
@@ -343,7 +344,7 @@ function reorderIndices(appId, belowLayerID, mapping, order) {
  *   reasons: `invalid-message`, `unknown-change`, `needs-pixels`,
  *   `unknown-layer`, `bad-props`.
  */
-export function translateEvent(event, mapping, options = {}) {
+function translateEvent(event, mapping, options = {}) {
   const checked = validateMessage(event);
   if (!checked.ok) return refuse('invalid-message', { detail: checked.error });
   const { change, props, layerID } = checked.message;
@@ -390,7 +391,7 @@ export function translateEvent(event, mapping, options = {}) {
  * fires continuously during a brush stroke; the caller has to batch that list,
  * not act on it per event.
  */
-export function translateEvents(events, mapping, options = {}) {
+function translateEvents(events, mapping, options = {}) {
   if (!Array.isArray(events)) throw new TypeError('translateEvents needs an array of event frames');
   const commands = [];
   const refused = [];
@@ -409,3 +410,5 @@ export function translateEvents(events, mapping, options = {}) {
   }
   return { commands, refused, needsPixels };
 }
+
+module.exports = { MESSAGE_TYPES, PROTOCOL_ERRORS, PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH, CHANGE_KINDS, UNMAPPABLE_CHANGES, errorFrame, classifyChange, validateMessage, parseMessage, translateEvent, translateEvents };

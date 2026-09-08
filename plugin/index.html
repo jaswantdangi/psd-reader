@@ -2,11 +2,20 @@
 <!--
   The panel shell.
 
-  Plain CSS, not Tailwind: UXP renders with its own engine over a subset of
-  CSS, and it cannot fetch a stylesheet from a CDN at all -- `network.domains`
-  in the manifest is an allowlist for the relay, and widening it to a CDN to
-  style a four-control panel would be the wrong trade. Everything here sticks
-  to the properties UXP documents as supported.
+  TWO THINGS HERE ARE LOAD-BEARING, and both were wrong in the first version:
+
+  1. `<script src="main.js">` — a CLASSIC script, with no `type="module"`.
+     UXP has no ES module support. A panel whose script uses `import` does not
+     report a useful error; it simply never runs, and you get an empty panel or
+     no panel at all. That is the most common reason a UXP plugin "will not
+     load". Everything comes in through `require()` instead.
+
+  2. Plain CSS, not Tailwind. UXP renders with its own engine over a subset of
+     CSS and cannot fetch a stylesheet from a CDN — `network.domains` is an
+     allowlist for the relay, and widening it to a CDN to style one panel would
+     be the wrong trade. Only properties UXP documents as supported are used;
+     notably there is no `innerHTML` anywhere in main.js either, because UXP's
+     DOM is not a browser DOM.
 -->
 <html>
   <head>
@@ -47,7 +56,6 @@
       }
       #relay { width: 100%; }
       .row { display: flex; }
-      .row > * { flex: 1; }
 
       /* One status line, one meaning. Colour is a second channel, never the only one. */
       #status {
@@ -71,8 +79,6 @@
         list-style: none;
         margin: 6px 0 0 0;
         padding: 0;
-        max-height: 140px;
-        overflow-y: auto;
       }
       li {
         padding: 4px 6px;
@@ -83,13 +89,38 @@
       li .what { color: #d7a45f; }
       .empty { color: #6f6f6f; font-style: italic; }
       .hint { color: #7d7d7d; margin-top: 6px; }
+
+      /*
+        The log is not a nicety. UXP's debugger is a separate tool that has to
+        be attached deliberately, so a plugin that only reports failures to
+        `console` is a plugin that reports them to nobody. Everything --
+        including uncaught errors and rejected promises -- lands here, on
+        screen, in the panel that is already open.
+      */
+      #logbox {
+        margin-top: 8px;
+        max-height: 220px;
+        overflow-y: auto;
+        background: #1b1b1b;
+        border: 1px solid #3a3a3a;
+        border-radius: 4px;
+        padding: 6px 8px;
+        font-family: monospace;
+        font-size: 10px;
+        line-height: 1.45;
+        color: #b9b9b9;
+        white-space: pre-wrap;
+      }
+      .lvl-err { color: #ef8a8a; }
+      .lvl-warn { color: #d7a45f; }
+      .lvl-ok { color: #7fc99a; }
     </style>
   </head>
 
   <body>
     <h1>PSD Reader Sync</h1>
 
-    <div id="status">Not connected.</div>
+    <div id="status">Starting…</div>
 
     <div id="setup">
       <div class="field">
@@ -117,7 +148,7 @@
         half someone's work is worse than one that refuses it.
       -->
       <div style="margin-top: 10px">
-        <span class="count">Not synced</span>
+        <span class="count">Not syncing</span>
         <ul id="unsynced">
           <li class="empty">Nothing skipped yet.</li>
         </ul>
@@ -128,6 +159,15 @@
       </div>
     </div>
 
-    <script type="module" src="./main.js"></script>
+    <div class="section">
+      <div class="row">
+        <button id="diagnose">Run diagnostics</button>
+        <button id="copylog">Copy log</button>
+        <button id="clearlog">Clear</button>
+      </div>
+      <div id="logbox"></div>
+    </div>
+
+    <script src="main.js"></script>
   </body>
 </html>

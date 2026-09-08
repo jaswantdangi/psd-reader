@@ -1,6 +1,7 @@
 // GENERATED — do not edit.
-// Copied from src/sync/identity.js by scripts/vendor-plugin.mjs.
-// Edit the original; test/sync.mjs fails if these two ever drift apart.
+// Converted from src/sync/identity.js to CommonJS by scripts/vendor-plugin.mjs,
+// because UXP has no ES module support. Edit the original; test/sync.mjs
+// fails if these drift apart.
 
 /**
  * Layer identity between Photoshop and this app.
@@ -66,14 +67,14 @@
  */
 
 /** Tiers, loosest last. Every tier drops at most one signature attribute. */
-export const MATCH_TIERS = ['exact', 'renamed', 'regrouped'];
+const MATCH_TIERS = ['exact', 'renamed', 'regrouped'];
 
 /**
  * Every reason a descriptor can end up in `unmatched`. Exported so the UI can
  * write copy per reason -- "3 layers could not be identified" is not useful;
  * "2 layers share a name and position, so neither will sync" is.
  */
-export const UNMATCHED_REASONS = [
+const UNMATCHED_REASONS = [
   /** Photoshop lists groups as layers; `flatten()` dissolves them. Expected, not a failure. */
   'group',
   /** An adjustment layer carries no pixels, so `flatten()` drops it. Its effect is not in our model either. */
@@ -105,7 +106,7 @@ const SEP = '\u0000';
  * @returns {{left:number,top:number,right:number,bottom:number}|null} null when
  *   the descriptor carries neither shape, or carries non-finite numbers.
  */
-export function boundsOf(descriptor) {
+function boundsOf(descriptor) {
   if (!descriptor || typeof descriptor !== 'object') return null;
   const b = descriptor.bounds;
   if (b && typeof b === 'object') {
@@ -125,7 +126,7 @@ export function boundsOf(descriptor) {
  * array. Joining here means the signature builder never has to know which side
  * it is looking at.
  */
-export function groupPathOf(descriptor) {
+function groupPathOf(descriptor) {
   const path = descriptor?.groupPath;
   if (Array.isArray(path)) return path.join(' / ');
   return typeof path === 'string' ? path : '';
@@ -209,7 +210,7 @@ const bucketise = (entries, tier) => {
  *   unmatched: Array<{side, layerID?, appId?, name, kind, reason, candidates?}>,
  * }}
  */
-export function matchLayers(photoshopLayers, appLayers) {
+function matchLayers(photoshopLayers, appLayers) {
   if (!Array.isArray(photoshopLayers) || !Array.isArray(appLayers)) {
     throw new TypeError('matchLayers needs a descriptor list from each side');
   }
@@ -311,4 +312,6 @@ export function matchLayers(photoshopLayers, appLayers) {
  * Callers must treat null as "drop this event and report it", never as "try
  * something else" -- there is nothing else to try that is not a guess.
  */
-export const appIdFor = (mapping, layerID) => mapping?.byLayerID?.get(layerID)?.appId ?? null;
+const appIdFor = (mapping, layerID) => mapping?.byLayerID?.get(layerID)?.appId ?? null;
+
+module.exports = { MATCH_TIERS, UNMATCHED_REASONS, appIdFor, boundsOf, groupPathOf, matchLayers };

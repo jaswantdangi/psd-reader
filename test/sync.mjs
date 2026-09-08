@@ -8,6 +8,7 @@
  */
 import assert from 'node:assert/strict';
 import fs from 'fs';
+import { createRequire } from 'node:module';
 import { readDocument } from '../src/index.js';
 import { createProject } from '../src/edit.js';
 import {
@@ -750,36 +751,106 @@ test('document-level changes coalesce without a layerID colliding them', () => {
 
 console.log('\nthe plugin\'s vendored copies\n');
 
-test('plugin/vendor is byte-identical to src/sync, banner aside', () => {
-  // plugin/main.js cannot import ../src/sync/*: UXP treats the folder holding
-  // manifest.json as the plugin root, and a plugin that reaches above it may
-  // simply fail to load, with the panel never appearing and no reason given.
-  // So the modules are copied in, and committed -- UDT loads the folder off
-  // disk and runs no npm scripts, so "remember to build first" would be a trap.
+const pluginRequire = createRequire(new URL('../plugin/vendor/', import.meta.url));
+
+test('the vendored modules are CommonJS and actually load', () => {
+  // UXP HAS NO ES MODULE SUPPORT. No `import`, no `<script type="module">`.
+  // A panel script using them does not raise a useful error -- it never runs,
+  // and the panel is empty or absent. That is the most common reason a UXP
+  // plugin "will not load", and it is what the first version of this plugin
+  // got wrong.
   //
-  // Committed build output needs a guard or it is just a second copy waiting to
-  // drift. This is that guard: run `node scripts/vendor-plugin.mjs` after any
-  // change to src/sync/, and this test tells you when you forgot.
+  // So `require()` them here for real. A regex-built module that does not load
+  // is worth nothing, and this is the only place that can find out cheaply.
   for (const name of ['protocol.js', 'identity.js', 'photoshop.js']) {
-    const source = fs.readFileSync(`src/sync/${name}`, 'utf8');
-    const vendored = fs.readFileSync(`plugin/vendor/${name}`, 'utf8');
-    assert.ok(vendored.startsWith('// GENERATED'), `plugin/vendor/${name} is missing its generated banner`);
-    assert.ok(
-      vendored.endsWith(source),
-      `plugin/vendor/${name} has drifted from src/sync/${name} — run: node scripts/vendor-plugin.mjs`,
-    );
+    const text = fs.readFileSync(`plugin/vendor/${name}`, 'utf8');
+    assert.ok(text.startsWith('// GENERATED'), `plugin/vendor/${name} lost its generated banner`);
+    assert.equal(/^import\s/m.test(text), false, `plugin/vendor/${name} still contains an ESM import`);
+    assert.equal(/^export\s/m.test(text), false, `plugin/vendor/${name} still contains an ESM export`);
+    assert.ok(/^module\.exports = \{/m.test(text), `plugin/vendor/${name} has no module.exports`);
+    assert.doesNotThrow(() => pluginRequire(`./${name}`), `plugin/vendor/${name} does not load as CommonJS`);
   }
 });
 
-test('the plugin imports only from its own folder', () => {
-  // The rule the vendoring exists to satisfy. An import that climbs out of
-  // plugin/ is exactly the thing that would stop the panel loading, and it is
-  // an easy edit for someone to make without knowing that.
+test('the vendored modules export exactly what src/sync exports', () => {
+  // The drift guard. Byte-equality cannot be the check any more -- the files
+  // are transformed, not copied -- so the check is the thing that actually
+  // matters: same public surface, same behaviour.
+  const pairs = [
+    ['protocol.js', import('../src/sync/protocol.js')],
+    ['identity.js', import('../src/sync/identity.js')],
+    ['photoshop.js', import('../src/sync/photoshop.js')],
+  ];
+  return Promise.all(pairs.map(async ([name, loading]) => {
+    const esm = await loading;
+    const cjs = pluginRequire(`./${name}`);
+    const expected = Object.keys(esm).filter((k) => k !== 'default').sort();
+    assert.deepEqual(Object.keys(cjs).sort(), expected,
+      `plugin/vendor/${name} has drifted — run: node scripts/vendor-plugin.mjs`);
+  }));
+});
+
+test('the vendored copy behaves identically to the original', () => {
+  // Same input, same answer. Catches a transform that produced something which
+  // loads and exports the right names while doing the wrong thing.
+  const cjs = pluginRequire('./photoshop.js');
+  assert.deepEqual(cjs.changeForNotification('set', { to: { opacity: 40 } }),
+    changeForNotification('set', { to: { opacity: 40 } }));
+  assert.deepEqual(cjs.normaliseKind('curves'), normaliseKind('curves'));
+  assert.deepEqual(
+    cjs.coalesceEvents([{ change: 'move', layerID: 7, props: { x: 1 } }, { change: 'move', layerID: 7, props: { x: 2 } }]),
+    coalesceEvents([{ change: 'move', layerID: 7, props: { x: 1 } }, { change: 'move', layerID: 7, props: { x: 2 } }]),
+  );
+});
+
+test('plugin/main.js is a classic CommonJS script', () => {
+  // The three things that stop a UXP panel loading, asserted rather than
+  // remembered. An `import` is fatal; a specifier climbing out of plugin/ may
+  // be, since UXP treats the manifest's folder as the plugin root.
   const main = fs.readFileSync('plugin/main.js', 'utf8');
-  const climbing = [...main.matchAll(/^import .* from '([^']+)'/gm)]
+  assert.equal(/^import\s/m.test(main), false, 'plugin/main.js uses ESM import — UXP cannot load it');
+  assert.equal(/^export\s/m.test(main), false, 'plugin/main.js uses ESM export — UXP cannot load it');
+
+  const climbing = [...main.matchAll(/require\('([^']+)'\)/g)]
     .map((m) => m[1])
     .filter((spec) => spec.startsWith('../'));
-  assert.deepEqual(climbing, [], 'plugin/main.js must not import above its own folder');
+  assert.deepEqual(climbing, [], 'plugin/main.js must not require above its own folder');
+
+  // UXP's DOM is not a browser DOM. innerHTML is not something to bet the
+  // panel on, least of all the log that reports why everything else failed.
+  // Matches the PROPERTY, not the word: the comment above the log explains
+  // why innerHTML is avoided, and a test that cannot tell prose from code
+  // fails on its own documentation.
+  const code = main.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.equal(code.includes('innerHTML'), false, 'plugin/main.js uses innerHTML, which UXP may not support');
+});
+
+test('index.html loads main.js as a classic script', () => {
+  const html = fs.readFileSync('plugin/index.html', 'utf8');
+  assert.ok(html.includes('<script src="main.js"></script>'), 'main.js must load as a classic script');
+  // Comments are stripped first. The doc comment at the top of index.html
+  // explains WHY type="module" cannot be used, and a check that cannot tell
+  // prose from markup fails on its own documentation.
+  const markup = html.replace(/<!--[\s\S]*?-->/g, '');
+  assert.equal(/<script[^>]*type\s*=\s*["']module["']/.test(markup), false, 'type="module" cannot work in UXP');
+});
+
+test('the manifest is the shape UXP validates', () => {
+  // `host` as an ARRAY was the other load failure: Adobe's manifest v5 example
+  // is an object, and a manifest that fails validation never reaches the code.
+  const manifest = JSON.parse(fs.readFileSync('plugin/manifest.json', 'utf8'));
+  assert.equal(manifest.manifestVersion, 5);
+  assert.equal(typeof manifest.host, 'object');
+  assert.equal(Array.isArray(manifest.host), false, 'manifest.host must be an object, not an array');
+  assert.equal(manifest.host.app, 'PS');
+  assert.ok(manifest.main.endsWith('.html'), 'manifest.main must point at an HTML file');
+  assert.ok(Array.isArray(manifest.entrypoints) && manifest.entrypoints[0].type === 'panel');
+
+  const domains = manifest.requiredPermissions.network.domains;
+  assert.ok(domains.some((d) => d.startsWith('wss://')), 'the deployed relay must be allowlisted');
+  // UXP 7.4+ rejects wildcard TLDs outright, so one here means the plugin
+  // silently fails to load rather than merely failing to connect.
+  assert.deepEqual(domains.filter((d) => d.includes('*')), [], 'no wildcards: UXP 7.4+ rejects them');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', SOME FAILED' : ''}\n`);

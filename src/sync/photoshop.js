@@ -222,7 +222,7 @@ export function coalesceEvents(events) {
   const order = [];
   const latest = new Map();
   for (const e of events ?? []) {
-    const key = `${e.change} ${e.layerID ?? ''}`;
+    const key = `${e.change}::${e.layerID ?? ''}`;
     if (!latest.has(key)) order.push(key);
     latest.set(key, e);
   }

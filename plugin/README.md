@@ -1,125 +1,113 @@
 # PSD Reader Sync — the Photoshop plugin
 
-The Photoshop half of sync. The relay (`server/`) and the protocol
-(`src/sync/`) were built and tested first; this is the piece that had never
-existed.
+The Photoshop half of sync. The relay and the protocol were built and verified
+first; this is the piece that runs inside Photoshop.
 
-## Status: written, never run
+## v0.2 — rebuilt after the first attempt failed to load
 
-**No part of this has been executed inside Photoshop.** It is written against
-the UXP and Photoshop DOM documentation. Do not read "the tests pass" as "the
-plugin works" — the tests cover `src/sync/photoshop.js`, which is every
-decision this plugin makes *except* the ones that need a host.
+The first version did not load, and the reasons were structural rather than
+subtle. They are worth stating, because every one of them is a rule for UXP
+plugins generally:
 
-The seams most likely to be wrong are marked `VERIFY:` in `main.js`. In rough
-order of how likely they are to bite:
+| What was wrong | Why it was fatal |
+|---|---|
+| `import` / `<script type="module">` | **UXP has no ES module support.** A panel script using `import` does not raise a useful error — it never runs, and you get an empty panel or none at all. Everything is `require()` now |
+| `"host": [{...}]` — an array | Adobe's manifest v5 example is an **object**. A manifest that fails validation never reaches your code |
+| `addNotificationListener([{event: 'set'}], cb)` | The documented form is a **string array** — `addNotificationListener(['all'], cb)`. The object form subscribed to nothing, so no event would ever have arrived |
+| `import '../src/sync/protocol.js'` | UXP treats the folder holding `manifest.json` as the plugin root. Reaching above it may fail to load with no explanation |
+| `innerHTML` | UXP's DOM is not a browser DOM. Everything is `createElement` / `textContent` now |
 
-1. **`layerIdFrom(descriptor)`** — reading the layer id out of a notification's
-   `_target` reference chain. A wrong id here is the exact failure the identity
-   model exists to prevent: a real change applied to the wrong layer. The code
-   sends nothing rather than guess, so the visible symptom of getting this
-   wrong is silence, not corruption.
-2. **`propsFor(change, descriptor)`** — the descriptor shape per event. Every
-   branch is from documentation; none has been observed.
-3. **`action.addNotificationListener`** — the array-plus-one-handler form is
-   Photoshop 24+. Older builds took one event per call.
-4. **`layer.bounds` on groups and on layers with effects** — some versions
-   report effect-inclusive bounds. Those would not match the app's bounds, and
-   the layer would drop to a looser match tier or fail to match at all.
-5. **`import` beside `require`** — vendored modules come in as ES modules, host
-   modules through `require`. If the panel fails to load at all, start here.
+`test/sync.mjs` asserts all five, so none of them can come back silently.
+
+## Debugging — read this first
+
+The original complaint was "no proper debugging". Two answers:
+
+**1. The panel logs to itself.** Every failure — including uncaught errors and
+rejected promises — is written to the log box at the bottom of the panel. You
+do not need a debugger attached to see why something failed. There is a **Copy
+log** button.
+
+**2. `Run diagnostics`** prints what the host API *actually* returns:
+Photoshop and UXP versions, the document, and the real shape of
+`layer.id` / `layer.name` / `layer.kind` / `layer.bounds`. Those are the values
+the plugin currently has to assume. **Run it once and the assumptions become
+facts** — paste the output and the remaining guesses can be corrected.
+
+**3. UDT's own debugger**, when you want breakpoints: in UXP Developer Tool,
+the `•••` menu next to the loaded plugin → **Debug** (opens Chrome DevTools) or
+**Logs** (console output without the debugger).
+
+If the panel does not appear at all, the fault is in `manifest.json` or in the
+first few lines of `main.js`, before the log exists. UDT shows manifest
+validation errors in its own window.
+
+## Setup
+
+**1. The relay is already live** at
+`wss://psd-sync-relay.jaswantdangi00.workers.dev`, allowlisted in
+`manifest.json`. For local development run `npx wrangler dev` and type
+`ws://localhost:8787` into the panel's relay field — that host is allowlisted
+too.
+
+Exact origins only. **UXP 7.4+ rejects wildcard TLDs**, so `wss://*.example.com`
+will not load at all.
+
+**2. Load it.** UXP Developer Tool → **Add Plugin** → pick
+`plugin/manifest.json` → **Load**. Then Photoshop → **Plugins** → *PSD Reader
+Sync*. (Plugins appear under the Plugins menu, not Window.)
+
+Distribution is developer-mode via UDT. The marketplace needs Adobe review.
+
+**3. Open the same PSD in both** Photoshop and the app. Sync moves **events,
+not documents**, so neither side sends the file and both must already have it.
+
+**4. Pair.** Read the six-character code off the app, type it into the panel,
+press Connect.
 
 ## `vendor/` — why the modules are duplicated
 
-`main.js` imports from `./vendor/`, not `../src/sync/`. UXP treats the folder
-holding `manifest.json` as the plugin root, and a plugin that reaches above it
-may simply fail to load — the panel never appears, with no reason given.
+`main.js` requires `./vendor/`, not `../src/sync/`, for the plugin-root reason
+above. `scripts/vendor-plugin.mjs` copies three files in **and converts them
+from ESM to CommonJS**, because UXP cannot load ES modules.
 
-So `scripts/vendor-plugin.mjs` copies three files in (`protocol.js`,
-`identity.js`, `photoshop.js`) and **they are committed**. UDT loads this folder
-straight off disk and runs no npm scripts, so "remember to build first" would be
-a trap rather than a workflow.
-
-There is still one source of truth. Edit `src/sync/`, then:
+They are **committed**: UDT loads this folder straight off disk and runs no npm
+scripts, so "remember to build first" would be a trap. After editing
+`src/sync/`:
 
 ```
 npm run plugin:vendor
 ```
 
-`test/sync.mjs` fails if the two ever drift, so forgetting is caught by the
-suite rather than discovered inside Photoshop.
+`test/sync.mjs` `require()`s the generated files for real, checks they export
+exactly what `src/sync/` exports, and checks they behave identically — so a
+broken transform fails in `npm test` rather than inside Photoshop.
 
-## What it does
+## What is still unverified
 
-1. Takes the 6-character code the app displays, and pairs through the relay.
-2. Enumerates the layer tree — `layerID`, name, kind, bounds, group path — and
-   sends it once, as a `tree` frame. The app runs `matchLayers` against its own
-   file and pins the result for the session.
-3. Subscribes to Photoshop notifications, translates each through
-   `changeForNotification`, coalesces bursts, and forwards the mappable ones.
-4. **Shows the ones it cannot send.** Brush strokes, filters, adjustments, mask
-   painting and layer effects have no operation that represents them. The panel
-   counts them per kind rather than hiding them, because a sync that silently
-   discards half someone's work is worse than one that says it did.
+**This has not been confirmed against a running Photoshop.** The structural
+failures above are fixed and asserted by tests, but these depend on the host's
+actual behaviour:
 
-## Setup
+1. **`layerIdFrom(descriptor)`** — reading the layer id out of a notification's
+   `_target` chain. A wrong id would apply a real change to the wrong layer, so
+   it returns `null` and sends **nothing** rather than guess. When it does, it
+   logs the descriptor. **Symptom of it being wrong: changes not arriving —
+   never damaged artwork.**
+2. **`propsFor(change, descriptor)`** — the payload shape per event. The first
+   descriptor of each kind is logged once per session so these can be corrected
+   from a real run.
+3. **`layer.bounds` on groups and on layers with effects** — some versions
+   report effect-inclusive bounds, which would not match the app's and would
+   drop those layers to a looser match tier.
 
-### 1. The relay must be running
-
-```
-node server/index.js
-```
-
-Binds `127.0.0.1:8787` by default. See `server/config.js` for TLS and
-deployment; nothing here needs any of it for local development.
-
-### 2. The relay's address must be in `manifest.json`
-
-Already listed, both the deployed relay and the local one:
-
-```json
-"requiredPermissions": {
-  "network": {
-    "domains": [
-      "wss://psd-sync-relay.jaswantdangi00.workers.dev",
-      "ws://localhost:8787",
-      "wss://localhost:8787"
-    ]
-  }
-}
-```
-
-Exact origins only. **UXP 7.4+ rejects wildcard TLDs**, so `wss://*.example.com`
-will not load — list the host you actually deploy. Changing this needs a plugin
-reload, not just a panel refresh.
-
-The deployed relay is live and verified: pairing, routing and origin refusal
-were all driven through it over `wss://`. What has never run is this plugin.
-
-### 3. Load it
-
-Adobe UXP Developer Tool → *Add Plugin* → pick `plugin/manifest.json` → *Load*.
-Then Photoshop → Plugins → PSD Reader Sync.
-
-Distribution is developer-mode via UDT. The marketplace needs Adobe review, and
-nothing here is ready for that.
-
-### 4. Pair
-
-Open the same PSD in both Photoshop and the app — sync moves **events, not
-documents**, so neither side sends the file and both must already have it. Read
-the code off the app, type it into the panel, press Connect.
+All three are answered by one session with `Run diagnostics` and a few edits.
 
 ## Notes
 
 - **A code is single use and lives five minutes.** A second attempt needs a new
   one from the app.
-- **Pairing attempts are rate limited**, per IP and across all of them. Ten
-  wrong codes a minute from one machine is the per-IP budget; see
-  `globalRateLimitMax` in `server/config.js` for the other.
-- **Plain CSS, not Tailwind.** UXP renders with its own engine over a subset of
-  CSS and cannot fetch a stylesheet from a CDN — `network.domains` is an
-  allowlist for the relay, and widening it to a CDN to style a four-control
-  panel would be the wrong trade.
+- **Pairing attempts are rate limited** — ten wrong codes a minute per machine,
+  and a global ceiling across everyone.
 - **The plugin never writes to the document.** Sync is one-way by design, which
   is why there is no `executeAsModal` anywhere in it.

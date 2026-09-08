@@ -1,6 +1,7 @@
 // GENERATED — do not edit.
-// Copied from src/sync/photoshop.js by scripts/vendor-plugin.mjs.
-// Edit the original; test/sync.mjs fails if these two ever drift apart.
+// Converted from src/sync/photoshop.js to CommonJS by scripts/vendor-plugin.mjs,
+// because UXP has no ES module support. Edit the original; test/sync.mjs
+// fails if these drift apart.
 
 /**
  * The Photoshop side of sync, minus Photoshop.
@@ -19,7 +20,7 @@
  * `protocol.js` validates them.
  */
 
-import { CHANGE_KINDS, classifyChange } from './protocol.js';
+const { CHANGE_KINDS, classifyChange } = require('./protocol.js');
 
 /**
  * Photoshop layer kinds that are adjustment layers.
@@ -34,7 +35,7 @@ import { CHANGE_KINDS, classifyChange } from './protocol.js';
  * is reported unmatched. The failure mode is disclosure, not a mis-mapped
  * edit, which is the direction this whole module leans.
  */
-export const PHOTOSHOP_ADJUSTMENT_KINDS = new Set([
+const PHOTOSHOP_ADJUSTMENT_KINDS = new Set([
   'levels', 'curves', 'colorBalance', 'brightnessContrast', 'hueSaturation',
   'selectiveColor', 'channelMixer', 'gradientMap', 'inversion', 'threshold',
   'posterize', 'photoFilter', 'exposure', 'blackAndWhite', 'vibrance',
@@ -51,7 +52,7 @@ const GROUP_KINDS = new Set(['group', 'groupend', 'layersection']);
  * named; everything else is passed through unchanged for `kindOf` to reduce,
  * which keeps one reduction rather than two that can drift.
  */
-export function normaliseKind(kind) {
+function normaliseKind(kind) {
   const k = String(kind ?? '').toLowerCase();
   if (!k) return '';
   if (GROUP_KINDS.has(k)) return 'group';
@@ -92,7 +93,7 @@ function boundsFrom(layer) {
  * @param {object[]} layers  nested `{id, name, kind, bounds, layers?}`
  * @returns {object[]} flat `{layerID, name, kind, bounds, groupPath}`
  */
-export function flattenLayerTree(layers, groupPath = []) {
+function flattenLayerTree(layers, groupPath = []) {
   const out = [];
   for (const layer of layers ?? []) {
     const bounds = boundsFrom(layer);
@@ -121,7 +122,7 @@ export function flattenLayerTree(layers, groupPath = []) {
  * @param {{name:string,width:number,height:number}} document
  * @param {object[]} layers nested host layers
  */
-export function treeFrameFor(document, layers) {
+function treeFrameFor(document, layers) {
   return {
     type: 'tree',
     document: {
@@ -145,7 +146,7 @@ export function treeFrameFor(document, layers) {
  * visibility and rename alike, and which one it was is only in the descriptor
  * -- see `changeForNotification`.
  */
-export const PHOTOSHOP_EVENTS = {
+const PHOTOSHOP_EVENTS = {
   move: 'move',
   transform: 'transform',
   free: 'transform',
@@ -187,7 +188,7 @@ const SET_FIELDS = [
  * @param {object} descriptor the descriptor it came with
  * @returns {{change:string|null, known:boolean, mappable:boolean, requiresPixels:boolean}}
  */
-export function changeForNotification(event, descriptor = {}) {
+function changeForNotification(event, descriptor = {}) {
   let change = PHOTOSHOP_EVENTS[event] ?? null;
 
   if (!change && event === 'set') {
@@ -222,13 +223,15 @@ export function changeForNotification(event, descriptor = {}) {
  * This is a coalescer, not a debouncer -- it has no timer and no clock. When
  * to call it is the caller's decision, which is what makes it testable.
  */
-export function coalesceEvents(events) {
+function coalesceEvents(events) {
   const order = [];
   const latest = new Map();
   for (const e of events ?? []) {
-    const key = `${e.change} ${e.layerID ?? ''}`;
+    const key = `${e.change}::${e.layerID ?? ''}`;
     if (!latest.has(key)) order.push(key);
     latest.set(key, e);
   }
   return order.map((k) => latest.get(k));
 }
+
+module.exports = { PHOTOSHOP_ADJUSTMENT_KINDS, PHOTOSHOP_EVENTS, normaliseKind, flattenLayerTree, treeFrameFor, changeForNotification, coalesceEvents };
