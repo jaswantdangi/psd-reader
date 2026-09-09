@@ -209,16 +209,62 @@ function noteSkipped(change) {
  * would drop those layers to a looser match tier. The shape is logged once, at
  * `Run diagnostics`, so this stops being a guess.
  */
+/**
+ * The layer's kind, as a string the shared matcher can read.
+ *
+ * `Layer.kind` returns a **LayerKind enum object**, not a string — so
+ * `String(layer.kind)` can yield `[object Object]`, and every group would then
+ * look like a raster layer and try to match one. Groups are therefore detected
+ * STRUCTURALLY, by the presence of `layers`, which Adobe documents as existing
+ * only on a group. That is the one classification that must not be wrong: a
+ * group matching a real layer is a mis-mapped edit.
+ *
+ * Everything else falls back through the enum's likely shapes and finally to
+ * an empty string, which the matcher reports rather than guesses at.
+ */
+function hostKind(layer) {
+  if (layer.layers !== undefined && layer.layers !== null) return 'group';
+  const k = layer.kind;
+  if (k === undefined || k === null) return '';
+  if (typeof k === 'string') return k;
+  return String(k.name || k._value || k.value || '');
+}
+
+/**
+ * The layer's bounds, WITHOUT layer effects.
+ *
+ * Adobe documents `Layer.bounds` as "bounds of the layer, INCLUDING the
+ * effects". The app's bounds come from the PSD layer record, which is the
+ * pixel rectangle with no effects in it — so on any layer carrying a drop
+ * shadow, glow or stroke the two sides would disagree, the signature would not
+ * match, and the layer would silently fail to sync.
+ *
+ * `boundsNoEffects` is the same rectangle with effects excluded, which is what
+ * the app actually has. Falls back to `bounds` on a build that lacks it, and
+ * `boundsUsed` records which so the diagnostics can say.
+ */
+let boundsUsed = null;
+
+function hostBounds(layer) {
+  if (layer.boundsNoEffects) {
+    if (!boundsUsed) boundsUsed = 'boundsNoEffects';
+    return layer.boundsNoEffects;
+  }
+  if (!boundsUsed) boundsUsed = 'bounds (NO boundsNoEffects on this build — layers with effects may not match)';
+  return layer.bounds;
+}
+
 function hostLayers(layers) {
   const list = [];
   for (let i = layers.length - 1; i >= 0; i--) {
     const layer = layers[i];
-    const nested = layer.layers && layer.layers.length ? hostLayers(layer.layers) : undefined;
+    const kids = layer.layers;
+    const nested = kids && kids.length ? hostLayers(kids) : undefined;
     list.push({
       id: layer.id,
       name: layer.name,
-      kind: String(layer.kind == null ? '' : layer.kind),
-      bounds: layer.bounds,
+      kind: hostKind(layer),
+      bounds: hostBounds(layer),
       layers: nested,
     });
   }
@@ -370,13 +416,37 @@ function onNotification(event, descriptor) {
 
 // ------------------------------------------------------------- lifecycle
 
+/** Set once the first notification of any kind arrives. */
+let heardAnything = false;
+
 function subscribe() {
   // VERIFY-FIXED: plain strings, which is Adobe's documented form. The object
   // form the first version used subscribed to nothing at all.
   const result = action.addNotificationListener(WATCHED, (event, descriptor) => {
+    if (!heardAnything) {
+      heardAnything = true;
+      // "Subscribed" is not the same as "receiving", and the difference is
+      // invisible until something is expected and never comes. This line is
+      // the proof that the subscription is real.
+      good(`FIRST notification received ("${event}") — the subscription is live`);
+    }
     guard('notification handler', () => onNotification(event, descriptor));
   });
+
+  // The call may hand back a promise rather than a listener. Storing the
+  // promise itself would make `listener.remove()` fail on teardown, quietly
+  // leaving the subscription attached for the life of the panel.
+  if (result && typeof result.then === 'function') {
+    info('addNotificationListener returned a promise — resolving it');
+    result.then(
+      (resolved) => { listener = resolved; good(`subscribed to ${WATCHED.length} notification types`); },
+      (e) => fail('addNotificationListener rejected:', e && e.message ? e.message : String(e)),
+    );
+    return null;
+  }
+
   good(`subscribed to ${WATCHED.length} notification types`);
+  info('now make an edit in Photoshop — a move or a rename — and watch for the FIRST notification line');
   return result;
 }
 
@@ -421,6 +491,22 @@ function onFrame(frame) {
     fail(`relay refused: ${frame.code} — ${frame.message}`);
     teardown(`Relay refused: ${frame.message} (${frame.code})`, 'failed');
   }
+}
+
+/** JSON that cannot throw. Host objects are not always serialisable. */
+function safeJson(value) {
+  try { return JSON.stringify(value); } catch (e) { return `(unserialisable: ${e.message})`; }
+}
+
+/** Every layer in the tree, groups included — what the frame SHOULD contain. */
+function countLayers(layers) {
+  let n = 0;
+  for (let i = 0; i < layers.length; i++) {
+    n++;
+    const kids = layers[i].layers;
+    if (kids && kids.length) n += countLayers(kids);
+  }
+  return n;
 }
 
 // ------------------------------------------------------- staged progress
@@ -648,18 +734,43 @@ function diagnose() {
     if (!first) { warn('the document has no layers'); return; }
     info('layer.id      ', typeof first.id, first.id);
     info('layer.name    ', typeof first.name, first.name);
-    info('layer.kind    ', typeof first.kind, String(first.kind));
-    let bounds = '(threw)';
-    try { bounds = JSON.stringify(first.bounds); } catch (e) { bounds = `(threw: ${e.message})`; }
-    info('layer.bounds  ', bounds);
-    info('layer.layers  ', first.layers ? `${first.layers.length} children` : 'undefined (not a group)');
+
+    // `kind` is a LayerKind ENUM OBJECT, not a string. Printing the raw form
+    // alongside what we reduce it to is how a wrong reduction becomes visible.
+    info('layer.kind    ', `typeof=${typeof first.kind} raw=${safeJson(first.kind)} -> hostKind="${hostKind(first)}"`);
+
+    // The bounds question that decides whether layers with effects match.
+    let withEffects = '(threw)';
+    let without = '(absent)';
+    try { withEffects = safeJson(first.bounds); } catch (e) { withEffects = `(threw: ${e.message})`; }
+    try { without = first.boundsNoEffects ? safeJson(first.boundsNoEffects) : '(absent on this build)'; } catch (e) { without = `(threw: ${e.message})`; }
+    info('layer.bounds            ', withEffects, '  <- INCLUDES effects');
+    info('layer.boundsNoEffects   ', without, '  <- what the app has, and what we send');
+    if (withEffects !== without && without !== '(absent on this build)') {
+      warn('the two differ on this layer, which is exactly why boundsNoEffects is used');
+    }
+
+    // Adobe documents `layers` as existing only on a group. Groups are
+    // detected by its presence, so if a NON-group has it this assumption is
+    // wrong and every layer would be classified as a group.
+    info('layer.layers  ', first.layers === undefined ? 'undefined (good: not a group)' : `present, ${first.layers.length} children`);
   });
 
   guard('tree frame', () => {
     const frame = currentTreeFrame();
     if (!frame) { warn('currentTreeFrame() returned null'); return; }
-    good(`tree frame builds: ${frame.layers.length} layers`);
-    info('first entry:', JSON.stringify(frame.layers[0]));
+    good(`tree frame builds: ${frame.layers.length} layers · bounds read from ${boundsUsed}`);
+    info('first entry:', safeJson(frame.layers[0]));
+
+    // A layer whose bounds could not be read is DROPPED by flattenLayerTree,
+    // so a shortfall here means the app will never hear about those layers.
+    const counted = countLayers(doc.layers);
+    if (frame.layers.length !== counted) {
+      warn(`${counted} layers in the document but ${frame.layers.length} in the frame — ${counted - frame.layers.length} had unreadable bounds and were dropped`);
+    }
+    const kinds = {};
+    frame.layers.forEach((l) => { kinds[l.kind] = (kinds[l.kind] || 0) + 1; });
+    info('kinds sent:', safeJson(kinds));
   });
 
   info('--- end diagnostics ---');
