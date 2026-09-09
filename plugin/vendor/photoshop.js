@@ -154,6 +154,10 @@ const PHOTOSHOP_EVENTS = {
   duplicate: 'add',
   make: 'add',
   delete: 'delete',
+  // Photoshop fires these rather than a `set` when a layer's eye is toggled.
+  // Without them a hide or a show is simply an event nobody claimed.
+  hide: 'visibility',
+  show: 'visibility',
   crop: 'crop',
   canvasSize: 'canvasSize',
   paint: 'brush',

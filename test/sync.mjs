@@ -715,6 +715,15 @@ test('the pixel-path changes are marked as needing pixels, not as mappable', () 
   }
 });
 
+test('hide and show are visibility, not unclaimed events', () => {
+  // Photoshop fires these rather than a `set` when a layer's eye is toggled.
+  // Without them a hide or a show was an event nobody claimed, so toggling
+  // visibility simply did nothing and said nothing.
+  assert.equal(changeForNotification('hide').change, 'visibility');
+  assert.equal(changeForNotification('show').change, 'visibility');
+  assert.equal(changeForNotification('hide').mappable, true);
+});
+
 test('a burst collapses to the last of each layer, keeping first-seen order', () => {
   // One drag is dozens of `move` notifications, all superseded by the last.
   const collapsed = coalesceEvents([
@@ -801,6 +810,34 @@ test('the vendored copy behaves identically to the original', () => {
     cjs.coalesceEvents([{ change: 'move', layerID: 7, props: { x: 1 } }, { change: 'move', layerID: 7, props: { x: 2 } }]),
     coalesceEvents([{ change: 'move', layerID: 7, props: { x: 1 } }, { change: 'move', layerID: 7, props: { x: 2 } }]),
   );
+});
+
+test('the plugin refuses to build a payload it would have to guess at', () => {
+  // `reorder` has to name the neighbour the layer now sits above. The plugin
+  // cannot read that yet, and the previous version sent `belowLayerID: null`
+  // -- which translateEvent reads as "bottom of the stack", so EVERY reorder
+  // moved the layer to the bottom wherever it was actually dropped. A wrong
+  // edit on the right layer is no better than the right edit on the wrong one.
+  const main = fs.readFileSync('plugin/main.js', 'utf8');
+  // Comments stripped: the explanation of why this is wrong necessarily
+  // contains the thing being banned.
+  const code = main.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.equal(code.includes('belowLayerID: null'), false,
+    'plugin/main.js must not send a null belowLayerID — it means "move to the bottom"');
+  assert.ok(/case 'reorder': return null;/.test(code), 'reorder must refuse rather than guess');
+
+  // And the proof that null actually means "bottom", so nobody re-adds it
+  // thinking it is a harmless placeholder.
+  const mapping = matchLayers(
+    [ps(1, 'a', 'pixel', [0, 0, 10, 10]), ps(2, 'b', 'pixel', [0, 0, 10, 10], ['G'])],
+    [app(11, 0, 'a', 'raster', [0, 0, 10, 10]), app(12, 1, 'b', 'raster', [0, 0, 10, 10], 'G')],
+  );
+  const result = translateEvent(
+    { type: 'event', change: 'reorder', layerID: 2, props: { belowLayerID: null } },
+    mapping, { order: [11, 12] },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.command.to, 0, 'null belowLayerID lands the layer at index 0 — the bottom');
 });
 
 test('plugin/main.js is a classic CommonJS script', () => {

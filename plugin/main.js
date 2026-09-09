@@ -150,6 +150,8 @@ let sentCount = 0;
 const skipped = new Map();
 /** Raw descriptors already logged, so one drag does not print two hundred of them. */
 const sampled = new Set();
+/** Changes whose unreadable descriptor has already been printed once. */
+const sampledPayload = new Set();
 
 // ------------------------------------------------------------------- view
 
@@ -336,7 +338,7 @@ function layerIdFrom(descriptor) {
  * descriptor for each change kind is logged once per session so they can be
  * corrected against reality.
  */
-function propsFor(change, descriptor) {
+function propsFor(change, descriptor, event) {
   const to = (descriptor && descriptor.to) || {};
   switch (change) {
     case 'move':
@@ -357,17 +359,57 @@ function propsFor(change, descriptor) {
       const mode = to.mode || to.blendMode;
       return { blendMode: String((mode && mode._value) || mode || 'normal') };
     }
-    case 'visibility': return { visible: !!(to.visible !== undefined ? to.visible : descriptor.visible) };
+    case 'visibility': {
+      // `hide` and `show` say it in the event name; a `set` says it in `to`.
+      if (event === 'hide') return { visible: false };
+      if (event === 'show') return { visible: true };
+      const v = to.visible !== undefined ? to.visible : descriptor.visible;
+      if (typeof v !== 'boolean') return null;
+      return { visible: v };
+    }
     case 'rename': return { name: String(to.name == null ? '' : to.name) };
     case 'retype': return { text: to.textKey || {} };
-    case 'reorder': return { belowLayerID: null };
+
+    /**
+     * REFUSED, not guessed.
+     *
+     * A reorder has to name the neighbour the layer now sits above, and that
+     * is not something this plugin can read yet. The previous version sent
+     * `belowLayerID: null`, which `reorderIndices` reads as "bottom of the
+     * stack" -- so EVERY reorder moved the layer to the bottom, wherever it
+     * had actually been dropped. That is a wrong edit applied to the right
+     * layer, which is no better than the reverse.
+     */
+    case 'reorder': return null;
+
+    /**
+     * Also refused unless the rectangle is actually in the descriptor.
+     *
+     * After a crop, `doc.width`/`doc.height` are the size AFTER cropping, and
+     * the offset is gone. Sending `{x: 0, y: 0, width, height}` would set the
+     * app's frame to the full new size at the origin, which is only correct
+     * for a crop that happened to start at 0,0.
+     */
     case 'crop':
-    case 'canvasSize': {
-      const doc = app.activeDocument;
-      return { x: 0, y: 0, width: doc ? doc.width : 0, height: doc ? doc.height : 0 };
-    }
+    case 'canvasSize': return rectFrom(descriptor);
+
     default: return {};
   }
+}
+
+/** A document rectangle from a descriptor, or null when it cannot be read. */
+function rectFrom(descriptor) {
+  const num = (v) => {
+    if (typeof v === 'number') return v;
+    if (v && typeof v._value === 'number') return v._value;
+    return null;
+  };
+  const src = (descriptor && descriptor.to) || descriptor || {};
+  const left = num(src.left), top = num(src.top), right = num(src.right), bottom = num(src.bottom);
+  if ([left, top, right, bottom].every((v) => v !== null) && right > left && bottom > top) {
+    return { x: left, y: top, width: right - left, height: bottom - top };
+  }
+  return null;
 }
 
 /**
@@ -408,7 +450,22 @@ function onNotification(event, descriptor) {
     return;
   }
 
-  const entry = { change: verdict.change, props: propsFor(verdict.change, descriptor) };
+  // A null payload means "I could not build this without guessing". Sending a
+  // guess would be a wrong edit applied to the right layer, which is no better
+  // than the right edit applied to the wrong one -- so it is counted as not
+  // synced, exactly like a brush stroke, and the reason is said out loud.
+  const props = propsFor(verdict.change, descriptor, event);
+  if (props === null) {
+    noteSkipped(`${verdict.change} (payload not readable)`);
+    warn(`"${event}" -> ${verdict.change}, but its payload could not be read from the descriptor. Sending nothing rather than a guess.`);
+    if (!sampledPayload.has(verdict.change)) {
+      sampledPayload.add(verdict.change);
+      warn('descriptor was:', safeJson(descriptor).slice(0, 400));
+    }
+    return;
+  }
+
+  const entry = { change: verdict.change, props };
   if (!documentScoped) entry.layerID = layerID;
   pending.push(entry);
   scheduleFlush();
@@ -568,7 +625,10 @@ function armWatchdog() {
  * problem from "cannot connect" to one specific cause.
  */
 function preflight(wsUrl) {
-  const httpUrl = wsUrl.replace(/^ws/, 'http') + '/whoami';
+  if (typeof fetch !== 'function') { warn('this runtime has no fetch — skipping the preflight; the socket will still be attempted'); return; }
+  // Trailing slashes stripped, or a pasted address ending in "/" produces
+  // "//whoami" and a 426 that looks like the route does not exist.
+  const httpUrl = wsUrl.replace(/^ws/, 'http').replace(/\/+$/, '') + '/whoami';
   guard('preflight', () => {
     fetch(httpUrl)
       .then((res) => res.json())
@@ -785,8 +845,11 @@ function boot() {
   // throws during init is simply blank, with the reason only in a debugger
   // nobody has attached yet.
   try {
+    if (typeof window === 'undefined') { warn('no window object — uncaught errors cannot be trapped on this runtime'); }
+    else {
     window.addEventListener('error', (e) => fail('uncaught:', e.message || String(e)));
     window.addEventListener('unhandledrejection', (e) => fail('unhandled rejection:', (e.reason && e.reason.message) || String(e.reason)));
+    }
   } catch { /* older UXP */ }
 
   ui = {
