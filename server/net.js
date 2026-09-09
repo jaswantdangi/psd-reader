@@ -103,9 +103,26 @@ function normalizeOrigin(value) {
  * from reaching the relay using someone's browser. Everything that is not a
  * browser still meets the pairing code and its rate limit, which is where that
  * threat is answered.
+ *
+ * The same reasoning, followed one step further, is why a NON-WEB origin is
+ * admitted too. A page in a tab always presents `http://` or `https://` (or
+ * the literal `null`, which is what a sandboxed or `file://` document sends).
+ * Anything else -- `plugin://…`, a bare product string, whatever a host
+ * application invents -- is by definition not a page in a tab, so refusing it
+ * excludes no browser and only locks out native clients.
+ *
+ * That was not a hypothetical: the UXP plugin could not connect at all,
+ * because it is not a web page and the allowlist was being applied to it as
+ * though it were.
  */
+const isBrowserOrigin = (normalized) => /^https?:\/\//.test(normalized) || normalized === 'null';
+
 export function originAllowed(origin, allowedOrigins) {
   if (origin === undefined || origin === null) return true;
   if (!allowedOrigins.length) return true;
-  return allowedOrigins.includes(normalizeOrigin(origin));
+  const normalized = normalizeOrigin(origin);
+  if (allowedOrigins.includes(normalized)) return true;
+  // Empty string behaves as absent: some clients send the header with no value.
+  if (!normalized) return true;
+  return !isBrowserOrigin(normalized);
 }

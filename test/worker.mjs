@@ -21,6 +21,7 @@
 import assert from 'node:assert/strict';
 import { RelayHub, timingSafeEqualStrings } from '../worker/hub.js';
 import { resolveWorkerConfig } from '../worker/config.js';
+import { originAllowed } from '../server/net.js';
 import { PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH } from '../src/sync/protocol.js';
 
 let passed = 0;
@@ -445,6 +446,70 @@ test('the alarm sweeps expired codes and re-arms only while any remain', async (
 
   assert.equal((await hub.deskNow()).size(), 0, 'the expired code is gone');
   assert.equal(ctx.alarmAt, null, 'and nothing re-arms an alarm with no codes left to sweep');
+});
+
+// --------------------------------------------------------------- origin
+
+test('a non-web origin is admitted — the allowlist only ever constrained browsers', () => {
+  // The UXP plugin could not connect at all because of this. It is not a web
+  // page, so whatever it presents is not a page origin, and applying a control
+  // designed to stop "any tab" to a native client excludes no browser and
+  // locks out the one client that is supposed to be there.
+  //
+  // Asserted on the policy rather than through `fetch`: a successful upgrade
+  // returns HTTP 101, which only workerd can construct — Node's Response
+  // refuses the status outright. The 403 path below IS driven through fetch,
+  // because that one returns an ordinary response.
+  const allowlist = ['https://app.test'];
+  for (const origin of ['plugin://com.psdreader.sync', 'app:photoshop', 'uxp', '']) {
+    assert.equal(originAllowed(origin, allowlist), true, `origin ${JSON.stringify(origin)} was refused`);
+  }
+  assert.equal(originAllowed(undefined, allowlist), true, 'no header at all is admitted');
+  assert.equal(originAllowed('https://app.test', allowlist), true, 'the allowlisted page still works');
+});
+
+test('the origin rule does not become a way around the allowlist', () => {
+  // The control still has to do its job for the case it exists for: a page in
+  // a tab. `null` is included because that is what a sandboxed or file://
+  // document sends — it IS a browser, and must not be waved through.
+  const allowlist = ['https://app.test'];
+  for (const origin of ['https://evil.test', 'http://evil.test', 'HTTPS://EVIL.TEST', 'null']) {
+    assert.equal(originAllowed(origin, allowlist), false, `browser origin ${origin} should be refused`);
+  }
+});
+
+test('a browser origin outside the allowlist is still refused', async () => {
+  // The control has to keep doing its job for the case it exists for.
+  const { hub } = makeHub();
+  for (const origin of ['https://evil.test', 'http://evil.test', 'null']) {
+    const res = await hub.fetch(new Request('https://relay.test/', {
+      headers: { Upgrade: 'websocket', Origin: origin },
+    }));
+    assert.equal(res.status, 403, `browser origin ${origin} should be refused`);
+  }
+});
+
+test('/whoami reports the origin it saw, and whether it would be admitted', async () => {
+  // A refused upgrade tells the client nothing at all -- no status, no body,
+  // no reason. This is the only way a plugin can tell "wrong address" from
+  // "refused origin", which is the exact ambiguity that stalled it.
+  const { hub } = makeHub();
+
+  const seen = await (await hub.fetch(new Request('https://relay.test/whoami', {
+    headers: { Origin: 'https://app.test' },
+  }))).json();
+  assert.equal(seen.origin, 'https://app.test');
+  assert.equal(seen.allowed, true);
+  assert.equal(seen.sentOriginHeader, true);
+
+  const refused = await (await hub.fetch(new Request('https://relay.test/whoami', {
+    headers: { Origin: 'https://evil.test' },
+  }))).json();
+  assert.equal(refused.allowed, false, 'and it says no when the answer is no');
+
+  const bare = await (await hub.fetch(new Request('https://relay.test/whoami'))).json();
+  assert.equal(bare.sentOriginHeader, false);
+  assert.equal(bare.allowed, true, 'no Origin header is always admitted');
 });
 
 // ---------------------------------------------------------------- stats

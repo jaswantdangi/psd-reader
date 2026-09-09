@@ -128,6 +128,7 @@ export class RelayHub {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === '/stats') return this.statsResponse(request);
+    if (url.pathname === '/whoami') return this.whoami(request);
     if (request.headers.get('Upgrade') !== 'websocket') return this.notWebSocket();
 
     // Checked BEFORE a socket exists, exactly as the Node relay does it: an
@@ -167,6 +168,31 @@ export class RelayHub {
       status: 426,
       headers: { 'content-type': 'text/plain' },
     });
+  }
+
+  /**
+   * What origin did the relay actually receive, and would it be admitted?
+   *
+   * This exists because a rejected WebSocket upgrade tells the client NOTHING.
+   * The handshake fails with a bare `error` event and no status, no body and
+   * no reason, so a plugin that cannot connect has no way to learn whether it
+   * was the address, the network, or the origin allowlist -- which is exactly
+   * the position the UXP plugin was in.
+   *
+   * No token guards it, deliberately: it reflects the caller's own origin back
+   * at them and says yes or no. A caller already knows its own origin, and the
+   * allowlist itself is the app's public URL. There is nothing here to leak.
+   */
+  whoami(request) {
+    const origin = request.headers.get('Origin');
+    return new Response(`${JSON.stringify({
+      origin: origin === null ? null : origin,
+      sentOriginHeader: origin !== null,
+      allowed: originAllowed(origin === null ? undefined : origin, this.config.allowedOrigins),
+      hint: origin === null
+        ? 'no Origin header was sent, which is always admitted'
+        : 'a browser page origin must be in RELAY_ALLOWED_ORIGINS; anything else is admitted',
+    })}\n`, { status: 200, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
   }
 
   // -------------------------------------------------------------- frames

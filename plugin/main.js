@@ -420,6 +420,35 @@ function onFrame(frame) {
   }
 }
 
+/**
+ * Ask the relay what origin it received, and whether it would admit us.
+ *
+ * Fire and forget: the socket opens regardless, because this is a diagnostic,
+ * not a gate. Whatever it prints -- including its own failure -- narrows the
+ * problem from "cannot connect" to one specific cause.
+ */
+function preflight(wsUrl) {
+  const httpUrl = wsUrl.replace(/^ws/, 'http') + '/whoami';
+  guard('preflight', () => {
+    fetch(httpUrl)
+      .then((res) => res.json())
+      .then((body) => {
+        info(`relay sees origin: ${JSON.stringify(body.origin)} · admitted: ${body.allowed}`);
+        if (!body.allowed) {
+          fail('THE RELAY WILL REFUSE THIS ORIGIN. The socket cannot open until it is allowed.');
+          fail(body.hint || '');
+        }
+      })
+      .catch((e) => {
+        // Reaching /whoami and failing is different from not reaching it. If
+        // this fails too, the address or network.domains is wrong -- not the
+        // allowlist.
+        warn(`preflight to ${httpUrl} failed: ${e && e.message ? e.message : String(e)}`);
+        warn('if this failed, the problem is the address or manifest.json network.domains — not the origin');
+      });
+  });
+}
+
 function connect() {
   const url = ui.relay.value.trim();
   const code = ui.code.value.trim().toUpperCase();
@@ -435,6 +464,15 @@ function connect() {
 
   info(`connecting to ${url}`);
   setStatus('Connecting…', 'working');
+
+  // Ask the relay what it sees BEFORE opening the socket.
+  //
+  // A refused WebSocket upgrade reports nothing: a bare `error` event with no
+  // status, no body, no reason. So "cannot connect" could equally be the
+  // address, the network, `network.domains`, or the origin allowlist -- and
+  // guessing between those is exactly where this plugin got stuck. One plain
+  // HTTPS request answers it, and its failure is itself informative.
+  preflight(url);
 
   socket = guard('new WebSocket', () => new WebSocket(url));
   if (!socket) { setStatus('Could not create a socket. See the log.', 'failed'); return; }
