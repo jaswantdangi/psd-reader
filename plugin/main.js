@@ -382,6 +382,8 @@ function subscribe() {
 
 function onPaired() {
   paired = true;
+  if (watchdog !== null) { clearTimeout(watchdog); watchdog = null; }
+  stage(6, "the relay accepted the code");
   const frame = guard('reading the document', currentTreeFrame);
   if (!frame) {
     setStatus('Paired, but no document could be read. Open the same file as the app.', 'failed');
@@ -398,6 +400,7 @@ function onPaired() {
 
 function teardown(message, kind) {
   paired = false;
+  if (watchdog !== null) { clearTimeout(watchdog); watchdog = null; }
   if (flushTimer !== null) { clearTimeout(flushTimer); flushTimer = null; }
   pending = [];
   if (listener && typeof listener.remove === 'function') guard('removing listener', () => listener.remove());
@@ -418,6 +421,57 @@ function onFrame(frame) {
     fail(`relay refused: ${frame.code} — ${frame.message}`);
     teardown(`Relay refused: ${frame.message} (${frame.code})`, 'failed');
   }
+}
+
+// ------------------------------------------------------- staged progress
+
+const STAGES = [
+  '',
+  'validating the address',
+  'preflight to /whoami',
+  'constructing the WebSocket',
+  'socket open',
+  'hello + pair sent',
+  'paired',
+];
+
+let reachedStage = 0;
+let watchdog = null;
+
+function stage(n, note) {
+  reachedStage = n;
+  good(`[${n}/6] ${STAGES[n]}${note ? ' — ' + note : ''}`);
+}
+
+const READY_STATES = ['CONNECTING(0)', 'OPEN(1)', 'CLOSING(2)', 'CLOSED(3)'];
+const readyStateName = (s) => {
+  const v = s && typeof s.readyState === 'number' ? s.readyState : -1;
+  return READY_STATES[v] || `unknown(${v})`;
+};
+
+/**
+ * Say where it stalled, if it stalls.
+ *
+ * The worst failure to report is the silent one: a socket that neither opens
+ * nor errors leaves every handler unfired, so nothing in the log marks the
+ * end. This fires regardless and names the last stage reached, which turns
+ * "nothing happened" into a specific accusation.
+ */
+function armWatchdog() {
+  if (watchdog !== null) clearTimeout(watchdog);
+  watchdog = setTimeout(() => {
+    watchdog = null;
+    if (reachedStage >= 6) return;
+    fail(`STALLED at stage ${reachedStage}/6 — ${STAGES[reachedStage] || 'before anything'}`);
+    if (socket) fail(`socket readyState is ${readyStateName(socket)}`);
+    if (reachedStage === 3) {
+      fail('the socket was constructed but never opened, errored or closed.');
+      fail('that is a silent handshake rejection: almost always manifest.json network.domains not listing this exact host.');
+    }
+    if (reachedStage === 5) {
+      fail('the relay never answered hello+pair. The code may be expired (5 minutes), already used, or wrong.');
+    }
+  }, 12000);
 }
 
 /**
@@ -462,7 +516,18 @@ function connect() {
     return;
   }
 
-  info(`connecting to ${url}`);
+  // Six stages, each announced. "It does not connect" is not a diagnosis; it
+  // is six different diagnoses wearing the same sentence, and the only way to
+  // tell them apart from outside is to say which one was reached.
+  stage(1, `URL ${JSON.stringify(url)}`);
+
+  if (!/^wss?:\/\//i.test(url)) {
+    fail(`the relay address must start with ws:// or wss://, not ${JSON.stringify(url.split(':')[0])}`);
+    setStatus('That is not a WebSocket address.', 'failed');
+    return;
+  }
+  if (/\/$/.test(url)) warn('the address ends in a slash; that is usually harmless but not always');
+
   setStatus('Connecting…', 'working');
 
   // Ask the relay what it sees BEFORE opening the socket.
@@ -472,35 +537,89 @@ function connect() {
   // address, the network, `network.domains`, or the origin allowlist -- and
   // guessing between those is exactly where this plugin got stuck. One plain
   // HTTPS request answers it, and its failure is itself informative.
+  stage(2, 'preflight to /whoami');
   preflight(url);
 
+  stage(3, 'constructing the WebSocket');
   socket = guard('new WebSocket', () => new WebSocket(url));
-  if (!socket) { setStatus('Could not create a socket. See the log.', 'failed'); return; }
+  if (!socket) {
+    fail('new WebSocket(...) returned nothing or threw. See the line above.');
+    setStatus('Could not create a socket. See the log.', 'failed');
+    return;
+  }
+  info(`socket constructed · readyState ${readyStateName(socket)}`);
 
-  socket.addEventListener('open', () => guard('open', () => {
-    good('socket open');
+  const onOpen = () => guard('open handler', () => {
+    stage(4, `socket OPEN · readyState ${readyStateName(socket)}`);
     setStatus('Pairing…', 'working');
     send({ type: 'hello', role: 'plugin', version: PLUGIN_VERSION });
     send({ type: 'pair', code: code });
+    stage(5, 'sent hello + pair — waiting for the relay to answer');
     showConnected(true);
-  }));
-
-  socket.addEventListener('message', (e) => guard('message', () => {
-    let frame = null;
-    try { frame = JSON.parse(e.data); } catch { fail('a frame was not JSON:', String(e.data).slice(0, 120)); return; }
-    info('recv', frame.type, frame.code || '');
-    onFrame(frame);
-  }));
-
-  socket.addEventListener('close', () => { if (socket) teardown('Disconnected.', ''); });
-
-  socket.addEventListener('error', () => {
-    // A failed handshake reaches here with no detail -- the security model
-    // gives none. Naming the two things it almost always is beats repeating
-    // the word "error".
-    fail('socket error — the relay is unreachable, or its host is not in manifest.json network.domains');
-    teardown('Could not reach the relay. Check it is running, and that its address is in manifest.json.', 'failed');
   });
+
+  const onMessage = (e) => guard('message handler', () => {
+    let frame = null;
+    const raw = e && e.data !== undefined ? e.data : e;
+    try { frame = JSON.parse(raw); }
+    catch { fail('a frame was not JSON:', String(raw).slice(0, 160)); return; }
+    info(`recv ${frame.type}${frame.code ? ' ' + frame.code : ''}`);
+    onFrame(frame);
+  });
+
+  const onClose = (e) => guard('close handler', () => {
+    // The close code is the most informative thing a failed socket ever says.
+    // 1006 means the connection died without a close frame -- which is what a
+    // rejected upgrade looks like from the client side.
+    const code = e && e.code !== undefined ? e.code : '(none)';
+    const reason = e && e.reason ? e.reason : '(no reason given)';
+    const clean = e && e.wasClean !== undefined ? e.wasClean : '(unknown)';
+    fail(`socket CLOSED · code ${code} · reason ${JSON.stringify(reason)} · clean ${clean}`);
+    if (code === 1006) fail('1006 means the upgrade was rejected or the connection dropped before a close frame — check the preflight line above');
+    if (socket) teardown('Disconnected.', '');
+  });
+
+  const onError = (e) => guard('error handler', () => {
+    // A failed handshake reaches here with no detail -- the security model
+    // gives none -- so print whatever the event does carry rather than
+    // asserting a cause.
+    let detail = '';
+    try {
+      const bits = [];
+      for (const k of ['message', 'type', 'code', 'reason', 'error']) {
+        if (e && e[k] !== undefined) bits.push(`${k}=${JSON.stringify(String(e[k]))}`);
+      }
+      detail = bits.join(' ');
+    } catch { /* the event may not be enumerable */ }
+    fail(`socket ERROR ${detail || '(the event carried no detail — this is normal for a rejected upgrade)'}`);
+    fail('the three causes, in order of likelihood: the host is not in manifest.json network.domains · the relay refused the origin (see the preflight line) · the address or network is wrong');
+    teardown('Could not reach the relay. See the log.', 'failed');
+  });
+
+  // BOTH wiring styles. Adobe's documentation uses `ws.onopen = ...`, and
+  // whether UXP's WebSocket also implements addEventListener is not something
+  // to bet the whole connection on -- if it does not, the socket opens and no
+  // handler ever runs, which looks exactly like "it will not connect".
+  //
+  // `wired` records which mechanism actually took, so a run says so rather
+  // than leaving it to be guessed at again.
+  const wired = [];
+  try { socket.onopen = onOpen; socket.onmessage = onMessage; socket.onclose = onClose; socket.onerror = onError; wired.push('on* handlers'); }
+  catch (e) { warn('assigning on* handlers threw:', e.message); }
+
+  if (typeof socket.addEventListener === 'function') {
+    // Guarded against double-firing: if on* took, these are the same calls
+    // again. Both paths are idempotent -- `send` checks readyState, and
+    // `teardown` clears `socket` first -- so a duplicate is harmless.
+    wired.push('addEventListener');
+  } else {
+    warn('this WebSocket has no addEventListener — on* handlers are the only wiring, which is why both are attempted');
+  }
+  info(`socket wired via: ${wired.join(' + ') || 'NOTHING — no handler could be attached'}`);
+
+  // If nothing has happened by now, say which stage it stalled at. A silent
+  // socket is the hardest failure to report, because nothing fires at all.
+  armWatchdog();
 }
 
 // ---------------------------------------------------------- diagnostics
@@ -571,6 +690,15 @@ function boot() {
   if (missing.length) fail('missing DOM elements:', missing.join(', '));
 
   info(`panel booted · plugin ${PLUGIN_VERSION}`);
+
+  // What this runtime actually provides. Every one of these was assumed by
+  // the first version, and a wrong assumption here is invisible: the code
+  // runs, nothing happens, and nothing says why.
+  info('capabilities:',
+    'WebSocket=' + typeof WebSocket,
+    'fetch=' + typeof fetch,
+    'addEventListener=' + typeof document.addEventListener,
+    'clipboard=' + (typeof navigator !== 'undefined' && navigator.clipboard ? 'yes' : 'no'));
 
   try {
     loadHost();
