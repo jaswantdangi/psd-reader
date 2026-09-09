@@ -1,0 +1,47 @@
+{
+  "_comment": [
+    "DIAGNOSTIC MANIFEST — not for shipping.",
+    "",
+    "If the panel loads but the socket errors immediately with an empty error,",
+    "the question is whether `network.domains` is the cause. Swap this file in",
+    "as manifest.json, reload the plugin in UDT, and try again.",
+    "",
+    "  It connects  -> the domain entries were the problem. Put the real",
+    "                  manifest back and fix the entry rather than shipping",
+    "                  'all', which grants the plugin the whole internet.",
+    "  It still fails -> the domains were never the problem. Look at the",
+    "                  subprotocol, the origin (the panel's preflight line",
+    "                  says what the relay saw), or the address itself.",
+    "",
+    "`domains: \"all\"` is a STRING, not an array. That is the documented form",
+    "and passing [\"all\"] does not do the same thing."
+  ],
+  "manifestVersion": 5,
+  "id": "com.psdreader.sync",
+  "name": "PSD Reader Sync (all domains)",
+  "version": "0.2.0",
+  "main": "index.html",
+  "host": {
+    "app": "PS",
+    "minVersion": "23.3.0"
+  },
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "syncPanel",
+      "label": {
+        "default": "PSD Reader Sync (all domains)"
+      },
+      "minimumSize": { "width": 230, "height": 300 },
+      "maximumSize": { "width": 2000, "height": 2000 },
+      "preferredDockedSize": { "width": 320, "height": 520 },
+      "preferredFloatingSize": { "width": 320, "height": 520 }
+    }
+  ],
+  "requiredPermissions": {
+    "network": {
+      "domains": "all"
+    },
+    "clipboard": "readAndWrite"
+  }
+}

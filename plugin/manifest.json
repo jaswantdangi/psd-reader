@@ -25,10 +25,7 @@
     "network": {
       "domains": [
         "wss://psd-sync-relay.jaswantdangi00.workers.dev",
-        "https://psd-sync-relay.jaswantdangi00.workers.dev",
-        "ws://localhost:8787",
-        "wss://localhost:8787",
-        "http://localhost:8787"
+        "https://psd-sync-relay.jaswantdangi00.workers.dev"
       ]
     },
     "clipboard": "readAndWrite"

@@ -160,7 +160,20 @@ export class RelayHub {
       openedAt: Date.now(),
     });
 
-    return new Response(null, { status: 101, webSocket: client });
+    // Echo any requested subprotocol.
+    //
+    // If a client asks for one and the server does not confirm it, the client
+    // MUST fail the connection -- and it fails the way every UXP report of
+    // this describes: `onerror` immediately, with an empty error and no
+    // status to inspect. Adobe's own WebSocket example passes a subprotocol
+    // (`new WebSocket(url, "wss")`), so a plugin arriving with one is not
+    // hypothetical. Echoing the first requested value costs nothing and
+    // removes the whole failure class.
+    const requested = request.headers.get('Sec-WebSocket-Protocol');
+    const headers = {};
+    if (requested) headers['Sec-WebSocket-Protocol'] = requested.split(',')[0].trim();
+
+    return new Response(null, { status: 101, webSocket: client, headers });
   }
 
   notWebSocket() {

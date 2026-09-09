@@ -649,7 +649,12 @@ function preflight(wsUrl) {
   });
 }
 
-function connect() {
+/** True once a socket has actually opened, so a retry knows it is not needed. */
+let everOpened = false;
+/** The subprotocol retry has been spent. One experiment, not a loop. */
+let triedSubprotocol = false;
+
+function connect(protocol) {
   const url = ui.relay.value.trim();
   const code = ui.code.value.trim().toUpperCase();
 
@@ -686,8 +691,8 @@ function connect() {
   stage(2, 'preflight to /whoami');
   preflight(url);
 
-  stage(3, 'constructing the WebSocket');
-  socket = guard('new WebSocket', () => new WebSocket(url));
+  stage(3, `constructing the WebSocket${protocol ? ` with subprotocol "${protocol}"` : ''}`);
+  socket = guard('new WebSocket', () => (protocol ? new WebSocket(url, protocol) : new WebSocket(url)));
   if (!socket) {
     fail('new WebSocket(...) returned nothing or threw. See the line above.');
     setStatus('Could not create a socket. See the log.', 'failed');
@@ -696,6 +701,7 @@ function connect() {
   info(`socket constructed · readyState ${readyStateName(socket)}`);
 
   const onOpen = () => guard('open handler', () => {
+    everOpened = true;
     stage(4, `socket OPEN · readyState ${readyStateName(socket)}`);
     setStatus('Pairing…', 'working');
     send({ type: 'hello', role: 'plugin', version: PLUGIN_VERSION });
@@ -738,7 +744,27 @@ function connect() {
       detail = bits.join(' ');
     } catch { /* the event may not be enumerable */ }
     fail(`socket ERROR ${detail || '(the event carried no detail — this is normal for a rejected upgrade)'}`);
-    fail('the three causes, in order of likelihood: the host is not in manifest.json network.domains · the relay refused the origin (see the preflight line) · the address or network is wrong');
+
+    // ONE automatic experiment, rather than another guess.
+    //
+    // Adobe's own WebSocket example passes a subprotocol -- `new
+    // WebSocket(url, "wss")` -- and if this runtime needs one, a socket opened
+    // without it fails exactly like this: immediately, with an empty error.
+    // Retrying once with it costs a second and turns a hypothesis into a
+    // result either way. The relay echoes whatever is requested, so the
+    // handshake cannot fail for want of confirmation.
+    if (!everOpened && !triedSubprotocol) {
+      triedSubprotocol = true;
+      warn('retrying once WITH a subprotocol ("wss"), which is the form Adobe\'s own example uses…');
+      socket = null;
+      connect('wss');
+      return;
+    }
+
+    fail('the causes, in order of likelihood:');
+    fail('  1. the host is not in manifest.json network.domains — try plugin/manifest.all-domains.json to prove it');
+    fail('  2. the relay refused the origin — see the preflight line above');
+    fail('  3. the address or the network is wrong');
     teardown('Could not reach the relay. See the log.', 'failed');
   });
 
@@ -883,7 +909,7 @@ function boot() {
     setStatus('Could not reach the Photoshop API. See the log.', 'failed');
   }
 
-  if (ui.connect) ui.connect.addEventListener('click', () => guard('connect', connect));
+  if (ui.connect) ui.connect.addEventListener('click', () => guard('connect', () => { triedSubprotocol = false; everOpened = false; connect(); }));
   if (ui.disconnect) ui.disconnect.addEventListener('click', () => guard('disconnect', () => teardown('Disconnected.', '')));
   if (ui.diagnose) ui.diagnose.addEventListener('click', () => guard('diagnose', diagnose));
   if (ui.clearlog) ui.clearlog.addEventListener('click', () => { logLines.length = 0; clearChildren(logbox); });
