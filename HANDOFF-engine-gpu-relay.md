@@ -55,7 +55,12 @@ to end, and deploy it — then hand back only what genuinely cannot be verified 
   the app was never told, and the plugin's first frame found no peer. Fixed with
   `crypto.randomUUID()`. `test/worker.mjs` reproduces it red in both socket orders. **A live
   repro did NOT reproduce it**: it takes an eviction *and* an unlucky order, and Cloudflare
-  evicts on its own schedule — so the unit test is the proof, not the live run
+  evicts on its own schedule — so the unit test is the proof, not the live run.
+  **A real Photoshop run then showed it directly**, which is stronger than either: two
+  `recv paired` lines on one socket, the tree sent twice, then `peer-gone`. The relay sends
+  one `paired` per side, so receiving both means it addressed both to the plugin. That run
+  (2026-09-09 14:49 UTC) was on relay `17297bd7`; the fix went live as `1bdcec59` on
+  2026-09-10 08:27 UTC. The plugin now refuses a second `paired` and names the cause
 - [ ] **Confirm edits actually flow.** Connecting is verified; turning Photoshop events into
   correct frames is not. Two seams remain: `layerIdFrom` (reading the layer id out of a
   notification) and `propsFor` (the payload per change). Both log the raw descriptor the first
