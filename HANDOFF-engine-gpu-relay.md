@@ -45,8 +45,21 @@ to end, and deploy it — then hand back only what genuinely cannot be verified 
 
 ## Not Yet Done
 
-- [ ] **Run the UXP plugin.** `plugin/main.js` has never executed. This is the ONLY unverified
-  part of sync, and `plugin/README.md` ranks the five seams by likelihood of failure
+- [x] **The UXP plugin loads and connects** — confirmed by a real run in Photoshop. It then
+  dropped with `peer-gone` straight after pairing, and that was **a relay bug, not a plugin
+  one.** Socket ids came from an in-memory counter (`s${this.nextId++}`), but a Durable
+  Object's constructor **re-runs on every wake**, so the counter restarted at 1. An app that
+  connected before an eviction and a plugin that connected after it could both be `s1`, and
+  `onPair`'s `find(id === owner)` then returned whichever `ctx.getWebSockets()` listed first —
+  an order Cloudflare does not specify. When that was the plugin, it paired **with itself**,
+  the app was never told, and the plugin's first frame found no peer. Fixed with
+  `crypto.randomUUID()`. `test/worker.mjs` reproduces it red in both socket orders. **A live
+  repro did NOT reproduce it**: it takes an eviction *and* an unlucky order, and Cloudflare
+  evicts on its own schedule — so the unit test is the proof, not the live run
+- [ ] **Confirm edits actually flow.** Connecting is verified; turning Photoshop events into
+  correct frames is not. Two seams remain: `layerIdFrom` (reading the layer id out of a
+  notification) and `propsFor` (the payload per change). Both log the raw descriptor the first
+  time each kind appears, so one real editing session settles them
 - [ ] **CI's `app` job is RED, and the branch does not compile from a clean clone.**
   `app/src/app/editor/editor.page.ts:965` calls `this.seg.tool.set('')`, and the
   **committed** `segment.service.ts` has no `tool` property — it exists only in the other
