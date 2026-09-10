@@ -545,6 +545,18 @@ function onFrame(frame) {
   if (frame.type === 'paired') { guard('onPaired', onPaired); return; }
   if (frame.type === 'pair') { info('relay issued a code to the app side (not us)'); return; }
   if (frame.type === 'error') {
+    if (frame.code === 'peer-gone') {
+      // NOT a refusal of this plugin. It is the relay reporting that the OTHER
+      // side of the session is gone. Logging it as "relay refused" sent the
+      // search in the wrong direction -- toward this plugin's own connection,
+      // which was fine.
+      fail(`the other side of the session left — ${frame.message}`);
+      fail(reachedStage >= 6
+        ? 'this happened AFTER pairing: the app disconnected (tab closed, reloaded or backgrounded), or the relay lost track of it. The detail above says which.'
+        : 'this happened BEFORE pairing completed, which points at the relay pairing the wrong sockets rather than the app leaving.');
+      teardown(`The app side disconnected: ${frame.message}`, 'failed');
+      return;
+    }
     fail(`relay refused: ${frame.code} — ${frame.message}`);
     teardown(`Relay refused: ${frame.message} (${frame.code})`, 'failed');
   }

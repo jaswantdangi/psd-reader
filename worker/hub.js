@@ -64,7 +64,30 @@ export class RelayHub {
     this.config = resolveWorkerConfig(env);
     this.desk = null;
     this.originRefusals = 0;
-    this.nextId = 1;
+  }
+
+  /**
+   * A socket id that is unique for the life of the relay -- ACROSS evictions.
+   *
+   * It used to be `s${this.nextId++}`, an in-memory counter. But Cloudflare's
+   * docs are explicit that a hibernated Durable Object "is re-initialized and
+   * its constructor runs" on every wake, so that counter restarted at 1 each
+   * time. An app connected before an eviction and a plugin connected after it
+   * could both be `s1` -- and a person reading a code off one screen and typing
+   * it into Photoshop is exactly the gap in which an eviction happens.
+   *
+   * `onPair` resolves a code's owner with `find(id === owner)`. With two `s1`
+   * sockets, which one it finds depends on the order `ctx.getWebSockets()`
+   * yields them, which Cloudflare does not specify. When it found the plugin,
+   * the plugin paired WITH ITSELF, the app was never told, and the plugin's
+   * first frame found no peer and came back `peer-gone` -- "connects, then
+   * stops with a peer error", and only some of the time.
+   *
+   * A random UUID needs no state to survive the eviction, so it cannot repeat.
+   * `test/worker.mjs` reproduces the collision in both socket orders.
+   */
+  mintSocketId() {
+    return crypto.randomUUID();
   }
 
   // ----------------------------------------------------------------- desk
@@ -147,7 +170,7 @@ export class RelayHub {
     // every session, which for a relay is most of the day.
     this.ctx.acceptWebSocket(server);
     RelayHub.setState(server, {
-      id: `s${this.nextId++}`,
+      id: this.mintSocketId(),
       // Cloudflare sets this at the edge and a client cannot forge it, so the
       // rate-limit key needs none of the trusted-proxy machinery Node needs.
       key: request.headers.get('CF-Connecting-IP') ?? 'unknown',
@@ -307,7 +330,16 @@ export class RelayHub {
   route(ws, state, frame) {
     const peer = this.peerOf(ws, state.sessionId);
     if (!peer) {
-      this.send(ws, errorFrame('peer-gone', 'the paired peer is no longer connected'));
+      // NOT the same situation as the other side closing. That arrives through
+      // webSocketClose and names which side went. Here the sender holds a
+      // session that no other live socket shares: either its peer dropped
+      // without that close reaching this object, or the two were never paired
+      // to each other at all. Before socket ids were UUIDs, the second was the
+      // plugin paired WITH ITSELF after an eviction -- and it arrived here, as
+      // this, looking exactly like the other side leaving.
+      const role = state.role || 'socket';
+      this.send(ws, errorFrame('peer-gone',
+        `no other socket holds this session — the peer dropped without its close reaching the relay, or this ${role} was never actually paired to it`));
       ws.close(GOING_AWAY, 'peer-gone');
       return;
     }
@@ -361,7 +393,20 @@ export class RelayHub {
 
   // ------------------------------------------------------------ lifecycle
 
-  async webSocketClose(ws) {
+  /**
+   * A socket closed. Tell its peer WHICH side left and HOW.
+   *
+   * Cloudflare calls this with `(ws, code, reason, wasClean)`. It used to take
+   * only `ws` and send the survivor one fixed sentence -- "the paired peer is
+   * no longer connected" -- whichever side had gone and however it had gone.
+   * That discarded the only facts that separate a person closing a tab from
+   * the relay mis-pairing two sockets, and left "connects, then stops with a
+   * peer error" undiagnosable from either end.
+   *
+   * The code stays `peer-gone`: both clients switch on it. Only the message
+   * grows.
+   */
+  async webSocketClose(ws, code, reason, wasClean) {
     const state = RelayHub.state(ws);
 
     // An app that closes its tab takes its unredeemed code with it. Without
@@ -375,13 +420,34 @@ export class RelayHub {
 
     const peer = this.peerOf(ws, state.sessionId);
     if (peer) {
-      this.send(peer, errorFrame('peer-gone', 'the paired peer is no longer connected'));
+      // What the common codes mean to someone reading a plugin log.
+      const meaning = {
+        1000: 'closed normally',
+        1001: 'going away — a tab was closed, reloaded or navigated away',
+        1006: 'dropped without a close frame — network loss, sleep, or a killed process',
+      };
+      const who = state.role ? `the ${state.role}` : 'the other side';
+      const how = code === undefined
+        ? (reason || 'no close code was given')
+        : `close ${code}${meaning[code] ? ` — ${meaning[code]}` : ''}`
+          + `${reason ? `; reason "${String(reason).slice(0, 80)}"` : ''}`
+          + `${wasClean === false ? '; not a clean close' : ''}`;
+      this.send(peer, errorFrame('peer-gone', `${who} disconnected (${how})`));
       try { peer.close(GOING_AWAY, 'peer-gone'); } catch { /* already gone */ }
     }
+
+    // Complete the handshake. This Worker's compatibility date predates
+    // `web_socket_auto_reply_to_close` (2026-04-07), so the runtime does not
+    // answer a Close frame on its own. 1000 rather than an echo of `code`:
+    // 1005 and 1006 are reserved and may not be sent, and the departing side
+    // already knows why it left.
+    try { ws.close(1000, 'closed'); } catch { /* already closed */ }
   }
 
-  async webSocketError(ws) {
-    await this.webSocketClose(ws);
+  async webSocketError(ws, error) {
+    // An error has no close code, so its text travels as the reason instead.
+    const message = error && error.message ? error.message : String(error ?? 'unknown error');
+    await this.webSocketClose(ws, undefined, `socket error: ${message}`, false);
   }
 
   /** Drop expired codes and stale rate-limit windows, then re-arm if anything is left. */

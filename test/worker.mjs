@@ -418,6 +418,43 @@ test('the budget drains, so a slow sender is never capped', async () => {
 
 // ------------------------------------------------------------ lifecycle
 
+test('peer-gone names which side left and how, not one fixed sentence', async () => {
+  // "Connects, then stops with a peer error" was undiagnosable because every
+  // departure produced the same words. The survivor has to learn which side
+  // went and the close code -- that is what separates a person closing a tab
+  // from the relay pairing the wrong two sockets.
+  const { hub, ctx } = makeHub();
+  const { app, plugin } = await pairedPair(hub, ctx);
+  app.close();
+  await hub.webSocketClose(app, 1001, 'going away', true);
+
+  const frame = plugin.last();
+  assert.equal(frame.code, 'peer-gone', 'the code stays peer-gone — both clients switch on it');
+  assert.match(frame.message, /\bthe app\b/, 'names the app as the side that left');
+  assert.match(frame.message, /1001/, 'carries the close code');
+  assert.match(frame.message, /going away/, 'and what that code means');
+});
+
+test('an errored socket reaches the survivor as an error, not a clean close', async () => {
+  const { hub, ctx } = makeHub();
+  const { app, plugin } = await pairedPair(hub, ctx);
+  app.close();
+  await hub.webSocketError(app, new Error('connection reset'));
+
+  assert.equal(plugin.last().code, 'peer-gone');
+  assert.match(plugin.last().message, /connection reset/, 'the error text reaches the survivor');
+});
+
+test('a close with no code is described honestly rather than as an error', async () => {
+  // The fake calls webSocketClose(ws) bare. Absence of a code is not evidence
+  // of a failure, and saying "it errored" would send the search the wrong way.
+  const { hub, ctx } = makeHub();
+  const { app, plugin } = await pairedPair(hub, ctx);
+  app.close();
+  await hub.webSocketClose(app);
+  assert.match(plugin.last().message, /no close code was given/);
+});
+
 test('a vanished peer takes the session with it', async () => {
   const { hub, ctx } = makeHub();
   const { app, plugin } = await pairedPair(hub, ctx);
@@ -435,6 +472,24 @@ test('routing to a peer that is already gone refuses rather than throwing', asyn
   assert.equal(plugin.last().code, 'peer-gone');
 });
 
+test('a session nobody else holds is described as that, not as a departure', async () => {
+  // Two situations that must not read the same. A peer that CLOSED arrives
+  // through webSocketClose and names who went. A sender whose session no other
+  // live socket shares is either a peer that dropped without its close reaching
+  // the relay, or a socket paired to itself -- which is what an eviction
+  // produced before ids were UUIDs.
+  const { hub, ctx } = makeHub();
+  const { app, plugin } = await pairedPair(hub, ctx);
+  app.close(); // gone, and no webSocketClose has reached the relay
+  await hub.webSocketMessage(plugin, JSON.stringify(treeFrame));
+
+  const frame = plugin.last();
+  assert.equal(frame.code, 'peer-gone', 'the code is unchanged — clients switch on it');
+  assert.match(frame.message, /no other socket holds this session/);
+  assert.doesNotMatch(frame.message, /disconnected \(close/,
+    'must not claim a close code it never received');
+});
+
 test('the alarm sweeps expired codes and re-arms only while any remain', async () => {
   const { hub, ctx } = makeHub({ RELAY_PAIR_TTL_MS: '1' });
   await appWithCode(hub, ctx);
@@ -446,6 +501,83 @@ test('the alarm sweeps expired codes and re-arms only while any remain', async (
 
   assert.equal((await hub.deskNow()).size(), 0, 'the expired code is gone');
   assert.equal(ctx.alarmAt, null, 'and nothing re-arms an alarm with no codes left to sweep');
+});
+
+// ------------------------------------------------- eviction and socket ids
+
+/**
+ * Cloudflare's docs are explicit: "When an event arrives, the Durable Object is
+ * re-initialized and its constructor runs." So ANY in-memory counter restarts on
+ * every wake. Socket ids were minted from one -- `s${this.nextId++}` -- which
+ * means an app connected BEFORE an eviction and a plugin connected AFTER it can
+ * be handed the very same id. A person reading a code off one screen and typing
+ * it into Photoshop is exactly the gap in which an eviction happens.
+ *
+ * Whether the collision then breaks anything depends on something else nobody
+ * controls. `onPair` resolves the code's owner with `find(id === owner)`, and
+ * which of two same-id sockets it finds first depends on the order
+ * `ctx.getWebSockets()` yields them -- which Cloudflare does not specify. App
+ * first: pairing happens to work. Plugin first: the plugin pairs WITH ITSELF,
+ * the app is never told, and the first frame the plugin sends finds no peer and
+ * comes back `peer-gone`. That is the reported symptom, and it is why it is
+ * intermittent.
+ *
+ * So this runs in BOTH orders. Correctness must not depend on either.
+ */
+for (const order of ['insertion', 'reversed']) {
+  test(`pairing survives an eviction between app and plugin (${order} socket order)`, async () => {
+    const ctx = fakeCtx();
+    ctx.storage.setAlarm = async (at) => { ctx.alarmAt = at; };
+    if (order === 'reversed') {
+      const listed = ctx.getWebSockets;
+      ctx.getWebSockets = () => listed().slice().reverse();
+    }
+
+    // Before the eviction: the app connects and is issued a code.
+    const before = new RelayHub(ctx, ENV);
+    const app = open(before, ctx, 'app');
+    RelayHub.setState(app, { ...RelayHub.state(app), id: before.mintSocketId() });
+    await before.webSocketMessage(app, JSON.stringify({ type: 'hello', role: 'app', version: '1.0.0' }));
+    const { code } = app.last();
+
+    // The eviction: a brand-new instance, exactly as a wake constructs one.
+    const after = new RelayHub(ctx, ENV);
+    const plugin = open(after, ctx, 'plugin');
+    RelayHub.setState(plugin, { ...RelayHub.state(plugin), id: after.mintSocketId() });
+
+    await after.webSocketMessage(plugin, JSON.stringify({ type: 'hello', role: 'plugin', version: '0.2.0' }));
+    await after.webSocketMessage(plugin, JSON.stringify({ type: 'pair', code }));
+
+    // The user-visible symptom first, so a failure names what a person saw.
+    assert.ok(app.sent.some((f) => f.type === 'paired'),
+      'the app was never told it was paired — the plugin paired with itself');
+    assert.equal(plugin.sent.filter((f) => f.type === 'paired').length, 1,
+      'the plugin was paired twice — once as each side of its own session');
+
+    await after.webSocketMessage(plugin, JSON.stringify(treeFrame));
+    assert.equal(plugin.sent.some((f) => f.code === 'peer-gone'), false,
+      'the plugin was told peer-gone — the reported bug');
+    assert.ok(app.sent.some((f) => f.type === 'tree'), 'the tree never reached the app');
+
+    // Then the root cause, which is what fails even when the order is lucky.
+    assert.notEqual(RelayHub.state(plugin).id, RelayHub.state(app).id,
+      'a socket minted after an eviction reused the id of one minted before it');
+  });
+}
+
+test('socket ids never repeat across many evictions', () => {
+  // The general property, not just the two-socket case: every wake is a fresh
+  // instance, and none of them may hand out an id another already has.
+  const ctx = fakeCtx();
+  const seen = new Set();
+  for (let wake = 0; wake < 50; wake++) {
+    const hub = new RelayHub(ctx, ENV);
+    for (let n = 0; n < 4; n++) {
+      const id = hub.mintSocketId();
+      assert.equal(seen.has(id), false, `id ${id} was minted twice (wake ${wake})`);
+      seen.add(id);
+    }
+  }
 });
 
 // --------------------------------------------------------------- origin
