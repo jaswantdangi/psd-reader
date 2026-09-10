@@ -542,7 +542,23 @@ function teardown(message, kind) {
 }
 
 function onFrame(frame) {
-  if (frame.type === 'paired') { guard('onPaired', onPaired); return; }
+  if (frame.type === 'paired') {
+    if (paired) {
+      // A second `paired` on one socket means the relay addressed BOTH of its
+      // pairing messages here -- it paired this plugin WITH ITSELF, so the app
+      // was never told and nobody is on the other end. That is exactly what a
+      // real run showed before relay 898084c: two `paired` lines, the tree sent
+      // twice, then peer-gone. Handling it again would re-send the tree and
+      // subscribe to Photoshop a second time, so it is refused and named here
+      // rather than left to surface later as a vague peer-gone.
+      fail('received `paired` TWICE — the relay paired this plugin with itself, so the app was never connected.');
+      fail('that was a relay bug, fixed in 898084c. Seeing this means the relay reached is older than that fix.');
+      teardown('The relay paired this plugin with itself. See the log.', 'failed');
+      return;
+    }
+    guard('onPaired', onPaired);
+    return;
+  }
   if (frame.type === 'pair') { info('relay issued a code to the app side (not us)'); return; }
   if (frame.type === 'error') {
     if (frame.code === 'peer-gone') {
