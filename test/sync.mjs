@@ -17,8 +17,10 @@ import {
 import {
   MESSAGE_TYPES, PROTOCOL_ERRORS, PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH,
   validateMessage, parseMessage, classifyChange, UNMAPPABLE_CHANGES,
-  translateEvent, translateEvents,
+  translateEvent, translateEvents, FONT_MISSING_REASONS, ONE_WAY_FRAMES,
 } from '../src/sync/protocol.js';
+import { chunkFont } from '../src/sync/font-file.js';
+import { makeFont } from './make-font.mjs';
 import {
   normaliseKind, flattenLayerTree, treeFrameFor, changeForNotification, coalesceEvents,
   layerTargetsFrom, PHOTOSHOP_EVENTS,
@@ -246,8 +248,8 @@ console.log('\nprotocol: validating every inbound frame\n');
 
 const helloOk = { type: 'hello', role: 'plugin', version: '1.0.0' };
 
-test('each of the six frame types validates and normalises', () => {
-  assert.deepEqual(MESSAGE_TYPES, ['hello', 'pair', 'paired', 'tree', 'event', 'error']);
+test('each of the original six frame types validates and normalises', () => {
+  assert.deepEqual(MESSAGE_TYPES, ['hello', 'pair', 'paired', 'tree', 'event', 'error', 'font-request', 'font-chunk', 'font-missing']);
   assert.deepEqual(validateMessage(helloOk).message, helloOk);
   assert.deepEqual(validateMessage({ type: 'pair', code: 'K7M2PQ' }).message, { type: 'pair', code: 'K7M2PQ' });
   assert.deepEqual(
@@ -814,6 +816,41 @@ test('document-level changes coalesce without a layerID colliding them', () => {
   ]);
   assert.deepEqual(collapsed.map((e) => e.change), ['crop', 'canvasSize']);
   assert.deepEqual(collapsed[0].props, { x: 1, y: 1, width: 8, height: 8 });
+});
+
+console.log('\nprotocol: font files\n');
+
+test('a font request is validated, de-duplicated, and bounded', () => {
+  assert.deepEqual(validateMessage({ type: 'font-request', names: ['A-Regular', 'A-Regular', 'B-Bold'] }),
+    { ok: true, message: { type: 'font-request', names: ['A-Regular', 'B-Bold'] } });
+  for (const names of [[], Array.from({ length: 65 }, (_, i) => `F${i}`), [''], [7], ['x'.repeat(129)], 'A']) {
+    assert.equal(validateMessage({ type: 'font-request', names }).ok, false, JSON.stringify(names).slice(0, 40));
+  }
+});
+
+test('a real font chunk validates unchanged, and every field is bounded', () => {
+  const [chunk] = chunkFont(makeFont('A-Regular'), { name: 'A-Regular', fileName: 'A-Regular.otf' });
+  assert.deepEqual(validateMessage(chunk), { ok: true, message: chunk });
+  assert.deepEqual(validateMessage({ ...chunk, extra: 1 }).message, chunk, 'undeclared fields are stripped');
+  const bad = [
+    { index: 1 }, { index: -1 }, { count: 0 }, { count: 65 }, { bytes: 0 }, { bytes: 32 * 1024 * 1024 + 1 },
+    { sha256: 'abc' }, { data: 'ab$=' }, { data: 'abc' }, { data: 'A'.repeat(699_056) }, { name: '' }, { fileName: '' },
+  ];
+  for (const patch of bad) assert.equal(validateMessage({ ...chunk, ...patch }).ok, false, JSON.stringify(patch).slice(0, 40));
+});
+
+test('a font report names one of the known reasons', () => {
+  assert.deepEqual(validateMessage({ type: 'font-missing', name: 'A', reason: 'not-found' }),
+    { ok: true, message: { type: 'font-missing', name: 'A', reason: 'not-found', detail: '' } });
+  assert.deepEqual(FONT_MISSING_REASONS, ['no-folder', 'not-found', 'collection', 'too-large', 'unreadable']);
+  assert.equal(validateMessage({ type: 'font-missing', name: 'A', reason: 'lost' }).ok, false);
+  assert.equal(validateMessage({ type: 'font-missing', name: 'A', reason: 'not-found', detail: 'x'.repeat(501) }).ok, false);
+});
+
+test('every one-way frame names its direction once, for both relays', () => {
+  assert.deepEqual(Object.keys(ONE_WAY_FRAMES).sort(), ['event', 'font-chunk', 'font-missing', 'font-request', 'tree']);
+  assert.equal(ONE_WAY_FRAMES['font-request'].from, 'app');
+  for (const t of ['tree', 'event', 'font-chunk', 'font-missing']) assert.equal(ONE_WAY_FRAMES[t].from, 'plugin');
 });
 
 console.log('\nthe plugin\'s vendored copies\n');

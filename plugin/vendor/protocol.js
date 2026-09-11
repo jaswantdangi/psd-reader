@@ -34,8 +34,8 @@
  */
 const { appIdFor } = require('./identity.js');
 
-/** The six frame types. Anything else is refused by name. */
-const MESSAGE_TYPES = ['hello', 'pair', 'paired', 'tree', 'event', 'error'];
+/** The frame types. Anything else is refused by name. */
+const MESSAGE_TYPES = ['hello', 'pair', 'paired', 'tree', 'event', 'error', 'font-request', 'font-chunk', 'font-missing'];
 
 const PROTOCOL_ERRORS = {
   BAD_JSON: 'bad-json',
@@ -235,6 +235,73 @@ function validateEvent(m) {
   return { ok: true, message };
 }
 
+/** Why the plugin could not send a font. The app writes copy per reason. */
+const FONT_MISSING_REASONS = ['no-folder', 'not-found', 'collection', 'too-large', 'unreadable'];
+
+const FONT_NAME_MAX = 128;
+const FONT_REQUEST_MAX = 64;
+const FONT_CHUNKS_MAX = FONT_MAX_BYTES / FONT_CHUNK_BYTES;
+const FONT_CHUNK_BASE64_MAX = Math.ceil(FONT_CHUNK_BYTES / 3) * 4;
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+const isFontName = (v) => isNonEmptyString(v) && v.length <= FONT_NAME_MAX;
+const isIntIn = (v, min, max) => Number.isInteger(v) && v >= min && v <= max;
+
+/** The app asking for the fonts it is substituting. Names are PostScript names, as the PSD stores them. */
+function validateFontRequest(m) {
+  if (!Array.isArray(m.names) || m.names.length < 1 || m.names.length > FONT_REQUEST_MAX) {
+    return fail(PROTOCOL_ERRORS.BAD_FIELD, `font-request.names must list 1 to ${FONT_REQUEST_MAX} font names`);
+  }
+  if (!m.names.every(isFontName)) {
+    return fail(PROTOCOL_ERRORS.BAD_FIELD, `every font-request name must be a string of 1 to ${FONT_NAME_MAX} characters`);
+  }
+  return { ok: true, message: { type: 'font-request', names: [...new Set(m.names)] } };
+}
+
+/**
+ * One piece of one font file. Every field is bounded here, before a relay
+ * forwards it or the app allocates for it: `bytes` is what the app will
+ * allocate, so it is the one that must never be trusted unchecked.
+ */
+function validateFontChunk(m) {
+  const bad = (what) => fail(PROTOCOL_ERRORS.BAD_FIELD, `font-chunk.${what}`);
+  if (!isFontName(m.name)) return bad(`name must be a string of 1 to ${FONT_NAME_MAX} characters`);
+  if (!isNonEmptyString(m.fileName) || m.fileName.length > 255) return bad('fileName must be a string of 1 to 255 characters');
+  if (!isIntIn(m.count, 1, FONT_CHUNKS_MAX)) return bad(`count must be an integer from 1 to ${FONT_CHUNKS_MAX}`);
+  if (!isIntIn(m.index, 0, m.count - 1)) return bad('index must be an integer from 0 to count - 1');
+  if (!isIntIn(m.bytes, 1, FONT_MAX_BYTES)) return bad(`bytes must be an integer from 1 to ${FONT_MAX_BYTES}`);
+  if (typeof m.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(m.sha256)) return bad('sha256 must be 64 lowercase hex characters');
+  if (typeof m.data !== 'string' || m.data.length > FONT_CHUNK_BASE64_MAX || m.data.length % 4 !== 0 || !BASE64.test(m.data)) {
+    return bad(`data must be base64 of at most ${FONT_CHUNK_BYTES} bytes`);
+  }
+  const { name, fileName, index, count, bytes, sha256, data } = m;
+  return { ok: true, message: { type: 'font-chunk', name, fileName, index, count, bytes, sha256, data } };
+}
+
+/** The plugin saying it could not send a font, and why. Never silent. */
+function validateFontMissing(m) {
+  if (!isFontName(m.name)) return fail(PROTOCOL_ERRORS.BAD_FIELD, `font-missing.name must be a string of 1 to ${FONT_NAME_MAX} characters`);
+  if (!FONT_MISSING_REASONS.includes(m.reason)) {
+    return fail(PROTOCOL_ERRORS.BAD_FIELD, `font-missing.reason must be one of ${FONT_MISSING_REASONS.join(', ')}`);
+  }
+  if (m.detail !== undefined && (typeof m.detail !== 'string' || m.detail.length > 500)) {
+    return fail(PROTOCOL_ERRORS.BAD_FIELD, 'font-missing.detail must be a string of at most 500 characters');
+  }
+  return { ok: true, message: { type: 'font-missing', name: m.name, reason: m.reason, detail: m.detail ?? '' } };
+}
+
+/**
+ * Which way each one-way frame travels, and what to say when it goes the
+ * wrong way. ONE table, read by both relays, so the Node relay and the
+ * Worker cannot drift into disagreeing about direction.
+ */
+const ONE_WAY_FRAMES = {
+  tree: { from: 'plugin', notPaired: 'pair before sending the layer tree', wrongWay: 'the layer tree travels Photoshop -> app only' },
+  event: { from: 'plugin', notPaired: 'pair before sending events', wrongWay: 'events travel Photoshop -> app only' },
+  'font-chunk': { from: 'plugin', notPaired: 'pair before sending font files', wrongWay: 'font files travel Photoshop -> app only' },
+  'font-missing': { from: 'plugin', notPaired: 'pair before reporting fonts', wrongWay: 'font reports travel Photoshop -> app only' },
+  'font-request': { from: 'app', notPaired: 'pair before requesting fonts', wrongWay: 'font requests travel app -> Photoshop only' },
+};
+
 function validateError(m) {
   if (!isNonEmptyString(m.code)) return fail(PROTOCOL_ERRORS.BAD_FIELD, 'error.code must be a non-empty string');
   if (typeof m.message !== 'string') return fail(PROTOCOL_ERRORS.BAD_FIELD, 'error.message must be a string');
@@ -248,6 +315,9 @@ const VALIDATORS = {
   tree: validateTree,
   event: validateEvent,
   error: validateError,
+  'font-request': validateFontRequest,
+  'font-chunk': validateFontChunk,
+  'font-missing': validateFontMissing,
 };
 
 /**
@@ -417,4 +487,4 @@ function translateEvents(events, mapping, options = {}) {
   return { commands, refused, needsPixels };
 }
 
-module.exports = { MESSAGE_TYPES, PROTOCOL_ERRORS, PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH, FONT_MAX_BYTES, FONT_CHUNK_BYTES, CHANGE_KINDS, UNMAPPABLE_CHANGES, errorFrame, classifyChange, validateMessage, parseMessage, translateEvent, translateEvents };
+module.exports = { MESSAGE_TYPES, PROTOCOL_ERRORS, PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH, FONT_MAX_BYTES, FONT_CHUNK_BYTES, CHANGE_KINDS, UNMAPPABLE_CHANGES, FONT_MISSING_REASONS, ONE_WAY_FRAMES, errorFrame, classifyChange, validateMessage, parseMessage, translateEvent, translateEvents };
