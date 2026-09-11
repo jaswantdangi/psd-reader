@@ -206,6 +206,61 @@ export function changeForNotification(event, descriptor = {}) {
   return { change, known: true, mappable, requiresPixels };
 }
 
+/** A layer reference that means "whatever layer is selected right now". */
+const isSelectionRef = (ref) => ref._enum === 'ordinal' && (ref._value === undefined || ref._value === 'targetEnum');
+
+/**
+ * Which layer(s) one notification is about, as far as the descriptor says.
+ *
+ * Photoshop names the layer an edit touched in several ways, and the one it
+ * uses MOST is not an id at all: `{_ref: 'layer', _enum: 'ordinal', _value:
+ * 'targetEnum'}` -- "the targeted layer", meaning the current selection. A
+ * reader that accepts only a numeric `_id` therefore identifies almost
+ * nothing, which is exactly what the first plugin did: it connected, and no
+ * edit ever synced.
+ *
+ * The reference sits under `_target` for most commands and under `null` for
+ * `hide`/`show`, as an array or a single object. Newer builds also add
+ * `layerID` -- a number, or an array of every layer the command touched.
+ *
+ * Answers, strongest first:
+ *
+ * - `{ids}`      -- the descriptor names layers outright. Used as-is.
+ * - `{names}`    -- it names them by NAME, e.g. clicking the eye of a layer that
+ *                   is not selected. The caller resolves a name only when
+ *                   exactly one layer has it.
+ * - `{selected}` -- it means the current selection. The caller reads the
+ *                   selection, which is precisely what `targetEnum` denotes.
+ * - `null`       -- nothing here names a layer. Nothing is guessed.
+ *
+ * A name is never read as the selection: that would apply a hide to whatever
+ * happened to be selected rather than to the layer whose eye was clicked.
+ */
+export function layerTargetsFrom(descriptor) {
+  if (!descriptor || typeof descriptor !== 'object') return null;
+  const ids = [];
+  const names = [];
+  let selected = false;
+  const addId = (v) => { if (Number.isFinite(v) && !ids.includes(v)) ids.push(v); };
+
+  const refs = [descriptor._target, descriptor.null]
+    .flatMap((r) => (Array.isArray(r) ? r : r ? [r] : []));
+  for (const ref of refs) {
+    if (ref?._ref !== 'layer') continue;
+    if (typeof ref._id === 'number') addId(ref._id);
+    else if (typeof ref._name === 'string') names.push(ref._name);
+    else if (isSelectionRef(ref)) selected = true;
+  }
+
+  const lid = descriptor.layerID;
+  for (const v of Array.isArray(lid) ? lid : [lid]) addId(typeof v === 'number' ? v : v?._id);
+
+  if (ids.length) return { ids };
+  if (names.length) return { names };
+  if (selected) return { selected: true };
+  return null;
+}
+
 /**
  * Collapse a burst of notifications down to what is worth sending.
  *

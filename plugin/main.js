@@ -108,7 +108,7 @@ function loadHost() {
 // --------------------------------------------------------- shared modules
 
 const { PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH } = require('./vendor/protocol.js');
-const { treeFrameFor, changeForNotification, coalesceEvents } = require('./vendor/photoshop.js');
+const { treeFrameFor, changeForNotification, coalesceEvents, layerTargetsFrom } = require('./vendor/photoshop.js');
 
 const PLUGIN_VERSION = '0.2.0';
 
@@ -128,8 +128,11 @@ const FLUSH_MS = 80;
  * documented form is a string array -- `addNotificationListener(['all'], cb)`
  * -- so the object form subscribed to nothing and no event ever arrived.
  */
+// `hide`/`show` are what Photoshop fires when a layer's eye is clicked. They
+// were mapped but missing here, so visibility never synced. test/sync.mjs now
+// fails if any forwardable event is left out of this list.
 const WATCHED = [
-  'set', 'move', 'transform', 'free', 'reorder', 'delete', 'make', 'duplicate',
+  'set', 'move', 'transform', 'free', 'reorder', 'delete', 'make', 'duplicate', 'hide', 'show',
   'crop', 'canvasSize', 'paint', 'brushTool', 'eraserTool', 'gaussianBlur',
   'applyImage', 'hueSaturation', 'levels', 'curves', 'brightnessContrast',
   'setLayerEffects', 'disableLayerStyle',
@@ -305,26 +308,66 @@ function scheduleFlush() {
   if (flushTimer === null) flushTimer = setTimeout(() => guard('flush', flush), FLUSH_MS);
 }
 
-/**
- * The layer a descriptor refers to, or null when it cannot be read confidently.
- *
- * VERIFY: this is the single most likely thing in the file to be wrong. A
- * WRONG id applies a real change to the wrong layer, which is the failure the
- * whole identity model exists to prevent -- so it returns null and the caller
- * sends nothing rather than guess. When it returns null it now LOGS the
- * descriptor, so the shape can be read off a real run instead of assumed.
- */
-function layerIdFrom(descriptor) {
-  const target = descriptor && descriptor._target;
-  if (Array.isArray(target)) {
-    for (let i = 0; i < target.length; i++) {
-      const ref = target[i];
-      if (ref && ref._ref === 'layer' && typeof ref._id === 'number') return ref._id;
+/** Every layer in the open document matching `test`, groups and their contents included. */
+function findLayers(test) {
+  const out = [];
+  const walk = (layers) => {
+    for (let i = 0; layers && i < layers.length; i++) {
+      const layer = layers[i];
+      if (test(layer)) out.push(layer);
+      if (layer.layers && layer.layers.length) walk(layer.layers);
     }
+  };
+  walk(app.activeDocument ? app.activeDocument.layers : null);
+  return out;
+}
+
+/**
+ * The live layers one notification is about, or none -- with the reason.
+ *
+ * FIXED: this used to accept only a numeric `_id`. Photoshop names the layer
+ * being edited as `_enum: 'ordinal' / 'targetEnum'` -- "the selection" --
+ * nearly every time, so a real move, rename or opacity change came back as
+ * "no layer id could be read" and was never sent. Connected, and nothing
+ * synced.
+ *
+ * Reading the descriptor is `layerTargetsFrom`'s job, and tested there. This
+ * only turns its answer into layers:
+ *
+ * - ids       -> those layers, wherever they sit in the tree
+ * - a name    -> that layer, ONLY if exactly one layer has the name
+ * - selection -> `activeLayers`, which is what `targetEnum` means
+ *
+ * A wrong layer is still worse than none, so an ambiguous name or an id not
+ * in the document returns nothing, and `why` says so in the log.
+ */
+function layersFor(descriptor) {
+  const target = layerTargetsFrom(descriptor);
+  if (!target) return { layers: [], why: 'the descriptor names no layer' };
+
+  if (target.ids) {
+    const found = findLayers((l) => target.ids.indexOf(l.id) !== -1);
+    return { layers: found, why: `layer id(s) ${target.ids.join(', ')} are not in the open document` };
   }
-  if (descriptor && typeof descriptor.layerID === 'number') return descriptor.layerID;
-  if (descriptor && descriptor.layerID && typeof descriptor.layerID._id === 'number') return descriptor.layerID._id;
-  return null;
+
+  if (target.names) {
+    const layers = [];
+    for (let i = 0; i < target.names.length; i++) {
+      const name = target.names[i];
+      const hits = findLayers((l) => l.name === name);
+      if (hits.length !== 1) {
+        return { layers: [], why: `it names the layer "${name}", and ${hits.length} layers have that name` };
+      }
+      layers.push(hits[0]);
+    }
+    return { layers, why: '' };
+  }
+
+  const doc = app.activeDocument;
+  const active = [];
+  const sel = doc && doc.activeLayers;
+  for (let i = 0; sel && i < sel.length; i++) active.push(sel[i]);
+  return { layers: active, why: 'it targets the selected layer, and no layer is selected' };
 }
 
 /**
@@ -338,14 +381,17 @@ function layerIdFrom(descriptor) {
  * descriptor for each change kind is logged once per session so they can be
  * corrected against reality.
  */
-function propsFor(change, descriptor, event) {
+function propsFor(change, descriptor, event, layer) {
   const to = (descriptor && descriptor.to) || {};
   switch (change) {
     case 'move':
     case 'transform': {
-      const layers = app.activeDocument && app.activeDocument.activeLayers;
-      const b = layers && layers.length ? layers[0].bounds : null;
-      if (!b) return {};
+      // The position of THIS layer, read after the move, without effects --
+      // the same rectangle the tree was built from and the app holds. It used
+      // to be the first selected layer's `bounds`, which include a shadow or
+      // glow and so never equalled the app's x/y on a layer that had one.
+      const b = layer ? hostBounds(layer) : null;
+      if (!b) return null;
       const num = (v) => (typeof v === 'number' ? v : (v && typeof v._value === 'number' ? v._value : 0));
       const left = num(b.left), top = num(b.top);
       return { x: left, y: top, w: num(b.right) - left, h: num(b.bottom) - top };
@@ -443,32 +489,68 @@ function onNotification(event, descriptor) {
     return;
   }
 
-  const layerID = layerIdFrom(descriptor);
   const documentScoped = verdict.change === 'crop' || verdict.change === 'canvasSize';
-  if (layerID === null && !documentScoped) {
-    warn(`"${event}" -> ${verdict.change}, but no layer id could be read. Sending nothing.`);
+  if (documentScoped) {
+    const props = propsFor(verdict.change, descriptor, event, null);
+    if (props === null) { payloadUnreadable(event, verdict.change, descriptor); return; }
+    pending.push({ change: verdict.change, props });
+    scheduleFlush();
     return;
   }
 
-  // A null payload means "I could not build this without guessing". Sending a
-  // guess would be a wrong edit applied to the right layer, which is no better
-  // than the right edit applied to the wrong one -- so it is counted as not
-  // synced, exactly like a brush stroke, and the reason is said out loud.
-  const props = propsFor(verdict.change, descriptor, event);
-  if (props === null) {
-    noteSkipped(`${verdict.change} (payload not readable)`);
-    warn(`"${event}" -> ${verdict.change}, but its payload could not be read from the descriptor. Sending nothing rather than a guess.`);
-    if (!sampledPayload.has(verdict.change)) {
-      sampledPayload.add(verdict.change);
+  // A delete is the one change where "the selection" is the WRONG answer: by
+  // the time the notification arrives the layer is gone and Photoshop has
+  // selected a neighbour, so reading the selection would delete a layer the
+  // user never touched. And an explicit id cannot be looked up either -- it
+  // is no longer in the document. So a delete goes by explicit id alone,
+  // straight through, or not at all.
+  if (verdict.change === 'delete') {
+    const target = layerTargetsFrom(descriptor);
+    if (!target || !target.ids) {
+      noteSkipped('delete (layer not identified)');
+      warn(`"${event}" -> delete, but it names no layer id, and after a delete the selection is a DIFFERENT layer. Sending nothing.`);
+      warn('descriptor was:', safeJson(descriptor).slice(0, 400));
+      return;
+    }
+    target.ids.forEach((id) => pending.push({ change: 'delete', layerID: id, props: {} }));
+    scheduleFlush();
+    return;
+  }
+
+  const { layers, why } = layersFor(descriptor);
+  if (!layers.length) {
+    noteSkipped(`${verdict.change} (layer not identified)`);
+    warn(`"${event}" -> ${verdict.change}, but ${why}. Sending nothing.`);
+    if (!sampledPayload.has(`target:${event}`)) {
+      sampledPayload.add(`target:${event}`);
       warn('descriptor was:', safeJson(descriptor).slice(0, 400));
     }
     return;
   }
 
-  const entry = { change: verdict.change, props };
-  if (!documentScoped) entry.layerID = layerID;
-  pending.push(entry);
+  // One event per layer: with three layers selected, one opacity change in
+  // Photoshop is three layers changed, and each is matched on its own.
+  for (let i = 0; i < layers.length; i++) {
+    const props = propsFor(verdict.change, descriptor, event, layers[i]);
+    if (props === null) { payloadUnreadable(event, verdict.change, descriptor); return; }
+    pending.push({ change: verdict.change, layerID: layers[i].id, props });
+  }
   scheduleFlush();
+}
+
+/**
+ * A null payload means "I could not build this without guessing". Sending a
+ * guess would be a wrong edit applied to the right layer, which is no better
+ * than the right edit applied to the wrong one -- so it is counted as not
+ * synced, exactly like a brush stroke, and the reason is said out loud.
+ */
+function payloadUnreadable(event, change, descriptor) {
+  noteSkipped(`${change} (payload not readable)`);
+  warn(`"${event}" -> ${change}, but its payload could not be read from the descriptor. Sending nothing rather than a guess.`);
+  if (!sampledPayload.has(change)) {
+    sampledPayload.add(change);
+    warn('descriptor was:', safeJson(descriptor).slice(0, 400));
+  }
 }
 
 // ------------------------------------------------------------- lifecycle
@@ -571,6 +653,16 @@ function onFrame(frame) {
         ? 'this happened AFTER pairing: the app disconnected (tab closed, reloaded or backgrounded), or the relay lost track of it. The detail above says which.'
         : 'this happened BEFORE pairing completed, which points at the relay pairing the wrong sockets rather than the app leaving.');
       teardown(`The app side disconnected: ${frame.message}`, 'failed');
+      return;
+    }
+    if (paired) {
+      // After pairing, an error is almost always the APP reporting that ONE
+      // change could not be applied -- a layer that did not match, say. It is
+      // not a verdict on the connection: the relay closes the socket itself
+      // when it means that, and the close handler tears down. Treating it as
+      // fatal used to end the whole session on the first unmatched layer.
+      warn(`not applied: ${frame.message} (${frame.code}) — only this change; the session stays up`);
+      noteSkipped(`refused by the app: ${frame.code}`);
       return;
     }
     fail(`relay refused: ${frame.code} — ${frame.message}`);

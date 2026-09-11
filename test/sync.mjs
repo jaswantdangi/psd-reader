@@ -21,6 +21,7 @@ import {
 } from '../src/sync/protocol.js';
 import {
   normaliseKind, flattenLayerTree, treeFrameFor, changeForNotification, coalesceEvents,
+  layerTargetsFrom, PHOTOSHOP_EVENTS,
 } from '../src/sync/photoshop.js';
 
 let passed = 0;
@@ -722,6 +723,63 @@ test('hide and show are visibility, not unclaimed events', () => {
   assert.equal(changeForNotification('hide').change, 'visibility');
   assert.equal(changeForNotification('show').change, 'visibility');
   assert.equal(changeForNotification('hide').mappable, true);
+});
+
+test('a notification aimed at "the selected layer" is read as the selection, not as nothing', () => {
+  // How Photoshop almost always names the layer an edit touched: not by id,
+  // but as `_enum: ordinal / targetEnum` -- "whatever is currently targeted".
+  // The plugin used to accept ONLY a numeric `_id`, so a real move, rename or
+  // opacity change arrived with no readable layer and was sent nowhere.
+  const ordinal = { _ref: 'layer', _enum: 'ordinal', _value: 'targetEnum' };
+  assert.deepEqual(layerTargetsFrom({ _target: [ordinal] }), { selected: true });
+  // `hide`/`show` carry the reference under `null`, not `_target`.
+  assert.deepEqual(layerTargetsFrom({ null: [ordinal] }), { selected: true });
+  assert.deepEqual(layerTargetsFrom({ null: ordinal }), { selected: true }, 'a single reference, not an array');
+});
+
+test('an explicit layer id in a notification wins, in every shape Photoshop sends it', () => {
+  assert.deepEqual(layerTargetsFrom({ _target: [{ _ref: 'layer', _id: 12 }] }), { ids: [12] });
+  // Newer builds add `layerID` as an ARRAY of every layer the command touched.
+  assert.deepEqual(layerTargetsFrom({ layerID: [3, 4] }), { ids: [3, 4] });
+  assert.deepEqual(layerTargetsFrom({ layerID: 5 }), { ids: [5] });
+  assert.deepEqual(layerTargetsFrom({ layerID: { _id: 6 } }), { ids: [6] });
+  // An id beats the ordinal: it names the layer outright.
+  assert.deepEqual(
+    layerTargetsFrom({ _target: [{ _ref: 'layer', _enum: 'ordinal', _value: 'targetEnum' }], layerID: [9] }),
+    { ids: [9] },
+  );
+  // Duplicates collapse -- one layer, one event.
+  assert.deepEqual(layerTargetsFrom({ _target: [{ _ref: 'layer', _id: 9 }], layerID: [9] }), { ids: [9] });
+});
+
+test('a layer named rather than numbered is reported as a name, never as the selection', () => {
+  // Clicking the eye of a layer that is NOT selected targets it by name.
+  // Reading that as "the selection" would hide the wrong layer.
+  assert.deepEqual(layerTargetsFrom({ null: [{ _ref: 'layer', _name: 'Sky' }] }), { names: ['Sky'] });
+});
+
+test('a notification that names no layer returns null, so nothing is guessed', () => {
+  assert.equal(layerTargetsFrom({}), null);
+  assert.equal(layerTargetsFrom(undefined), null);
+  assert.equal(layerTargetsFrom({ _target: [{ _ref: 'document', _enum: 'ordinal', _value: 'targetEnum' }] }), null,
+    'a document reference is not a layer reference');
+  assert.equal(layerTargetsFrom({ layerID: [] }), null);
+  assert.equal(layerTargetsFrom({ layerID: [Number.NaN] }), null);
+});
+
+test('the plugin subscribes to every Photoshop event it knows how to forward', () => {
+  // `hide` and `show` were mapped to visibility but never subscribed to, so
+  // Photoshop never delivered them and toggling a layer's eye synced nothing.
+  // Asserted as a rule rather than as two names, so the next event added to
+  // the table cannot be forgotten the same way.
+  const main = fs.readFileSync('plugin/main.js', 'utf8');
+  const block = main.match(/const WATCHED = \[([\s\S]*?)\];/);
+  assert.ok(block, 'WATCHED must be a literal array in plugin/main.js');
+  const watched = [...block[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const forwardable = Object.keys(PHOTOSHOP_EVENTS).filter((e) => changeForNotification(e).mappable);
+  const missing = forwardable.filter((e) => !watched.includes(e));
+  assert.deepEqual(missing, [], `mapped but never subscribed to: ${missing.join(', ')}`);
+  assert.ok(watched.includes('set'), '`set` carries opacity, blend mode and rename');
 });
 
 test('a burst collapses to the last of each layer, keeping first-seen order', () => {
