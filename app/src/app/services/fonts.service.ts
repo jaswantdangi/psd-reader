@@ -1,4 +1,4 @@
-import { Injectable, computed, inject, signal } from '@angular/core';
+import { Injectable, computed, effect, inject, signal, untracked } from '@angular/core';
 import {
   FONT_FILE_ACCEPT,
   assignFont,
@@ -11,6 +11,7 @@ import {
   resolveFont,
 } from '@engine/fonts.js';
 import { ProjectService } from './project.service';
+import { FontCacheService } from './font-cache.service';
 
 /**
  * Giving the browser the font files a PSD asks for.
@@ -136,6 +137,38 @@ export class FontsService {
     const layer = this.svc.selected();
     return !!match && layer?.text?.fontFamily === loadedFontFamilyFor(match.record, layer.text.sourceFont);
   });
+
+  /** Fonts synced from Photoshop in an earlier session, kept on this device. */
+  private readonly cache = inject(FontCacheService);
+
+  constructor() {
+    // A document reopened without syncing still draws the fonts synced into
+    // it last time. `loadCached` does nothing without FontFace, and asks the
+    // cache only for names this document is actually substituting.
+    effect(() => {
+      if (!this.svc.project()) return;
+      untracked(() => { void this.loadCached(this.missingNames()); });
+    });
+  }
+
+  /** The PostScript names this document asks for and no loaded file answers. */
+  missingNames(): string[] {
+    return this.demand().fonts.filter((f: any) => !f.match).map((f: any) => f.name);
+  }
+
+  /**
+   * Load whichever of `names` this device kept from an earlier sync, each bound
+   * to its exact name the way a synced file is.
+   *
+   * @returns the names that are now answered by a loaded face
+   */
+  async loadCached(names: string[]): Promise<string[]> {
+    if (!names.length || !this.supported) return [];
+    const hits = await this.cache.get(names);
+    for (const hit of hits) await this.assignTo(hit.name, [new File([hit.bytes], hit.fileName)]);
+    const still = new Set(this.missingNames());
+    return hits.map((h) => h.name).filter((n) => !still.has(n));
+  }
 
   // ------------------------------------------------------------ loading
 

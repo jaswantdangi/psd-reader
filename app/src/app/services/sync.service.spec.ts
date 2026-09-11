@@ -1,5 +1,9 @@
 import { TestBed } from '@angular/core/testing';
-import { SyncService, type SyncSocket } from './sync.service';
+import { vi } from 'vitest';
+import { chunkFont } from '@engine/sync/font-file.js';
+import { SyncService, FONT_MISSING_COPY, type SyncSocket } from './sync.service';
+import { FontsService } from './fonts.service';
+import { FontCacheService, memoryFontBackend } from './font-cache.service';
 import { ProjectService } from './project.service';
 import { makeProject } from '../../testing/project-fixture';
 import { installFakeWorker } from '../../testing/fake-worker';
@@ -63,6 +67,120 @@ describe('SyncService', () => {
   });
 
   afterEach(() => restoreWorker());
+
+  // ----------------------------------------------------------------- fonts
+
+  /**
+   * Font files from the Photoshop PC. There is no FontFace here, so whether
+   * a face actually loads is `FontsService`'s concern and is stubbed where a
+   * test needs it; what is real is the frames, the reassembly and checksum
+   * (the engine's own `assembleFont`), and the device cache.
+   */
+  describe('fonts', () => {
+    let fonts: FontsService;
+    let cache: FontCacheService;
+    const NAME = 'MyriadPro-Regular';
+    const tree = { type: 'tree', document: { name: 'a.psd', width: 100, height: 100 }, layers: [] };
+    /** Microtasks only, so it also works under fake timers. */
+    const settle = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+    const fontBytes = () => {
+      const b = new Uint8Array(700_000);
+      for (let i = 0; i < b.length; i++) b[i] = i % 251;
+      return b;
+    };
+
+    beforeEach(() => {
+      fonts = TestBed.inject(FontsService);
+      cache = TestBed.inject(FontCacheService);
+      cache.backend = memoryFontBackend();
+      projects.project.set(makeProject([{ name: 'headline', text: 'SALE', font: NAME }]));
+    });
+
+    afterEach(() => vi.restoreAllMocks());
+
+    it('asks Photoshop for the fonts the document is substituting, once the tree is in', async () => {
+      pair();
+      deliver(tree);
+      await settle();
+      expect(socket.sent).toContainEqual({ type: 'font-request', names: [NAME] });
+      expect(sync.fontSync()[NAME].state).toBe('requested');
+    });
+
+    it('asks for nothing when the device already has it', async () => {
+      vi.spyOn(fonts, 'loadCached').mockResolvedValue([NAME]);
+      pair();
+      deliver(tree);
+      await settle();
+      expect(socket.sent.some((f: any) => f.type === 'font-request')).toBe(false);
+      expect(sync.fontSync()[NAME].state).toBe('cached');
+    });
+
+    it('installs a font that arrives in chunks under the exact name asked, and keeps it', async () => {
+      const missing = vi.spyOn(fonts, 'missingNames').mockReturnValue([NAME]);
+      const assign = vi.spyOn(fonts, 'assignTo').mockImplementation(async () => { missing.mockReturnValue([]); });
+      pair();
+      deliver(tree);
+      await settle();
+      const bytes = fontBytes();
+      for (const frame of chunkFont(bytes, { name: NAME, fileName: `${NAME}.otf` })) deliver(frame);
+      await settle();
+
+      expect(assign).toHaveBeenCalledTimes(1);
+      const [name, files] = assign.mock.calls[0] as unknown as [string, File[]];
+      expect(name).toBe(NAME);
+      expect(files[0].name).toBe(`${NAME}.otf`);
+      expect(new Uint8Array(await files[0].arrayBuffer())).toEqual(bytes);
+      expect(sync.fontSync()[NAME].state).toBe('synced');
+      expect((await cache.get([NAME])).length).toBe(1);
+    });
+
+    it('throws away a file that arrives damaged, and says so', async () => {
+      vi.spyOn(fonts, 'missingNames').mockReturnValue([NAME]);
+      const assign = vi.spyOn(fonts, 'assignTo');
+      pair();
+      deliver(tree);
+      await settle();
+      const frames: any[] = chunkFont(fontBytes(), { name: NAME, fileName: 'x.otf' });
+      frames[1] = { ...frames[1], data: frames[1].data.replace(/^./, (c: string) => (c === 'A' ? 'B' : 'A')) };
+      frames.forEach(deliver);
+      await settle();
+      expect(assign).not.toHaveBeenCalled();
+      expect(sync.fontSync()[NAME].state).toBe('failed');
+      expect(sync.fontSync()[NAME].detail).toMatch(/damaged/);
+    });
+
+    it('reports a font Photoshop could not send, in words', async () => {
+      pair();
+      deliver(tree);
+      await settle();
+      deliver({ type: 'font-missing', name: NAME, reason: 'not-found' });
+      expect(sync.fontSync()[NAME]).toEqual({ state: 'missing', detail: FONT_MISSING_COPY['not-found'] });
+    });
+
+    it('gives up on a transfer that goes quiet', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.spyOn(fonts, 'missingNames').mockReturnValue([NAME]);
+        pair();
+        deliver(tree);
+        await settle();
+        deliver(chunkFont(fontBytes(), { name: NAME, fileName: 'x.otf' })[0]);
+        vi.advanceTimersByTime(sync.fontTimeoutMs + 1);
+        expect(sync.fontSync()[NAME].state).toBe('failed');
+        expect(sync.fontSync()[NAME].detail).toMatch(/stopped/);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('asks for nothing when nothing is missing', async () => {
+      vi.spyOn(fonts, 'missingNames').mockReturnValue([]);
+      pair();
+      deliver(tree);
+      await settle();
+      expect(socket.sent.some((f: any) => f.type === 'font-request')).toBe(false);
+    });
+  });
 
   // ------------------------------------------------------------- handshake
 

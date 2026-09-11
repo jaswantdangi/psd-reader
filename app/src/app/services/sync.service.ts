@@ -2,6 +2,9 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 import { ProjectService } from './project.service';
 import { matchLayers } from '@engine/sync/identity.js';
 import { errorFrame, parseMessage, translateEvent } from '@engine/sync/protocol.js';
+import { assembleFont } from '@engine/sync/font-file.js';
+import { FontsService } from './fonts.service';
+import { FontCacheService } from './font-cache.service';
 
 /**
  * The app half of Photoshop sync.
@@ -45,6 +48,10 @@ type Translated =
   | { ok: false; reason: string; requiresPixels: boolean; change?: string; layerID?: number | string | null };
 const translate = translateEvent as unknown as (event: any, mapping: any, options?: any) => Translated;
 
+/** `assembleFont` has the same non-narrowing `ok`, for the same reason. */
+type Assembled = { ok: true; bytes: Uint8Array<ArrayBuffer> } | { ok: false; reason: string };
+const assemble = assembleFont as unknown as (frames: any[]) => Assembled;
+
 export type SyncStatus = 'idle' | 'connecting' | 'waiting' | 'paired' | 'live' | 'failed';
 
 /** The minimum of `WebSocket` this service uses, so a test can supply one. */
@@ -70,11 +77,33 @@ export interface UnmatchedLayer {
   reason: string;
 }
 
+/** Where one font's file is in its journey from the Photoshop PC. */
+export type FontSyncState = 'requested' | 'receiving' | 'synced' | 'cached' | 'missing' | 'failed';
+
+export interface FontSync {
+  state: FontSyncState;
+  /** Written for the person holding the phone, not for a log. */
+  detail: string;
+  received?: number;
+  count?: number;
+}
+
+/** What each `font-missing` reason means, in words the Fonts sheet can show as-is. */
+export const FONT_MISSING_COPY: Record<string, string> = {
+  'no-folder': 'Photoshop has no fonts folder chosen yet. In the plugin, click “Choose fonts folder…”.',
+  'not-found': 'Not in the fonts folders chosen in Photoshop. If it is an Adobe Fonts activation it cannot be sent — install it on this device, or load the file below.',
+  collection: 'It is inside a font collection (.ttc), which cannot be sent yet. Load a single-font file below.',
+  'too-large': 'The file is over 32 MB, more than sync sends.',
+  unreadable: 'Photoshop could not read the file.',
+};
+
 const APP_VERSION = '1.0.0';
 
 @Injectable({ providedIn: 'root' })
 export class SyncService {
   private projects = inject(ProjectService);
+  private fonts = inject(FontsService);
+  private fontCache = inject(FontCacheService);
 
   /**
    * How a socket is made. Overridden in tests — jsdom's `WebSocket` would need
@@ -105,6 +134,14 @@ export class SyncService {
   private socket: SyncSocket | null = null;
   /** The pinned mapping. Null until a `tree` has been reconciled. */
   private mapping: any = null;
+
+  /** Per PostScript name: where its file is in the journey from Photoshop. */
+  readonly fontSync = signal<Record<string, FontSync>>({});
+  /** A transfer that goes this long without a chunk is abandoned. */
+  fontTimeoutMs = 30_000;
+  /** Chunks received so far, per font, until the last one arrives. */
+  private assembling = new Map<string, any[]>();
+  private fontTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ------------------------------------------------------------- lifecycle
 
@@ -141,6 +178,8 @@ export class SyncService {
   private finish(status: SyncStatus, message: string): void {
     this.socket = null;
     this.mapping = null;
+    this.clearFontTimer();
+    this.assembling.clear();
     this.code.set(null);
     this.status.set(status);
     this.message.set(message);
@@ -154,6 +193,9 @@ export class SyncService {
     this.documentMismatch.set(null);
     this.applied.set(0);
     this.refused.set([]);
+    this.fontSync.set({});
+    this.assembling.clear();
+    this.clearFontTimer();
   }
 
   private send(frame: any): void {
@@ -183,6 +225,8 @@ export class SyncService {
     if (frame.type === 'paired') return this.onPaired();
     if (frame.type === 'tree') return this.onTree(frame);
     if (frame.type === 'event') return this.onEvent(frame);
+    if (frame.type === 'font-chunk') return this.onFontChunk(frame);
+    if (frame.type === 'font-missing') return this.onFontMissing(frame);
     if (frame.type === 'error') return this.onError(frame);
   }
 
@@ -226,6 +270,8 @@ export class SyncService {
 
     this.status.set('live');
     this.message.set(`Live — ${result.matched.length} of ${frame.layers.length} layers matched.`);
+
+    void this.syncFonts();
   }
 
   /**
@@ -274,6 +320,93 @@ export class SyncService {
 
     if (this.apply(result.command)) this.applied.update((n) => n + 1);
     else this.note({ reason: 'not-applied', change: frame.change, layerID: frame.layerID ?? null });
+  }
+
+  // ----------------------------------------------------------------- fonts
+
+  /**
+   * After the tree: load what this device kept, ask Photoshop for the rest.
+   *
+   * Only names the document is substituting are asked for, so a font the app
+   * already draws is never sent again. Photoshop finds each by its file's own
+   * name table, so what arrives answers exactly the name asked.
+   */
+  private async syncFonts(): Promise<void> {
+    const missing = this.fonts.missingNames();
+    if (!missing.length) return;
+    const cached = await this.fonts.loadCached(missing);
+    cached.forEach((name) => this.setFont(name, { state: 'cached', detail: 'Loaded from this device — synced earlier.' }));
+    const rest = missing.filter((n) => !cached.includes(n)).slice(0, 64);
+    if (!rest.length || !this.socket) return;
+    rest.forEach((name) => this.setFont(name, { state: 'requested', detail: 'Asked Photoshop for this font…' }));
+    this.send({ type: 'font-request', names: rest });
+    this.armFontTimer();
+  }
+
+  private onFontChunk(frame: any): void {
+    const list = this.assembling.get(frame.name) ?? [];
+    list.push(frame);
+    this.assembling.set(frame.name, list);
+    this.setFont(frame.name, { state: 'receiving', detail: 'Receiving from Photoshop…', received: list.length, count: frame.count });
+    this.armFontTimer();
+    if (list.length < frame.count) return;
+
+    this.assembling.delete(frame.name);
+    const result = assemble(list);
+    if (!result.ok) {
+      // Refused here rather than handed to FontFace: a damaged font fails
+      // later, and less clearly, than one never loaded.
+      this.setFont(frame.name, { state: 'failed', detail: `Not loaded: ${result.reason}.` });
+      return;
+    }
+    void this.install(frame.name, frame.fileName, result.bytes);
+  }
+
+  /** Bind the file to the EXACT name asked for, then keep it on the device. */
+  private async install(name: string, fileName: string, bytes: Uint8Array<ArrayBuffer>): Promise<void> {
+    await this.fonts.assignTo(name, [new File([bytes], fileName)]);
+    if (this.fonts.missingNames().includes(name)) {
+      this.setFont(name, { state: 'failed', detail: 'The file arrived, but this browser could not load it as a font.' });
+      return;
+    }
+    this.setFont(name, { state: 'synced', detail: `Sent from Photoshop (${fileName}).` });
+    await this.fontCache.put(name, fileName, bytes.buffer);
+  }
+
+  private onFontMissing(frame: any): void {
+    this.setFont(frame.name, { state: 'missing', detail: FONT_MISSING_COPY[frame.reason] ?? frame.detail });
+  }
+
+  private setFont(name: string, entry: FontSync): void {
+    this.fontSync.update((all) => ({ ...all, [name]: entry }));
+  }
+
+  /** Re-armed by every chunk, so it fires only once the stream has gone quiet. */
+  private armFontTimer(): void {
+    this.clearFontTimer();
+    this.fontTimer = setTimeout(() => this.expireFonts(), this.fontTimeoutMs);
+  }
+
+  private clearFontTimer(): void {
+    if (this.fontTimer !== null) {
+      clearTimeout(this.fontTimer);
+      this.fontTimer = null;
+    }
+  }
+
+  /** Nothing is left "receiving" forever: a stalled font is named, with what to do. */
+  private expireFonts(): void {
+    this.fontTimer = null;
+    for (const [name, entry] of Object.entries(this.fontSync())) {
+      if (entry.state !== 'requested' && entry.state !== 'receiving') continue;
+      this.assembling.delete(name);
+      this.setFont(name, {
+        state: 'failed',
+        detail: entry.state === 'requested'
+          ? 'Photoshop did not answer. Update the Photoshop plugin, then pair again.'
+          : 'The transfer stopped part way. Pair again to retry.',
+      });
+    }
   }
 
   private onError(frame: any): void {
