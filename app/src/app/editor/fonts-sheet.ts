@@ -1,6 +1,8 @@
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { BundleService } from '../services/bundle.service';
 import { FontsService } from '../services/fonts.service';
+import { FontCacheService } from '../services/font-cache.service';
+import { SyncService, type FontSync } from '../services/sync.service';
 import { FontPicker } from './font-picker';
 
 /**
@@ -40,8 +42,9 @@ import { FontPicker } from './font-picker';
           A PSD stores font <b class="text-neutral-300">names</b>, never the fonts
           themselves — so nothing in the file can put its own typeface on screen. Give
           this app the font file and it draws the real thing; until then it draws the
-          closest stack it can guarantee and says so. The files stay in this tab: nothing
-          is uploaded, and nothing is kept after you close it.
+          closest stack it can guarantee and says so. Font files you load here stay in this
+          tab and are not kept. Fonts synced from Photoshop are kept on this device until you
+          remove them.
         </p>
 
         <!-- What the handover zip actually did, kept whole.
@@ -84,6 +87,13 @@ import { FontPicker } from './font-picker';
                     {{ status(font) }}
                   </span>
                 </div>
+
+                <!-- Where this font is in its journey from the Photoshop PC, when
+                     sync is asking for it. Every outcome is said, including the
+                     ones that mean "you will have to find this file yourself". -->
+                @if (sync.fontSync()[font.name]; as s) {
+                  <p class="text-[11px] leading-relaxed" [class]="syncTone(s)">{{ syncLine(s) }}</p>
+                }
 
                 @if (font.match) {
                   <p class="text-[11px] leading-relaxed text-neutral-400">
@@ -154,6 +164,22 @@ import { FontPicker } from './font-picker';
           </ul>
         }
 
+        @if (cache.totalBytes(); as total) {
+          <div class="space-y-2 rounded-xl bg-white/5 px-3 py-3">
+            <p class="text-[11px] leading-relaxed text-neutral-400">
+              Fonts synced from your PC are kept on this device ({{ mb(total) }}), so the next
+              session does not send them again.
+            </p>
+            <button
+              type="button"
+              class="h-11 w-full rounded-xl border border-white/10 text-sm text-neutral-200"
+              (click)="forget()"
+            >
+              Remove synced fonts ({{ mb(total) }})
+            </button>
+          </div>
+        }
+
         @if (fonts.supported) {
           <app-font-picker label="Load font files…" />
           @if (fonts.note(); as note) {
@@ -178,6 +204,34 @@ import { FontPicker } from './font-picker';
 export class FontsSheet {
   protected fonts = inject(FontsService);
   protected bundle = inject(BundleService);
+  protected sync = inject(SyncService);
+  protected cache = inject(FontCacheService);
+
+  constructor() {
+    // How much the device holds is read once per opening, not polled.
+    void this.cache.refresh();
+  }
+
+  protected syncLine(s: FontSync): string {
+    if (s.state === 'receiving' && s.count) return `Receiving from Photoshop… ${s.received} of ${s.count}`;
+    return s.detail;
+  }
+
+  protected syncTone(s: FontSync): string {
+    if (s.state === 'synced' || s.state === 'cached') return 'text-emerald-300';
+    if (s.state === 'missing' || s.state === 'failed') return 'text-amber-300';
+    return 'text-neutral-400';
+  }
+
+  protected mb(bytes: number): string {
+    return `${(bytes / 1048576).toFixed(1)} MB`;
+  }
+
+  /** Removes the device copies. Faces already on screen stay until the app closes. */
+  protected async forget(): Promise<void> {
+    await this.cache.clear();
+    this.fonts.note.set('Synced fonts removed from this device. Fonts already on screen stay until you close the app.');
+  }
 
   /**
    * Layers that ask for this typeface and are not drawing it.
