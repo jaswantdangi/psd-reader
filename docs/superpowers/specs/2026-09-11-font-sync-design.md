@@ -1,7 +1,7 @@
 # Font Sync — Photoshop PC → App, Through the Relay
 
 **Date**: 2026-09-11
-**Status**: Design approved, not yet planned or built
+**Status**: Built and tested (plan `docs/superpowers/plans/2026-09-11-font-sync.md`); relay deployed; not yet run in real Photoshop
 
 ---
 

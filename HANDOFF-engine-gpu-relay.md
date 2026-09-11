@@ -42,6 +42,12 @@ to end, and deploy it — then hand back only what genuinely cannot be verified 
 - [x] **CI** (`.github/workflows/test.yml`) — engine green on a clean runner
 - [x] **Android release signing configured** — no key created; see Warnings
 - [x] **Docs** — `docs/HOW-SYNC-WORKS.md` (plain language, Mermaid diagrams), `docs/DEPLOY-CLOUDFLARE.md`
+- [x] **Font sync (2026-09-11)** — the app asks for the fonts it is substituting; the plugin
+  finds each by its file's own name table in folders the user picked once, and sends it in
+  512 KiB chunks through the relay; the app checks SHA-256, binds it to the exact name, and
+  keeps it in IndexedDB (150 MB, LRU). Adobe Fonts activations and `.ttc` collections are
+  reported per font, not sent. Both relays route by one `ONE_WAY_FRAMES` table. Worker
+  redeployed (`cfad7479`); `node tools/font-relay-probe.mjs` passes against it
 
 ## Not Yet Done
 
@@ -62,9 +68,19 @@ to end, and deploy it — then hand back only what genuinely cannot be verified 
   (2026-09-09 14:49 UTC) was on relay `17297bd7`; the fix went live as `1bdcec59` on
   2026-09-10 08:27 UTC. The plugin now refuses a second `paired` and names the cause
 - [ ] **Confirm edits actually flow.** Connecting is verified; turning Photoshop events into
-  correct frames is not. Two seams remain: `layerIdFrom` (reading the layer id out of a
-  notification) and `propsFor` (the payload per change). Both log the raw descriptor the first
-  time each kind appears, so one real editing session settles them
+  correct frames is not. `93c3110` fixed the four bugs a real run pointed at (the layer was
+  unreadable when named as `_enum: ordinal / targetEnum`; `hide`/`show` never subscribed; one
+  app refusal tore the session down; move used effect-inclusive bounds), proven in
+  `test/plugin.mjs`, which runs the real `plugin/main.js` in a fake UXP. What is left is
+  whether a real build sends the documented descriptor shapes: `layersFor` / `propsFor` log
+  the raw descriptor whenever they cannot identify a layer, so one editing session settles it
+- [ ] **Run font sync in real Photoshop.** Built and tested end to end except the host
+  (spec `docs/superpowers/specs/2026-09-11-font-sync-design.md`, plan
+  `docs/superpowers/plans/2026-09-11-font-sync.md`, commits `7c9676c`..`4ebb7ec`). Unverified
+  until a real run: the folder picker and persistent tokens across a Photoshop restart, and
+  **the first-scan time** on a real `C:\Windows\Fonts` — the panel logs `font lookup took N ms`;
+  read that number off a run rather than estimating it. The app needs building and deploying to
+  Pages before it will send `font-request` at all
 - [ ] **CI's `app` job is RED, and the branch does not compile from a clean clone.**
   `app/src/app/editor/editor.page.ts:965` calls `this.seg.tool.set('')`, and the
   **committed** `segment.service.ts` has no `tool` property — it exists only in the other

@@ -181,6 +181,63 @@ If you need those changes in the app, re-open the file there.
 
 ---
 
+## Fonts — sending the real typeface
+
+A PSD stores font **names** (`MyriadPro-Regular`), never the fonts themselves.
+So until the app has the font file, it draws your text in the closest font it
+can guarantee — and says so.
+
+Your fonts are sitting on the Photoshop computer, and the app is on another
+device. So sync can fetch them for you.
+
+**What you do, once:** in the Photoshop panel, click **Choose fonts folder…**
+and pick `C:\Windows\Fonts` (and your own fonts folder, if you install fonts
+just for yourself). The panel remembers it.
+
+**What happens after that, every time you pair:**
+
+```mermaid
+sequenceDiagram
+    participant A as App (phone)
+    participant R as Relay
+    participant P as Plugin (Photoshop PC)
+
+    Note over A: Layers matched.<br/>Which fonts am I missing?
+    Note over A: Any kept on this device<br/>from last time? Load those.
+    A->>R: Please send MyriadPro-Regular, AachenBT-Bold
+    R->>P: (passes it on)
+    Note over P: Opens font files and reads<br/>the name written INSIDE each one
+    P->>R: MyriadPro-Regular, in pieces
+    R->>A: (passes them on)
+    P->>R: AachenBT-Bold: not found
+    R->>A: (passes it on)
+    Note over A: Rebuilds the file, checks<br/>nothing was damaged, redraws<br/>the text, keeps the font
+```
+
+**Only missing fonts travel.** A font the app already has is never sent again,
+and fonts are kept on the device (up to 150 MB) so the next session doesn't need
+them at all. The Fonts sheet has a **Remove synced fonts** button.
+
+**How it finds the right file:** the file's *name* can't be trusted —
+`HelvNeue_Rm.otf` doesn't say Helvetica Neue. Every font file has its real name
+written inside it, the same name the PSD uses. The plugin reads that. It opens
+the likely-looking files first, stops as soon as it finds what was asked for,
+and remembers what it learned so it doesn't read the same files twice.
+
+**What can't be sent — and you're told which, per font:**
+
+| Font | Why not |
+|---|---|
+| Adobe Fonts (activated in Creative Cloud) | Adobe hides and encrypts these, and the licence doesn't allow copying them to another device. Install it there, or load the file by hand |
+| Inside a `.ttc` collection file | The browser can't load a collection yet. Windows ships some system fonts this way |
+| Over 32 MB | More than sync sends in one go |
+
+**Nothing is stored in the middle.** Font files pass through the relay the same
+way changes do — straight through, never kept. The only copy that stays is the
+one on your own device, and you can remove it.
+
+---
+
 ## What you'll see if something's wrong
 
 | On screen | What it means | What to do |
@@ -220,15 +277,16 @@ history, and holds none of your data.
 
 | Piece | State |
 |---|---|
-| The relay | **Live and tested.** Linking, message passing, rejections and disconnects all verified against the deployed server |
+| The relay | **Live and tested.** Linking, message passing, rejections, disconnects and font files all verified against the deployed server |
 | The app side | **Built and tested** |
-| The Photoshop plugin | **Written, but has never been run** |
-| A real file syncing end to end | **Has never happened** |
+| The Photoshop plugin | **Loads and connects in real Photoshop.** Its logic runs in a simulated Photoshop in the tests |
+| Edits syncing end to end | **Not yet confirmed in real Photoshop** |
+| Fonts syncing end to end | **Built and tested, not yet run in real Photoshop** |
 
-The plugin is the missing piece. It's written and its logic is tested, but it
-has never actually been loaded into Photoshop. The most likely thing to be
-wrong is how it reads *which layer* a change belongs to — and it is built to
-send **nothing** rather than a guess when it isn't sure.
+What's left is a real editing session. The most likely thing to be wrong is
+how the plugin reads *which layer* a change belongs to, and how Photoshop
+reports the folder you choose for fonts — and at every such point it is built
+to send **nothing** rather than a guess when it isn't sure.
 
 So if something is wrong there, the symptom will be **changes not arriving** —
 not your artwork being damaged. That was a deliberate choice at every uncertain
