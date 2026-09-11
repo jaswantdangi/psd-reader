@@ -53,6 +53,12 @@ const PROTOCOL_ERRORS = {
 const PAIR_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const PAIR_CODE_LENGTH = 6;
 
+/** The largest font file sync sends. A large CJK face is 10–20 MB. */
+const FONT_MAX_BYTES = 32 * 1024 * 1024;
+
+/** Raw bytes per `font-chunk` -- about 0.7 MB once base64'd, far under every frame cap on the way. */
+const FONT_CHUNK_BYTES = 512 * 1024;
+
 const ROLES = ['plugin', 'app'];
 
 const fail = (code, message) => ({ ok: false, error: { code, message } });
@@ -411,4 +417,4 @@ function translateEvents(events, mapping, options = {}) {
   return { commands, refused, needsPixels };
 }
 
-module.exports = { MESSAGE_TYPES, PROTOCOL_ERRORS, PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH, CHANGE_KINDS, UNMAPPABLE_CHANGES, errorFrame, classifyChange, validateMessage, parseMessage, translateEvent, translateEvents };
+module.exports = { MESSAGE_TYPES, PROTOCOL_ERRORS, PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH, FONT_MAX_BYTES, FONT_CHUNK_BYTES, CHANGE_KINDS, UNMAPPABLE_CHANGES, errorFrame, classifyChange, validateMessage, parseMessage, translateEvent, translateEvents };

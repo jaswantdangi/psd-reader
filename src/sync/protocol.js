@@ -48,6 +48,12 @@ export const PROTOCOL_ERRORS = {
 export const PAIR_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 export const PAIR_CODE_LENGTH = 6;
 
+/** The largest font file sync sends. A large CJK face is 10–20 MB. */
+export const FONT_MAX_BYTES = 32 * 1024 * 1024;
+
+/** Raw bytes per `font-chunk` -- about 0.7 MB once base64'd, far under every frame cap on the way. */
+export const FONT_CHUNK_BYTES = 512 * 1024;
+
 const ROLES = ['plugin', 'app'];
 
 const fail = (code, message) => ({ ok: false, error: { code, message } });

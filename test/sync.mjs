@@ -829,7 +829,7 @@ test('the vendored modules are CommonJS and actually load', () => {
   //
   // So `require()` them here for real. A regex-built module that does not load
   // is worth nothing, and this is the only place that can find out cheaply.
-  for (const name of ['protocol.js', 'identity.js', 'photoshop.js']) {
+  for (const name of ['protocol.js', 'identity.js', 'photoshop.js', 'font-file.js']) {
     const text = fs.readFileSync(`plugin/vendor/${name}`, 'utf8');
     assert.ok(text.startsWith('// GENERATED'), `plugin/vendor/${name} lost its generated banner`);
     assert.equal(/^import\s/m.test(text), false, `plugin/vendor/${name} still contains an ESM import`);
@@ -847,6 +847,7 @@ test('the vendored modules export exactly what src/sync exports', () => {
     ['protocol.js', import('../src/sync/protocol.js')],
     ['identity.js', import('../src/sync/identity.js')],
     ['photoshop.js', import('../src/sync/photoshop.js')],
+    ['font-file.js', import('../src/sync/font-file.js')],
   ];
   return Promise.all(pairs.map(async ([name, loading]) => {
     const esm = await loading;

@@ -36,7 +36,7 @@ import path from 'node:path';
  * `photoshop.js` requires `./protocol.js`, which requires `./identity.js`, so
  * the relative specifiers keep resolving once all three sit together.
  */
-const MODULES = ['protocol.js', 'identity.js', 'photoshop.js'];
+const MODULES = ['protocol.js', 'identity.js', 'photoshop.js', 'font-file.js'];
 
 const from = path.join(process.cwd(), 'src', 'sync');
 const to = path.join(process.cwd(), 'plugin', 'vendor');
