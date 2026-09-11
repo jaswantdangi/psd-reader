@@ -42,6 +42,7 @@
     "network": {
       "domains": "all"
     },
-    "clipboard": "readAndWrite"
+    "clipboard": "readAndWrite",
+    "localFileSystem": "request"
   }
 }

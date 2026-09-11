@@ -28,6 +28,7 @@
         "https://psd-sync-relay.jaswantdangi00.workers.dev"
       ]
     },
-    "clipboard": "readAndWrite"
+    "clipboard": "readAndWrite",
+    "localFileSystem": "request"
   }
 }

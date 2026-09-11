@@ -159,6 +159,27 @@
       </div>
     </div>
 
+    <!--
+      Fonts. Photoshop's API lists fonts but never says where their files are,
+      so the user points the plugin at the folders once and the plugin reads
+      each file's own name. The app asks for the fonts it is missing; they are
+      sent from here.
+    -->
+    <div class="section">
+      <span class="count">Fonts folders</span>
+      <ul id="fontfolders">
+        <li class="empty">No folder chosen — fonts cannot be sent to the app.</li>
+      </ul>
+      <div class="row" style="margin-top: 6px">
+        <button id="addfolder">Choose fonts folder…</button>
+      </div>
+      <div class="hint">
+        Pick C:\Windows\Fonts, and your own fonts folder if you install fonts just for
+        yourself (%LOCALAPPDATA%\Microsoft\Windows\Fonts). The app asks for the fonts it
+        is missing and they are sent from here. Adobe Fonts activations cannot be sent.
+      </div>
+    </div>
+
     <div class="section">
       <div class="row">
         <button id="diagnose">Run diagnostics</button>

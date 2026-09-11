@@ -101,13 +101,16 @@ function loadHost() {
   app = photoshop.app;
   action = photoshop.action;
   try { uxpVersion = require('uxp').versions.uxp; } catch { /* older builds */ }
+  // Font folders need it; everything else works without it.
+  try { storage = require('uxp').storage || null; } catch { storage = null; }
   if (!app) throw new Error("require('photoshop').app is undefined");
   if (!action) throw new Error("require('photoshop').action is undefined");
 }
 
 // --------------------------------------------------------- shared modules
 
-const { PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH } = require('./vendor/protocol.js');
+const { PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH, FONT_MAX_BYTES } = require('./vendor/protocol.js');
+const { fontNamesIn, candidateOrder, chunkFont } = require('./vendor/font-file.js');
 const { treeFrameFor, changeForNotification, coalesceEvents, layerTargetsFrom } = require('./vendor/photoshop.js');
 
 const PLUGIN_VERSION = '0.2.0';
@@ -555,6 +558,192 @@ function payloadUnreadable(event, change, descriptor) {
 
 // ------------------------------------------------------------- lifecycle
 
+// ------------------------------------------------------------------ fonts
+
+/**
+ * Font files, found by what they ARE, sent when the app asks.
+ *
+ * Photoshop lists its fonts but never says where their files are, so the
+ * plugin opens files in folders the user chose and reads each one's own
+ * PostScript name (`fontNamesIn`) -- the string the PSD stores. What it
+ * learns is kept in `fontIndex`, so a file is opened once, not once per
+ * request. The index is only a hint: a hit is re-read and its name
+ * re-checked before it is sent, so a stale entry costs a read and never
+ * sends the wrong font.
+ */
+const FOLDERS_KEY = 'psdsync.fontFolders';
+const INDEX_KEY = 'psdsync.fontIndex';
+const FONT_FILE = /\.(ttf|otf|ttc)$/i;
+
+/** require('uxp').storage, set in loadHost. Null on a build without it. */
+let storage = null;
+/** { token, label, folder } — `folder` is null when the token no longer resolves. */
+let fontFolders = [];
+/** "label|fileName" -> the PostScript names inside that file. */
+let fontIndex = {};
+/** Requests are served one at a time; a request arriving mid-scan waits its turn. */
+let fontQueue = Promise.resolve();
+
+function readJson(key, fallback) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+}
+function writeJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { warn(`could not save ${key}: ${e.message}`); }
+}
+const saveFolders = () => writeJson(FOLDERS_KEY, fontFolders.map((f) => ({ token: f.token, label: f.label })));
+
+/**
+ * The folders chosen in an earlier session, through their persistent tokens.
+ * A token that no longer resolves -- the folder moved, or permission changed
+ * -- is kept and SHOWN, never dropped silently, so the user knows to choose
+ * it again rather than wondering why fonts stopped arriving.
+ */
+async function restoreFontFolders() {
+  fontIndex = readJson(INDEX_KEY, {});
+  fontFolders = [];
+  for (const saved of readJson(FOLDERS_KEY, [])) {
+    let folder = null;
+    try { folder = await storage.localFileSystem.getEntryForPersistentToken(saved.token); }
+    catch (e) { warn(`fonts folder "${saved.label}" is no longer available: ${e && e.message ? e.message : e}`); }
+    fontFolders.push({ token: saved.token, label: saved.label, folder });
+  }
+  if (fontFolders.length) info(`fonts folders: ${fontFolders.map((f) => f.label).join(', ')}`);
+  renderFontFolders();
+}
+
+async function addFontFolder() {
+  if (!storage) { fail("no require('uxp').storage — a folder cannot be chosen on this build"); return; }
+  const folder = await storage.localFileSystem.getFolder();
+  if (!folder) { info('no folder chosen'); return; }
+  const label = folder.nativePath || folder.name;
+  const token = await storage.localFileSystem.createPersistentToken(folder);
+  fontFolders = fontFolders.filter((f) => f.label !== label);
+  fontFolders.push({ token, label, folder });
+  saveFolders();
+  good(`fonts folder added: ${label}`);
+  renderFontFolders();
+}
+
+function removeFontFolder(label) {
+  fontFolders = fontFolders.filter((f) => f.label !== label);
+  saveFolders();
+  info(`fonts folder removed: ${label}`);
+  renderFontFolders();
+}
+
+function renderFontFolders() {
+  if (!ui.fontfolders) return;
+  clearChildren(ui.fontfolders);
+  if (!fontFolders.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = 'No folder chosen — fonts cannot be sent to the app.';
+    ui.fontfolders.appendChild(li);
+    return;
+  }
+  fontFolders.forEach((f) => {
+    const li = document.createElement('li');
+    const what = document.createElement('span');
+    if (!f.folder) what.className = 'what';
+    what.textContent = f.folder ? f.label : `${f.label} — no longer available, choose it again`;
+    li.appendChild(what);
+    const remove = document.createElement('button');
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', () => guard('remove fonts folder', () => removeFontFolder(f.label)));
+    li.appendChild(remove);
+    ui.fontfolders.appendChild(li);
+  });
+}
+
+/**
+ * name -> {bytes, fileName} | {reason, detail}, reading as few files as it can.
+ *
+ * Files the index says hold a wanted name are read first; files it already
+ * knows hold nothing wanted are skipped; everything else goes in
+ * `candidateOrder`, and the scan stops as soon as every name is answered.
+ * The first scan of a large folder is the slow part -- `font lookup took`
+ * in the log is the number to read off a real run.
+ */
+async function findFonts(names, folders) {
+  const found = new Map();
+  const remaining = new Set(names);
+  for (const f of folders) {
+    if (!remaining.size) break;
+    let entries = [];
+    try { entries = await f.folder.getEntries(); }
+    catch (e) { warn(`could not list ${f.label}: ${e && e.message ? e.message : e}`); continue; }
+    const files = entries.filter((e) => e.isFile && FONT_FILE.test(e.name));
+    const byName = new Map(files.map((e) => [e.name, e]));
+    const known = [];
+    const unknown = [];
+    for (const e of files) {
+      const held = fontIndex[`${f.label}|${e.name}`];
+      if (!held) unknown.push(e.name);
+      else if (held.some((n) => remaining.has(n))) known.push(e.name);
+    }
+    for (const fileName of known.concat(candidateOrder([...remaining], unknown))) {
+      if (!remaining.size) break;
+      const key = `${f.label}|${fileName}`;
+      let bytes;
+      try { bytes = await byName.get(fileName).read({ format: storage.formats.binary }); }
+      catch (e) {
+        (fontIndex[key] || []).filter((n) => remaining.has(n)).forEach((n) => {
+          remaining.delete(n);
+          found.set(n, { reason: 'unreadable', detail: `${fileName}: ${e && e.message ? e.message : e}` });
+        });
+        continue;
+      }
+      const names = fontNamesIn(bytes);
+      const held = !names || names.unsupported ? [] : names.collection ? names.fonts.map((x) => x.postscriptName) : [names.postscriptName];
+      fontIndex[key] = held;
+      for (const n of held) {
+        if (!remaining.has(n)) continue;
+        remaining.delete(n);
+        found.set(n, names.collection
+          ? { reason: 'collection', detail: `it is inside ${fileName}, a font collection, which cannot be sent yet` }
+          : { bytes, fileName });
+      }
+    }
+  }
+  writeJson(INDEX_KEY, fontIndex);
+  const where = `${folders.length} chosen folder${folders.length === 1 ? '' : 's'}`;
+  for (const n of remaining) {
+    found.set(n, { reason: 'not-found', detail: `not in the ${where}. An Adobe Fonts activation cannot be sent.` });
+  }
+  return found;
+}
+
+/** Answer one `font-request`: chunks for every font found, `font-missing` with a reason for the rest. */
+async function serveFonts(names) {
+  info(`the app asked for ${names.length} font${names.length === 1 ? '' : 's'}: ${names.join(', ')}`);
+  const usable = fontFolders.filter((f) => f.folder);
+  if (!usable.length) {
+    names.forEach((name) => send({ type: 'font-missing', name, reason: 'no-folder', detail: 'no fonts folder is chosen in the Photoshop plugin' }));
+    warn('no fonts folder chosen — click "Choose fonts folder…" so fonts can be sent');
+    return;
+  }
+  const started = Date.now();
+  const found = await findFonts(names, usable);
+  for (const name of names) {
+    const hit = found.get(name);
+    if (hit && hit.bytes) {
+      if (hit.bytes.byteLength > FONT_MAX_BYTES) {
+        send({ type: 'font-missing', name, reason: 'too-large', detail: `${hit.fileName} is ${Math.round(hit.bytes.byteLength / 1048576)} MB; the limit is 32 MB` });
+        warn(`${name}: ${hit.fileName} is over 32 MB — not sent`);
+        continue;
+      }
+      const frames = chunkFont(hit.bytes, { name, fileName: hit.fileName });
+      frames.forEach(send);
+      good(`sent ${name} from ${hit.fileName} (${Math.round(hit.bytes.byteLength / 1024)} KB, ${frames.length} chunk${frames.length === 1 ? '' : 's'})`);
+    } else {
+      const miss = hit || { reason: 'not-found', detail: '' };
+      send({ type: 'font-missing', name, reason: miss.reason, detail: miss.detail || '' });
+      warn(`${name}: ${miss.reason}${miss.detail ? ' — ' + miss.detail : ''}`);
+    }
+  }
+  info(`font lookup took ${Date.now() - started} ms`);
+}
+
 /** Set once the first notification of any kind arrives. */
 let heardAnything = false;
 
@@ -642,6 +831,15 @@ function onFrame(frame) {
     return;
   }
   if (frame.type === 'pair') { info('relay issued a code to the app side (not us)'); return; }
+  if (frame.type === 'font-request') {
+    // Only a paired app can ask, and requests are served one at a time -- a
+    // second arriving mid-scan waits rather than scanning the folders twice.
+    if (!paired) return;
+    const names = Array.isArray(frame.names) ? frame.names : [];
+    fontQueue = fontQueue.then(() => serveFonts(names))
+      .catch((e) => fail('serving fonts threw:', e && e.message ? e.message : String(e)));
+    return;
+  }
   if (frame.type === 'error') {
     if (frame.code === 'peer-gone') {
       // NOT a refusal of this plugin. It is the relay reporting that the OTHER
@@ -1004,6 +1202,7 @@ function boot() {
     connect: el('connect'), disconnect: el('disconnect'),
     sent: el('sent'), unsynced: el('unsynced'),
     diagnose: el('diagnose'), copylog: el('copylog'), clearlog: el('clearlog'),
+    fontfolders: el('fontfolders'), addfolder: el('addfolder'),
   };
 
   const missing = Object.keys(ui).filter((k) => !ui[k]);
@@ -1041,6 +1240,16 @@ function boot() {
       if (!copied) { try { navigator.clipboard.writeText(text); copied = true; } catch { /* neither */ } }
       info(copied ? 'log copied to the clipboard' : 'clipboard unavailable — select the log text instead');
     }));
+  }
+
+  if (storage) {
+    restoreFontFolders().catch((e) => warn('restoring fonts folders failed:', e && e.message ? e.message : String(e)));
+  } else {
+    warn("no require('uxp').storage on this build — fonts cannot be sent to the app");
+  }
+  if (ui.addfolder) {
+    ui.addfolder.addEventListener('click', () => addFontFolder()
+      .catch((e) => fail('choosing a folder failed:', e && e.message ? e.message : String(e))));
   }
 
   renderSkipped();

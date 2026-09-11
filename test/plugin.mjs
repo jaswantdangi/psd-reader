@@ -25,15 +25,16 @@ import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import { matchLayers } from '../src/sync/identity.js';
 import { translateEvent } from '../src/sync/protocol.js';
+import { assembleFont } from '../src/sync/font-file.js';
+import { makeFont, makeCollection } from './make-font.mjs';
 
 const requireFromPlugin = createRequire(path.resolve('plugin/main.js'));
 const SOURCE = fs.readFileSync('plugin/main.js', 'utf8');
 
 let passed = 0;
-const test = (name, fn) => {
-  try { fn(); console.log('  ok   ' + name); passed++; }
-  catch (e) { console.log('  FAIL ' + name + '\n       ' + e.message); process.exitCode = 1; }
-};
+/** Queued and run in order at the end, so a test can await the plugin's async work. */
+const pending = [];
+const test = (name, fn) => pending.push([name, fn]);
 
 // ------------------------------------------------------------ the fake host
 
@@ -63,8 +64,14 @@ const layer = (id, name, [left, top, right, bottom], extra = {}) => ({
 
 const ORDINAL = { _ref: 'layer', _enum: 'ordinal', _value: 'targetEnum' };
 
-/** Boot the plugin against a document. Returns handles to drive it. */
-function boot() {
+/**
+ * Boot the plugin against a document. Returns handles to drive it.
+ *
+ * `store` is localStorage and `tokens` the persistent-token table; pass the
+ * same two to a second `boot` to simulate Photoshop restarting. `picks` are
+ * the folders the folder picker hands back, in order.
+ */
+function boot({ store = new Map(), tokens = new Map(), picks = [] } = {}) {
   const top = layer(1, 'Top', [10, 10, 30, 30]);
   const nested = layer(4, 'Nested', [50, 50, 70, 80]);
   const group = { id: 3, name: 'Group', kind: 'group', layers: [nested], bounds: nested.bounds, boundsNoEffects: nested.boundsNoEffects };
@@ -77,6 +84,15 @@ function boot() {
     app: { activeDocument: doc, version: 'test' },
     action: {
       addNotificationListener(events, cb) { notify = cb; return { remove() { notify = null; } }; },
+    },
+  };
+
+  const storage = {
+    formats: { binary: 'binary' },
+    localFileSystem: {
+      getFolder: async () => picks.shift() ?? null,
+      createPersistentToken: async (folder) => { const t = `token-${tokens.size + 1}`; tokens.set(t, folder); return t; },
+      getEntryForPersistentToken: async (t) => { if (!tokens.has(t)) throw new Error('token no longer valid'); return tokens.get(t); },
     },
   };
 
@@ -105,12 +121,17 @@ function boot() {
     window: { addEventListener() {} },
     console: { log() {} },
     navigator: {},
+    localStorage: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    },
     WebSocket: FakeSocket,
     setTimeout: (fn) => { const id = nextTimer++; timers.set(id, fn); return id; },
     clearTimeout: (id) => { timers.delete(id); },
     require: (spec) => {
       if (spec === 'photoshop') return photoshop;
-      if (spec === 'uxp') return { versions: { uxp: 'test' } };
+      if (spec === 'uxp') return { versions: { uxp: 'test' }, storage };
       return requireFromPlugin(spec);
     },
   });
@@ -118,6 +139,12 @@ function boot() {
 
   const env = {
     doc, top, nested, bottom, el, sockets,
+    click: (id) => el(id).click(),
+    /** Every piece of text in the fonts-folders list, nested spans included. */
+    folders: () => {
+      const text = (n) => [n.textContent || '', ...(n.childNodes || []).map(text)].join(' ');
+      return el('fontfolders').childNodes.map(text).join('\n');
+    },
     log: () => el('logbox').childNodes.map((n) => n.textContent).join('\n'),
     /** Deliver one notification the way Photoshop does, then let the burst flush. */
     notify(event, descriptor) {
@@ -285,5 +312,126 @@ test('what the plugin sends is what the APP accepts: its tree matches and its ev
     { ok: true, command: { type: 'set', id: 101, to: { name: 'Renamed' } } },
   ]);
 });
+
+// ---------------------------------------------------------------- fonts
+
+/** A folder as UXP's file system hands one back, recording which files were read. */
+function fakeFolder(label, files) {
+  const reads = [];
+  const entries = Object.entries(files).map(([name, bytes]) => ({
+    name,
+    isFile: true,
+    read: async () => { reads.push(name); return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); },
+  }));
+  return { name: label, nativePath: label, reads, getEntries: async () => entries };
+}
+
+/** Let the plugin's async font work run to completion. */
+const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
+
+const FONTS = () => fakeFolder('C:\\Windows\\Fonts', {
+  'arial.ttf': makeFont('ArialMT'),
+  'times.ttf': makeFont('TimesNewRomanPSMT'),
+  'MyriadPro-Regular.otf': makeFont('MyriadPro-Regular', { signature: 'OTTO', padding: 700_000 }),
+  'cambria.ttc': makeCollection(['Cambria', 'CambriaMath']),
+});
+
+test('a chosen fonts folder is remembered across a restart', async () => {
+  const store = new Map();
+  const tokens = new Map();
+  const env = boot({ store, tokens, picks: [FONTS()] });
+  env.click('addfolder');
+  await settle();
+  assert.match(env.folders(), /C:\\Windows\\Fonts/);
+
+  const again = boot({ store, tokens });
+  await settle();
+  assert.match(again.folders(), /C:\\Windows\\Fonts/);
+  assert.doesNotMatch(again.folders(), /no longer available/);
+});
+
+test('a requested font is found by its name table and arrives byte for byte', async () => {
+  const folder = FONTS();
+  const env = boot({ picks: [folder] });
+  env.click('addfolder');
+  await settle();
+  const ws = env.pair();
+  ws.receive({ type: 'font-request', names: ['MyriadPro-Regular'] });
+  await settle();
+
+  const chunks = ws.sent.filter((f) => f.type === 'font-chunk');
+  assert.equal(chunks.length, 2, `a 700 KB file is two chunks. Log:\n${env.log()}`);
+  const result = assembleFont(chunks);
+  assert.equal(result.ok, true, result.reason);
+  assert.deepEqual(result.bytes, makeFont('MyriadPro-Regular', { signature: 'OTTO', padding: 700_000 }));
+  assert.equal(folder.reads[0], 'MyriadPro-Regular.otf', 'the likely-named file is opened first');
+});
+
+test('no folder chosen answers every name with no-folder', async () => {
+  const env = boot();
+  const ws = env.pair();
+  ws.receive({ type: 'font-request', names: ['A', 'B'] });
+  await settle();
+  assert.deepEqual(
+    ws.sent.filter((f) => f.type === 'font-missing').map((f) => [f.name, f.reason]),
+    [['A', 'no-folder'], ['B', 'no-folder']],
+  );
+});
+
+test('a name in no file is not-found, and asking again reads nothing new', async () => {
+  const folder = FONTS();
+  const env = boot({ picks: [folder] });
+  env.click('addfolder');
+  await settle();
+  const ws = env.pair();
+  ws.receive({ type: 'font-request', names: ['AdobeClean-Regular'] });
+  await settle();
+  const missing = ws.sent.find((f) => f.type === 'font-missing');
+  assert.equal(missing.reason, 'not-found');
+  assert.match(missing.detail, /Adobe Fonts/);
+
+  const before = folder.reads.length;
+  ws.receive({ type: 'font-request', names: ['AdobeClean-Regular'] });
+  await settle();
+  assert.equal(folder.reads.length, before, 'every file is already indexed, so nothing is re-read');
+});
+
+test('a font inside a .ttc is reported as a collection, not as missing', async () => {
+  const env = boot({ picks: [FONTS()] });
+  env.click('addfolder');
+  await settle();
+  const ws = env.pair();
+  ws.receive({ type: 'font-request', names: ['CambriaMath'] });
+  await settle();
+  const missing = ws.sent.find((f) => f.type === 'font-missing');
+  assert.equal(missing.reason, 'collection');
+  assert.match(missing.detail, /cambria\.ttc/);
+});
+
+test('a folder whose token no longer resolves is shown as such, and treated as absent', async () => {
+  const store = new Map([['psdsync.fontFolders', JSON.stringify([{ token: 'gone', label: 'D:\\Fonts' }])]]);
+  const env = boot({ store });
+  await settle();
+  assert.match(env.folders(), /no longer available/);
+  const ws = env.pair();
+  ws.receive({ type: 'font-request', names: ['A'] });
+  await settle();
+  assert.equal(ws.sent.find((f) => f.type === 'font-missing').reason, 'no-folder');
+});
+
+test('a font request before pairing is ignored', async () => {
+  const env = boot({ picks: [FONTS()] });
+  env.click('addfolder');
+  await settle();
+  const ws = env.connect();
+  ws.receive({ type: 'font-request', names: ['ArialMT'] });
+  await settle();
+  assert.equal(ws.sent.filter((f) => f.type.startsWith('font-')).length, 0);
+});
+
+for (const [name, fn] of pending) {
+  try { await fn(); console.log('  ok   ' + name); passed++; }
+  catch (e) { console.log('  FAIL ' + name + '\n       ' + e.message); process.exitCode = 1; }
+}
 
 console.log(`\n${passed} passed`);

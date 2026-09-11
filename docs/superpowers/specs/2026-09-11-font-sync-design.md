@@ -111,9 +111,10 @@ Added to `MODULES` in `scripts/vendor-plugin.mjs`. It imports nothing outside
   folders with a remove control. On boot, tokens are restored through
   `getEntryForPersistentToken`; a token that no longer resolves is shown as
   "folder no longer available — choose it again", never dropped silently.
-- **Index**: `postscriptName → {folder, fileName, size, modified}`, stored in the
-  plugin data folder. An entry is trusted only while the file's size and
-  modified date are unchanged.
+- **Index**: `"folder|fileName" → PostScript names inside it`, in the plugin's
+  `localStorage`. It is a hint only: a hit is re-read and its name re-checked
+  before sending, so no size/date metadata is needed (and none is relied on,
+  since `entry.getMetadata()`'s shape in UXP is unverified).
 - **On `font-request`**: for each name, index lookup; on a miss, scan the chosen
   folders in `candidateOrder`, reading each file and indexing everything it
   learns, and stop as soon as every requested name is found. Requests are served
