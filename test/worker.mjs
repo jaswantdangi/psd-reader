@@ -25,6 +25,9 @@ import { originAllowed } from '../server/net.js';
 import { PAIR_CODE_ALPHABET, PAIR_CODE_LENGTH } from '../src/sync/protocol.js';
 
 let passed = 0;
+import { chunkFont } from '../src/sync/font-file.js';
+import { makeFont } from './make-font.mjs';
+
 const pending = [];
 const test = (name, fn) => pending.push([name, fn]);
 
@@ -324,6 +327,38 @@ test('events travel Photoshop -> app only', async () => {
   await hub.webSocketMessage(app, JSON.stringify({ type: 'event', change: 'move', layerID: 7, props: { x: 1, y: 2 } }));
   assert.equal(app.last().code, 'wrong-direction');
   assert.equal(plugin.sent.length, 0);
+});
+
+test('a font request travels app -> Photoshop only', async () => {
+  const { hub, ctx } = makeHub();
+  const { app, plugin } = await pairedPair(hub, ctx);
+  await hub.webSocketMessage(app, JSON.stringify({ type: 'font-request', names: ['MyriadPro-Regular'] }));
+  assert.deepEqual(plugin.last(), { type: 'font-request', names: ['MyriadPro-Regular'] });
+  plugin.drained();
+  await hub.webSocketMessage(plugin, JSON.stringify({ type: 'font-request', names: ['X'] }));
+  assert.equal(plugin.last().code, 'wrong-direction');
+  assert.equal(app.sent.length, 0, 'nothing reached the app');
+});
+
+test('font files and font reports travel Photoshop -> app only', async () => {
+  const { hub, ctx } = makeHub();
+  const { app, plugin } = await pairedPair(hub, ctx);
+  const [chunk] = chunkFont(makeFont('MyriadPro-Regular'), { name: 'MyriadPro-Regular', fileName: 'MyriadPro-Regular.otf' });
+  await hub.webSocketMessage(plugin, JSON.stringify(chunk));
+  assert.deepEqual(app.last(), chunk);
+  await hub.webSocketMessage(plugin, JSON.stringify({ type: 'font-missing', name: 'X', reason: 'not-found' }));
+  assert.deepEqual(app.last(), { type: 'font-missing', name: 'X', reason: 'not-found', detail: '' });
+  app.drained();
+  await hub.webSocketMessage(app, JSON.stringify(chunk));
+  assert.equal(app.last().code, 'wrong-direction');
+  assert.equal(plugin.sent.length, 0);
+});
+
+test('a font request before pairing is refused', async () => {
+  const { hub, ctx } = makeHub();
+  const { app } = await appWithCode(hub, ctx);
+  await hub.webSocketMessage(app, JSON.stringify({ type: 'font-request', names: ['A'] }));
+  assert.equal(app.last().code, 'not-paired');
 });
 
 test('an error frame is relayed both ways, so a peer can report what it could not apply', async () => {

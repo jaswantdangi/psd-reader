@@ -27,6 +27,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const serverDir = path.join(here, '..', 'server');
 
 let passed = 0;
+import { chunkFont } from '../src/sync/font-file.js';
+import { makeFont } from './make-font.mjs';
+
 const pending = [];
 const test = (name, fn) => pending.push([name, fn]);
 
@@ -580,6 +583,27 @@ test('events travel Photoshop -> app only', () => withRelay({}, async (ctx) => {
   const frame = await app.next();
   assert.equal(frame.type, 'error');
   assert.equal(frame.code, 'wrong-direction', 'Photoshop is authoritative; the app does not push events back');
+  await sleep(50);
+  assert.equal(plugin.seen(), 0);
+}));
+
+test('a font request travels app -> Photoshop only', () => withRelay({}, async (ctx) => {
+  const { app, plugin } = await pairedPair(ctx);
+  app.send({ type: 'font-request', names: ['MyriadPro-Regular'] });
+  assert.deepEqual(await plugin.next(), { type: 'font-request', names: ['MyriadPro-Regular'] });
+  plugin.send({ type: 'font-request', names: ['X'] });
+  assert.equal((await plugin.next()).code, 'wrong-direction');
+  await sleep(50);
+  assert.equal(app.seen(), 0);
+}));
+
+test('font files travel Photoshop -> app only', () => withRelay({}, async (ctx) => {
+  const { app, plugin } = await pairedPair(ctx);
+  const [chunk] = chunkFont(makeFont('MyriadPro-Regular'), { name: 'MyriadPro-Regular', fileName: 'MyriadPro-Regular.otf' });
+  plugin.send(chunk);
+  assert.deepEqual(await app.next(), chunk);
+  app.send(chunk);
+  assert.equal((await app.next()).code, 'wrong-direction');
   await sleep(50);
   assert.equal(plugin.seen(), 0);
 }));

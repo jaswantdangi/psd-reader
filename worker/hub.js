@@ -46,7 +46,7 @@
  * reading entirely is Cloudflare's problem here rather than ours.
  */
 
-import { parseMessage, errorFrame } from '../src/sync/protocol.js';
+import { parseMessage, errorFrame, ONE_WAY_FRAMES } from '../src/sync/protocol.js';
 import { createPairingDesk } from '../server/pairing.js';
 import { originAllowed } from '../server/net.js';
 import { resolveWorkerConfig } from './config.js';
@@ -255,7 +255,10 @@ export class RelayHub {
       case 'hello': return this.onHello(ws, state, frame);
       case 'pair': return this.onPair(ws, state, frame);
       case 'tree':
-      case 'event': return this.onUpstream(ws, state, frame);
+      case 'event':
+      case 'font-chunk':
+      case 'font-missing':
+      case 'font-request': return this.onOneWay(ws, state, frame);
       case 'error': return this.onErrorFrame(ws, state, frame);
       default:
         return this.refuse(ws, 'unexpected-frame', `a client does not send "${frame.type}"`);
@@ -306,18 +309,17 @@ export class RelayHub {
     this.send(ws, { type: 'paired', sessionId, peer: { role: ownerState.role, version: ownerState.version } });
   }
 
-  /** `tree` and `event`: Photoshop -> app only, and both spend the byte budget. */
-  onUpstream(ws, state, frame) {
-    if (!state.sessionId) {
-      return this.refuse(ws, 'not-paired', frame.type === 'tree'
-        ? 'pair before sending the layer tree'
-        : 'pair before sending events');
-    }
-    if (state.role !== 'plugin') {
-      return this.refuse(ws, 'wrong-direction', frame.type === 'tree'
-        ? 'the layer tree travels Photoshop -> app only'
-        : 'events travel Photoshop -> app only');
-    }
+  /**
+   * Frames that travel one way only: the tree, events and font files from
+   * Photoshop, font requests from the app. Which way, and what to say
+   * otherwise, is `ONE_WAY_FRAMES` in protocol.js -- shared with the Node
+   * relay, so the two cannot disagree. Everything routed spends the sender's
+   * byte budget.
+   */
+  onOneWay(ws, state, frame) {
+    const rule = ONE_WAY_FRAMES[frame.type];
+    if (!state.sessionId) return this.refuse(ws, 'not-paired', rule.notPaired);
+    if (state.role !== rule.from) return this.refuse(ws, 'wrong-direction', rule.wrongWay);
     this.route(ws, state, frame);
   }
 

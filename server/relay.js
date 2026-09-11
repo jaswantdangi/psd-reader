@@ -34,7 +34,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import https from 'node:https';
-import { parseMessage, errorFrame } from '../src/sync/protocol.js';
+import { parseMessage, errorFrame, ONE_WAY_FRAMES } from '../src/sync/protocol.js';
 import { resolveConfig } from './config.js';
 import { createPairingDesk } from './pairing.js';
 import { loadTlsMaterial } from './tls.js';
@@ -248,21 +248,17 @@ export function createRelay(options = {}) {
   }
 
   /**
-   * The layer tree travels the same direction as events, for the same reason:
-   * Photoshop is authoritative, and an app-side tree would be an assertion
-   * about a document it does not own.
+   * Frames that travel one way only. The layer tree and events go Photoshop
+   * -> app because Photoshop is authoritative: an app-side tree would assert
+   * things about a document it does not own, and app events pushed back
+   * would need conflict resolution neither side has. Font files follow the
+   * same path; only a font REQUEST goes the other way. `ONE_WAY_FRAMES` is
+   * shared with the Worker, so the two relays cannot disagree.
    */
-  function onTree(conn, frame) {
-    if (!conn.session) return refuse(conn, 'not-paired', 'pair before sending the layer tree');
-    if (conn.role !== 'plugin') return refuse(conn, 'wrong-direction', 'the layer tree travels Photoshop -> app only');
-    forward(conn, frame);
-  }
-
-  function onEvent(conn, frame) {
-    if (!conn.session) return refuse(conn, 'not-paired', 'pair before sending events');
-    // Rescoped: Photoshop is authoritative and events travel one way. An app
-    // pushing events back would need conflict resolution that neither side has.
-    if (conn.role !== 'plugin') return refuse(conn, 'wrong-direction', 'events travel Photoshop -> app only');
+  function onOneWay(conn, frame) {
+    const rule = ONE_WAY_FRAMES[frame.type];
+    if (!conn.session) return refuse(conn, 'not-paired', rule.notPaired);
+    if (conn.role !== rule.from) return refuse(conn, 'wrong-direction', rule.wrongWay);
     forward(conn, frame);
   }
 
@@ -293,8 +289,11 @@ export function createRelay(options = {}) {
           return;
         }
         return onPair(conn, frame);
-      case 'tree': return onTree(conn, frame);
-      case 'event': return onEvent(conn, frame);
+      case 'tree':
+      case 'event':
+      case 'font-chunk':
+      case 'font-missing':
+      case 'font-request': return onOneWay(conn, frame);
       case 'error': return onError(conn, frame);
       default:
         return refuse(conn, 'unexpected-frame', `a client does not send "${frame.type}"`);
