@@ -157,3 +157,6 @@ scripts/          fixture downloader
 ## Licence
 
 The test fixtures are downloaded from [ag-psd](https://github.com/Agamnentzar/ag-psd) (MIT) and are not redistributed here.
+
+## License
+ISC — see [LICENSE](LICENSE).
